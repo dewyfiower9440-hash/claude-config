@@ -428,6 +428,31 @@ call(
 )
 check("cd into the project then gate -> allowed", decision(call("stop", s)), None)
 
+LATE = ROOT.parent / "_tmp_disc_late"
+(LATE / "src").mkdir(parents=True, exist_ok=True)
+s = fresh(f"{LATE}/src/m.py")  # edited while the project has no policy yet
+(LATE / "CLAUDE.md").write_text(
+    "## Verification\n- gate: `uv run pytest -q --cov`\n- ci: none\n", encoding="utf-8"
+)
+call(
+    "post",
+    s,
+    tool_name="Bash",
+    tool_input={"command": "uv run pytest -q --cov"},
+    cwd=str(LATE),
+)
+check(
+    "policy declared after the edit is picked up -> allowed",
+    decision(call("stop", s)),
+    None,
+)
+check(
+    "edit is regrouped under the nearer new policy",
+    list(state_of(s)["dirty"]),
+    [str(LATE)],
+)
+shutil.rmtree(LATE, ignore_errors=True)
+
 s = fresh(f"{R}/src/m.py")
 call(
     "fail",

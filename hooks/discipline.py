@@ -274,16 +274,8 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
             if path not in state["turn_files"]:
                 state["turn_files"].append(path)
             if Path(path).suffix.lower() in CODE_EXT:
-                from verification import find_policy
-
                 state["last_code_edit"] = now
-                policy = find_policy(path)
-                state["dirty"][policy["root"]] = {
-                    "at": now,
-                    "gate": policy["gate"],
-                    "ci": policy["ci"],
-                    "validate": policy["validate"],
-                }
+                mark_dirty(state, path, now)
     elif tool in ("Bash", "PowerShell"):
         record_evidence(data, state, failed=False)
     elif tool in ("Agent", "Task"):
@@ -295,11 +287,47 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
         )
 
 
+MAX_DIRTY_FILES = 200
+
+
+def mark_dirty(state: dict[str, Any], path: str, at: float) -> None:
+    """Group an edited code file under its project's verification policy (nearest declaration)."""
+    from verification import find_policy
+
+    policy = find_policy(path)
+    entry = state["dirty"].setdefault(policy["root"], {"files": []})
+    entry.update(
+        {
+            "at": max(at, float(entry.get("at", 0))),
+            "gate": policy["gate"],
+            "ci": policy["ci"],
+            "validate": policy["validate"],
+        }
+    )
+    files = entry.setdefault("files", [])
+    if path not in files and len(files) < MAX_DIRTY_FILES:
+        files.append(path)
+
+
+def reresolve_dirty(state: dict[str, Any]) -> None:
+    """Policies can be declared or changed after an edit: regroup edited files by their current policy."""
+    old = state["dirty"]
+    state["dirty"] = {}
+    for entry in old.values():
+        files = entry.get("files") or []
+        if not files:
+            continue  # state written by an older hook version: nothing to regroup
+        for f in files:
+            mark_dirty(state, f, float(entry.get("at", 0)))
+
+
 def record_evidence(
     data: dict[str, Any], state: dict[str, Any], *, failed: bool
 ) -> None:
     """Attach what this shell command proves (if anything) to each project with unverified edits."""
     from verification import Policy, evaluate
+
+    reresolve_dirty(state)
 
     ti = data.get("tool_input", {}) or {}
     response = data.get("tool_response")
