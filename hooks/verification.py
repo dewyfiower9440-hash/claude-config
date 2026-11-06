@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from shellparse import Dialect, ParseError, SimpleCommand, parse, program_and_args
 
@@ -29,6 +29,8 @@ class Policy(TypedDict):
     gate: str | None
     ci: str  # "required" | "none" | "undeclared"
     validate: str | None
+    # ignored files (globs relative to root) whose changes still matter, e.g. a local config
+    watch: NotRequired[list[str]]
 
 
 class Evidence(TypedDict):
@@ -42,7 +44,9 @@ UNDECLARED: Policy = {"root": "", "gate": None, "ci": "undeclared", "validate": 
 SECTION = re.compile(
     r"^##\s+Verification\b[^\n]*\n(.*?)(?=^##\s|\Z)", re.MULTILINE | re.DOTALL
 )
-FIELD = re.compile(r"^\s*(?:[-*]\s+)?(gate|ci|validate)\s*:\s*(.+?)\s*$", re.IGNORECASE)
+FIELD = re.compile(
+    r"^\s*(?:[-*]\s+)?(gate|ci|validate|watch)\s*:\s*(.+?)\s*$", re.IGNORECASE
+)
 
 RUNNERS = {
     "pytest", "pyright", "mypy", "vitest", "jest", "mocha", "tsc", "eslint",
@@ -68,11 +72,17 @@ def parse_policy(text: str, root: str) -> Policy | None:
     ci = (
         ci_word if ci_word in ("required", "none") else "required"
     )  # unknown value: be strict
+    watch = [
+        g.strip("`")
+        for g in re.split(r"[,\s]+", fields.get("watch", ""))
+        if g.strip("`")
+    ]
     return {
         "root": root,
         "gate": fields.get("gate"),
         "ci": ci,
         "validate": fields.get("validate"),
+        "watch": watch,
     }
 
 

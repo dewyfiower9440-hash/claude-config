@@ -226,6 +226,14 @@ def emit_pre(decision: str, reason: str) -> None:
 def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
     tool = data.get("tool_name", "")
     ti = data.get("tool_input", {}) or {}
+    cwd = str(data.get("cwd") or os.getcwd())
+
+    # D-5: snapshot any repository this tool is about to touch, before it runs.
+    if tool in ("Bash", "PowerShell"):
+        for d in shell_targets(str(ti.get("command", "")), tool == "PowerShell", cwd):
+            track_repo(state, d)
+    elif ti.get("file_path") and not IGNORED_PATH.search(str(ti.get("file_path"))):
+        track_repo(state, str(ti.get("file_path")))
 
     if tool in ("Bash", "PowerShell"):
         tests = deleted_test_files(ti.get("command", ""))
@@ -549,13 +557,25 @@ def record_evidence(
     is_ps = data.get("tool_name") == "PowerShell"
     cwd = str(data.get("cwd") or os.getcwd())
     now = time.time()
+    from verification import find_policy
+
+    command = str(ti.get("command", ""))
+    targets = shell_targets(command, is_ps, cwd)
+    policies: dict[str, Policy] = {}
     for root, entry in state["dirty"].items():
-        policy: Policy = {
+        policies[root] = {
             "root": root,
             "gate": entry.get("gate"),
             "ci": entry.get("ci", "undeclared"),
             "validate": entry.get("validate"),
         }
+    # D-5: projects changed outside the Edit tool have no dirty entry; the directories this
+    # command ran in decide which project's evidence it can be.
+    for d in targets:
+        found = find_policy(os.path.join(d, "_"))
+        policies.setdefault(found["root"], found)
+    for root, policy in policies.items():
+        entry = state["dirty"].get(root, {})
         ev = evaluate(
             str(ti.get("command", "")),
             "powershell" if is_ps else "bash",
@@ -572,7 +592,10 @@ def record_evidence(
         ) >= float(entry.get("at", 0))
         if still_valid_pass and ev["outcome"] in ("partial", "unknown"):
             continue  # a later side run does not revoke a passed gate for unchanged code
-        state["evidence"][root] = {**ev, "at": now}
+        record: dict[str, Any] = {**ev, "at": now}
+        if ev["outcome"] == "passed":
+            record["digests"] = evidence_digests(state, root, targets[-1])
+        state["evidence"][root] = record
     record_ci_activity(str(ti.get("command", "")), is_ps, cwd, state, failed=failed)
 
 
@@ -627,6 +650,152 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
     state["turn_files"] = []
     # A new prompt never inherits the previous approval; only the same in-progress plan re-arms it.
     state["approval"] = rearm_approval(str(data.get("cwd") or os.getcwd()))
+    state["prompt_id"] = data.get("prompt_id")
+    track_repo(state, str(data.get("cwd") or os.getcwd()))
+    refresh_turn_baselines(state)
+
+
+# ---------------------------------------------------------------- D-5 content tracking
+# Every git repository the session touches gets a content map ({path: blob}) as baseline
+# when it is first seen (before the tool that touches it runs) and a per-turn baseline at
+# each prompt. Stop compares them with the current contents, so edits made by any tool
+# (Edit, sed, scripts) are seen, commits are not mistaken for edits, and verification
+# evidence is bound to the content hash it was produced on.
+MAX_DIR_CACHE = 200
+
+
+def _watch_globs(top: str) -> list[str]:
+    from verification import find_policy
+    from worktree import rel_prefix
+
+    policy = find_policy(os.path.join(top, "_"))
+    prefix = rel_prefix(top, policy["root"]) if policy["root"] else None
+    if prefix is None:
+        return []
+    return [f"{prefix}/{g}" if prefix else g for g in policy.get("watch", [])]
+
+
+def track_repo(state: dict[str, Any], path: str) -> str | None:
+    """Git toplevel containing `path`; a newly seen repository is snapshotted right away."""
+    import worktree
+
+    p = os.path.abspath(path)
+    repos = state.setdefault("repos", {})
+    # Resolve per directory with git, never by path prefix: a repository nested inside
+    # another repository's folder (ignored subrepo, submodule) has its own toplevel.
+    probe = p if os.path.isdir(p) else os.path.dirname(p)
+    dir_tops = state.setdefault("dir_tops", {})
+    if probe in dir_tops:
+        top = dir_tops[probe]
+    else:
+        top = worktree.toplevel(p)
+        if len(dir_tops) < MAX_DIR_CACHE:
+            dir_tops[probe] = top
+    if not top:
+        return None
+    if top not in repos:
+        snap = worktree.content_map(top, _watch_globs(top))
+        repos[top] = {"session": snap, "turn": snap}
+    return top
+
+
+def refresh_turn_baselines(state: dict[str, Any]) -> None:
+    import worktree
+
+    for top, base in state.get("repos", {}).items():
+        base["turn"] = worktree.content_map(top, _watch_globs(top))
+
+
+def shell_targets(command: str, is_ps: bool, cwd: str) -> list[str]:
+    """Directories a shell command works in, in order: the hook cwd, then every `cd` target."""
+    from shellparse import ParseError, parse, program_and_args
+    from verification import cwd_at
+
+    try:
+        cmds = [
+            c for c in parse(command, "powershell" if is_ps else "bash") if not c.nested
+        ]
+    except ParseError:
+        return [cwd]
+    dirs = [cwd]
+    for i, c in enumerate(cmds):
+        program, args = program_and_args(c)
+        if program in ("cd", "set-location", "sl", "pushd", "chdir") and args:
+            target = cwd_at(cmds, i + 1, cwd)
+            if target not in dirs:
+                dirs.append(target)
+    return dirs
+
+
+def refresh_content(state: dict[str, Any]) -> None:
+    """Stop-time comparison of current contents with the session/turn baselines."""
+    import worktree
+    from verification import find_policy
+
+    content: dict[str, Any] = {}
+    unknown: list[str] = []
+    turn_changes: set[str] = set()
+    visible: set[str] = set()
+    for top, base in state.get("repos", {}).items():
+        now = worktree.content_map(top, _watch_globs(top))
+        if now is None or base.get("session") is None:
+            unknown.append(top)
+            continue
+        visible |= {
+            os.path.normcase(os.path.join(top, p))
+            for p in set(now) | set(base["session"])
+        }
+        turn_changes |= {
+            os.path.join(top, p)
+            for p in worktree.changed(base.get("turn") or base["session"], now)
+        }
+        changed_roots: dict[str, Any] = {}
+        for p in worktree.changed(base["session"], now):
+            if worktree.relevant(p):
+                policy = find_policy(os.path.join(top, p))
+                changed_roots.setdefault(policy["root"], policy)
+        push = state.get("pushes", {}).get(top)
+        pushed_tree = worktree.tree_map(top, push["sha"]) if push else None
+        for root, policy in changed_roots.items():
+            prefix = (worktree.rel_prefix(top, root) or "") if root else ""
+            entry = content.setdefault(
+                root,
+                {
+                    "digests": {},
+                    "pushed": {},
+                    "gate": policy["gate"],
+                    "ci": policy["ci"],
+                },
+            )
+            entry["digests"][top] = worktree.digest(now, prefix)
+            entry["pushed"][top] = (
+                pushed_tree is not None
+                and worktree.digest(pushed_tree, prefix) == entry["digests"][top]
+            )
+    state["content"] = content
+    state["content_unknown"] = unknown
+    state["turn_changes"] = sorted(turn_changes)
+    # Edit-tracked roots whose files are all visible to git: content decides, not timestamps.
+    state["content_tracked_roots"] = [
+        root
+        for root, entry in state.get("dirty", {}).items()
+        if entry.get("files")
+        and all(os.path.normcase(os.path.abspath(f)) in visible for f in entry["files"])
+    ]
+
+
+def evidence_digests(state: dict[str, Any], root: str, cwd: str) -> dict[str, str]:
+    """Content hashes a passed check was run on (bound into the evidence)."""
+    import worktree
+
+    top = track_repo(state, root or cwd)
+    if not top:
+        return {}
+    snap = worktree.content_map(top, _watch_globs(top))
+    if snap is None:
+        return {}
+    prefix = (worktree.rel_prefix(top, root) or "") if root else ""
+    return {top: worktree.digest(snap, prefix)}
 
 
 REASON_UNVERIFIED = (
@@ -643,6 +812,22 @@ REASON_UNKNOWN = (
     "[discipline] 마지막 검증의 결과를 확인할 수 없습니다({why}). 종료 코드가 가려지면 실패해도 성공처럼 "
     "보입니다. 검증 명령을 단독으로(또는 &&로만 이어서) 포그라운드에서 다시 실행하거나, 결과를 확인할 수 "
     "없었다는 사실을 '미완료·리스크'에 적고 종료하세요."
+)
+REASON_STALE = (
+    "[discipline] {root}: 마지막 검증 이후 파일 내용이 바뀌었습니다(Bash·스크립트 수정 포함, 내용 해시 기준). "
+    "검증 증거가 무효이니 게이트를 다시 실행하세요."
+)
+REASON_OUT_OF_SCOPE = (
+    "[discipline] 이번 턴의 변경 중 {n}개가 승인된 계획(task: {task})의 변경 범위 밖입니다: {files}. "
+    "되돌리거나 계획을 갱신해 다시 승인받으세요."
+)
+REASON_BULK = (
+    "[discipline] 승인된 계획 없이 이번 턴에 {n}개 파일이 바뀌었습니다(Bash 등 도구 밖 수정 포함, 한도 {limit}): "
+    "{files}. /plan 으로 계획을 세워 승인받거나 변경을 줄이세요."
+)
+REASON_CONTENT_UNKNOWN = (
+    "[discipline] {top}의 변경 상태를 확인할 수 없습니다(git 조회 실패 또는 파일 수 초과). "
+    "변경이 검증됐다는 근거가 없으므로 '미확인'으로 보고하세요."
 )
 REASON_NOT_PUSHED = (
     "[discipline] {root}의 검증 정책은 `ci: required`인데, 이번 수정분이 push되지 않아 CI 검증이 없습니다"
@@ -672,11 +857,23 @@ REASON_GATE_NOT_RUN = (
 
 
 def _stop_decision(state: dict[str, Any]) -> tuple[str, str | None] | None:
-    """(reason, notify key) for the first project whose edits lack passing evidence."""
+    """(reason, notify key) for the first problem: scope, unreadable state, content, then timestamps."""
+    decision = _scope_decision(state)
+    if decision:
+        return decision
+    for top in state.get("content_unknown", []):
+        key = f"content-unknown|{top}|{state.get('turn')}"
+        if _not_yet_notified(state, key):
+            return REASON_CONTENT_UNKNOWN.format(top=top), key
+    for root, entry in sorted(state.get("content", {}).items()):
+        decision = _content_decision(state, root, entry)
+        if decision:
+            return decision
+    tracked = set(state.get("content_tracked_roots", []))
     for root, entry in sorted(state.get("dirty", {}).items()):
         edited_at = float(entry.get("at", 0))
-        if edited_at <= 0:
-            continue
+        if edited_at <= 0 or root in tracked:
+            continue  # content-tracked roots were decided above (or did not change at all)
         where = f" (프로젝트: {root})" if root else ""
         ev = state.get("evidence", {}).get(root) or {}
         ev_at = float(ev.get("at", 0))
@@ -710,6 +907,97 @@ def _stop_decision(state: dict[str, Any]) -> tuple[str, str | None] | None:
             decision = _ci_decision(state, root, edited_at)
             if decision:
                 return decision
+    return None
+
+
+def _scope_decision(state: dict[str, Any]) -> tuple[str, str] | None:
+    """Changes made this turn by any tool must fit the approved plan's scope (or the 5-file limit)."""
+    changes = state.get("turn_changes") or []
+    if not changes:
+        return None
+    prompt_id = state.get("stop_prompt_id")
+    approval = active_approval(state, prompt_id)
+    if approval:
+        outside = [f for f in changes if not in_approved_scope(approval, f)]
+        key = f"scope|{prompt_id}|{len(outside)}"
+        if outside and _not_yet_notified(state, key):
+            shown = ", ".join(Path(f).name for f in outside[:5])
+            return REASON_OUT_OF_SCOPE.format(
+                task=approval.get("task_id"), n=len(outside), files=shown
+            ), key
+        return None
+    key = f"bulk|{prompt_id}|{len(changes)}"
+    if len(changes) > MAX_FILES_WITHOUT_PLAN and _not_yet_notified(state, key):
+        shown = ", ".join(Path(f).name for f in changes[:5])
+        return REASON_BULK.format(
+            n=len(changes), limit=MAX_FILES_WITHOUT_PLAN, files=shown
+        ), key
+    return None
+
+
+def _content_decision(
+    state: dict[str, Any], root: str, c: dict[str, Any]
+) -> tuple[str, str | None] | None:
+    """A project whose file contents changed this session: evidence must match the current content."""
+    where = f" (프로젝트: {root})" if root else ""
+    ev = state.get("evidence", {}).get(root) or {}
+    outcome = ev.get("outcome")
+    digests: dict[str, str] = c.get("digests", {})
+    if not (
+        outcome == "passed"
+        and all(ev.get("digests", {}).get(t) == d for t, d in digests.items())
+    ):
+        if outcome in ("failed", "unknown"):
+            key = f"{root}|{float(ev.get('at', 0))}"
+            if not _not_yet_notified(state, key):
+                return None  # this failed/unknown result was already reported once
+            reason = (
+                REASON_FAILED
+                if outcome == "failed"
+                else REASON_UNKNOWN.format(why=ev.get("why", ""))
+            )
+            return reason + where, key
+        if outcome == "partial":
+            return REASON_GATE_NOT_RUN.format(root=root, gate=c.get("gate")), None
+        if outcome == "passed":
+            return REASON_STALE.format(root=root or "이 프로젝트"), None
+        return REASON_UNVERIFIED + where, None
+    if c.get("ci") != "required":
+        return None
+    ref_sha = "|".join(sorted(digests.values()))
+    if not all(c.get("pushed", {}).get(t) for t in digests):
+        key = f"{root}|nopush|{ref_sha}"
+        return (
+            (REASON_NOT_PUSHED.format(root=root), key)
+            if _not_yet_notified(state, key)
+            else None
+        )
+    for top in digests:
+        push = state.get("pushes", {}).get(top) or {}
+        ci = state.get("ci", {}).get(top) or {}
+        ref = f"{push.get('repo')}@{str(push.get('sha', ''))[:7]}"
+        if ci.get("sha") != push.get("sha") or float(ci.get("at", 0)) < float(
+            push.get("at", 0)
+        ):
+            key = f"{root}|unchecked|{push.get('sha')}"
+            return (
+                (REASON_CI_UNCHECKED.format(ref=ref), key)
+                if _not_yet_notified(state, key)
+                else None
+            )
+        if ci.get("status") != "verified":
+            key = f"{root}|ci|{push.get('sha')}|{ci.get('status')}|{ci.get('why')}"
+            if not _not_yet_notified(state, key):
+                return None
+            runs = ", ".join(
+                f"run {r.get('id')} {r.get('conclusion') or r.get('status')}"
+                for r in ci.get("runs", [])
+            )
+            detail = "; ".join(x for x in (runs, str(ci.get("why") or "")) if x)
+            template = (
+                REASON_CI_FAILED if ci.get("status") == "failed" else REASON_CI_UNKNOWN
+            )
+            return template.format(ref=ref, detail=detail), key
     return None
 
 
@@ -784,6 +1072,8 @@ def stop_block_reason(state: dict[str, Any], stop_hook_active: bool) -> str | No
 def on_stop(data: dict[str, Any], state: dict[str, Any]) -> None:
     if data.get("stop_hook_active"):
         return
+    state["stop_prompt_id"] = data.get("prompt_id") or state.get("prompt_id")
+    refresh_content(state)
     decision = _stop_decision(state)
     if decision is None:
         return

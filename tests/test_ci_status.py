@@ -97,7 +97,7 @@ def run(
     conclusion: str = "success",
     status: str = "completed",
     event: str = "push",
-    sha: str = SHA,
+    sha: str | None = None,
     branch: str = "main",
     repo: str = "acme/demo",
 ) -> dict:
@@ -107,7 +107,8 @@ def run(
         "path": path,
         "event": event,
         "head_branch": branch,
-        "head_sha": sha,
+        "head_sha": sha
+        or SHA,  # default: the commit made by the latest locally_verified()
         "status": status,
         "conclusion": conclusion,
         "run_attempt": 1,
@@ -167,9 +168,16 @@ def state(session: str) -> dict:
     )
 
 
+EDITS = [0]
+
+
 def locally_verified() -> str:
+    """A real edit on disk, committed (so a push contains it), then the declared gate passes."""
+    global SHA
     s = uuid.uuid4().hex
-    call("prompt", s)
+    call("prompt", s, cwd=str(REPO))
+    EDITS[0] += 1
+    (REPO / "src" / "m.py").write_text(f"x = {EDITS[0] + 100}\n", encoding="utf-8")
     call(
         "post",
         s,
@@ -179,7 +187,11 @@ def locally_verified() -> str:
             "old_string": "1",
             "new_string": "2",
         },
+        cwd=str(REPO),
     )
+    git(REPO, "add", "-A")
+    git(REPO, "commit", "-q", "-m", f"edit {EDITS[0]}")
+    SHA = git(REPO, "rev-parse", "HEAD")
     bash(s, "uv run pytest -q")
     return s
 

@@ -20,6 +20,7 @@ TESTS = [
     "test_verification",
     "test_powershell_semantics",
     "test_ci_status",
+    "test_worktree",
     "test_guard",
     "test_discipline",
     "test_session_context",
