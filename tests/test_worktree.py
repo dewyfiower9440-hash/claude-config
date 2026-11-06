@@ -64,6 +64,15 @@ def git(*args: str) -> str:
 
 def call(mode: str, session: str, **payload: object) -> dict | None:
     payload.setdefault("cwd", str(REPO))
+    if (
+        mode in ("post", "fail")
+        and payload.get("tool_name") in ("Bash", "PowerShell")
+        and "tool_use_id" not in payload
+    ):
+        # As in the real harness, every shell PostToolUse(Failure) follows its PreToolUse.
+        # Tests that pass a tool_use_id drive PreToolUse themselves.
+        payload["tool_use_id"] = uuid.uuid4().hex
+        call("pre", session, **payload)
     p = subprocess.run(
         [sys.executable, "-I", str(HOOK), mode],
         input=json.dumps({"session_id": session, **payload}),
@@ -321,6 +330,245 @@ call(
 r = (call("stop", s, prompt_id="n1", cwd=str(OUTER)) or {}).get("reason")
 check(
     "nested repo: Bash edit in the inner repo is detected -> block", r is not None, True
+)
+
+# ---- review finding 5: nested repo inside a policy root must not make evidence permanently stale
+(OUTER / "CLAUDE.md").write_text(
+    f"## Verification\n- gate: `{GATE}`\n- ci: none\n", encoding="utf-8"
+)
+(INNER / "CLAUDE.md").unlink()
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="m1", cwd=str(OUTER))
+call(
+    "pre",
+    s,
+    tool_name="Bash",
+    tool_input={"command": "cd inner && sed -i s/2/3/ i.py"},
+    prompt_id="m1",
+    cwd=str(OUTER),
+)
+(INNER / "i.py").write_text("i = 3\n", encoding="utf-8")
+call(
+    "post",
+    s,
+    tool_name="Bash",
+    tool_input={"command": "cd inner && sed -i s/2/3/ i.py"},
+    prompt_id="m1",
+    cwd=str(OUTER),
+)
+call(
+    "post",
+    s,
+    tool_name="Bash",
+    tool_input={"command": GATE},
+    prompt_id="m1",
+    cwd=str(OUTER),
+)
+check(
+    "nested repo under the policy root: gate from the root covers it -> allowed",
+    (call("stop", s, prompt_id="m1", cwd=str(OUTER)) or {}).get("reason"),
+    None,
+)
+
+# ---- review finding 1: files changed by the same command after the check
+remove_tree(REPO)
+REPO.mkdir(parents=True)
+write("CLAUDE.md", f"## Verification\n- gate: `{GATE}`\n- ci: none\n")
+write("src/a.py", "x = 1\n")
+write("requirements.txt", "requests==2.0\n")
+git("init", "-q", "-b", "main")
+git("add", "-A")
+git("commit", "-q", "-m", "init")
+s = new_session()
+write("src/a.py", "x = 5\n")
+bash(s, "sed -i s/1/5/ src/a.py")
+chained = GATE + " && sed -i 's/5/6/' src/a.py"
+call(
+    "pre",
+    s,
+    tool_name="Bash",
+    tool_input={"command": chained},
+    tool_use_id="t9",
+    prompt_id="p1",
+)
+write("src/a.py", "x = 6\n")  # the check ran on x = 5; the same command then changed it
+call(
+    "post",
+    s,
+    tool_name="Bash",
+    tool_input={"command": chained},
+    tool_use_id="t9",
+    prompt_id="p1",
+)
+check(
+    "gate && edit: content changed while the check command ran -> block",
+    stop(s) is not None,
+    True,
+)
+call(
+    "pre",
+    s,
+    tool_name="Bash",
+    tool_input={"command": GATE},
+    tool_use_id="t10",
+    prompt_id="p1",
+)
+call(
+    "post",
+    s,
+    tool_name="Bash",
+    tool_input={"command": GATE},
+    tool_use_id="t10",
+    prompt_id="p1",
+)
+check(
+    "plain gate with pre/post snapshots, nothing changed meanwhile -> allowed",
+    stop(s),
+    None,
+)
+
+# ---- review finding 6: non-doc .txt files are code-relevant; README is not
+write("requirements.txt", "requests==9.9\n")
+bash(s, "sed -i s/2.0/9.9/ requirements.txt")
+check("requirements.txt changed after the gate -> block", stop(s) is not None, True)
+bash(s, GATE)
+write("README.md", "only docs\n")
+bash(s, "echo docs > README.md")
+check("README change after the gate still needs nothing", stop(s), None)
+git("add", "-A")
+git("commit", "-q", "-m", "reqs")
+
+# ---- review finding 4: switching branches is not an unapproved bulk edit
+git("checkout", "-q", "-b", "feature")
+for i in range(7):
+    write(f"src/feat_{i}.py", f"f = {i}\n")
+git("add", "-A")
+os.environ["GIT_COMMITTER_DATE"] = "2026-01-01T00:00:00"  # made before this session
+git("commit", "-q", "-m", "feature files")
+del os.environ["GIT_COMMITTER_DATE"]
+git("checkout", "-q", "main")
+s = new_session("b1")
+git("checkout", "-q", "feature")
+bash(s, "git checkout feature", prompt_id="b1")
+bash(s, GATE, prompt_id="b1")
+check("git checkout bringing in 7 files is not counted as a bulk edit", stop(s), None)
+
+# ---- second review, finding 2: committing this turn's own edits does not hide them
+s = new_session("b2")
+for i in range(7):
+    write(f"src/own_{i}.py", f"o = {i}\n")
+bash(s, "for i in 0 1 2 3 4 5 6; do echo o > src/own_$i.py; done", prompt_id="b2")
+git("add", "-A")
+git("commit", "-q", "-m", "own files")
+bash(s, "git add -A && git commit -m own", prompt_id="b2")
+bash(s, GATE, prompt_id="b2")
+r = (call("stop", s, prompt_id="b2") or {}).get("reason") or ""
+check(
+    "7 files edited and committed in the same turn -> still a bulk edit", "7" in r, True
+)
+
+# ---- review findings 2 and 3: git time budget exhausted -> unknown (never allowed), then recovers
+os.environ["CLAUDE_DISCIPLINE_GIT_BUDGET_S"] = "0"
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="z1")  # snapshot impossible within budget
+write("src/a.py", "x = 77\n")
+bash(s, "sed -i s/6/77/ src/a.py", prompt_id="z1")
+r = (call("stop", s, prompt_id="z1") or {}).get("reason")
+check(
+    "no time left for git at Stop -> block as unknown (fail closed)",
+    r is not None and "확인할 수 없습니다" in r,
+    True,
+)
+edit_payload = {
+    "tool_name": "Edit",
+    "tool_input": {
+        "file_path": str(REPO / "src" / "a.py"),
+        "old_string": "77",
+        "new_string": "78",
+    },
+}
+call("pre", s, prompt_id="z1", **edit_payload)
+write("src/a.py", "x = 78\n")
+call("post", s, prompt_id="z1", **edit_payload)
+del os.environ["CLAUDE_DISCIPLINE_GIT_BUDGET_S"]
+call("prompt", s, prompt_id="z2")
+r = (call("stop", s, prompt_id="z2") or {}).get("reason")
+check(
+    "second review, finding 1: git back, edits made while it was unavailable, no gate -> block",
+    r is not None,
+    True,
+)
+call("prompt", s, prompt_id="z3")
+bash(s, GATE, prompt_id="z3")
+check(
+    "a failed first snapshot is retried later (no permanent unknown)",
+    (call("stop", s, prompt_id="z3") or {}).get("reason"),
+    None,
+)
+
+# ---- second review, finding 3: a check with no pre-run record is not a pass
+s = new_session("m1")
+write("src/a.py", "x = 79\n")
+bash(s, "sed -i s/78/79/ src/a.py", prompt_id="m1")
+call(
+    "post",
+    s,
+    tool_name="Bash",
+    tool_input={"command": GATE},
+    tool_use_id="never-seen-by-pre",
+    prompt_id="m1",
+)
+check(
+    "gate with no PreToolUse record -> not a pass -> block", stop(s) is not None, True
+)
+
+# ---- second review, finding 4: output files a gate writes are not edits
+s = new_session("m2")
+bash(s, GATE, prompt_id="m2")
+for n in range(2):  # created by the first run, rewritten by the second
+    call(
+        "pre",
+        s,
+        tool_name="Bash",
+        tool_input={"command": GATE},
+        tool_use_id=f"cov{n}",
+        prompt_id="m2",
+    )
+    write("coverage.xml", f"<coverage run='{n}'/>\n")
+    call(
+        "post",
+        s,
+        tool_name="Bash",
+        tool_input={"command": GATE},
+        tool_use_id=f"cov{n}",
+        prompt_id="m2",
+    )
+    check(
+        f"gate writing an untracked report (run {n + 1}) -> still Locally Verified",
+        stop(s),
+        None,
+    )
+(REPO / "coverage.xml").unlink()
+
+# ---- review finding 3: an oversized repository blocks once per session, not every turn
+BIG = WORK / "big"
+(BIG / "src").mkdir(parents=True)
+subprocess.run(["git", "init", "-q", "-b", "main"], cwd=BIG, check=True)
+for i in range(5001):  # one more than worktree.MAX_FILES
+    (BIG / "src" / f"f{i}.py").write_bytes(b"")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="b1", cwd=str(BIG))
+first = (call("stop", s, prompt_id="b1", cwd=str(BIG)) or {}).get("reason") or ""
+check(
+    "repository over the file limit -> blocked as unknown",
+    "확인할 수 없습니다" in first,
+    True,
+)
+call("prompt", s, prompt_id="b2", cwd=str(BIG))
+check(
+    "over the file limit -> not blocked again in a later turn",
+    (call("stop", s, prompt_id="b2", cwd=str(BIG)) or {}).get("reason"),
+    None,
 )
 
 remove_tree(WORK)

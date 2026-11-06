@@ -13,13 +13,40 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+import time
 
 GIT_TIMEOUT_S = 10
 MAX_FILES = 5000
-DOC_EXT = (".md", ".txt", ".rst", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf")
+# Not code: documentation and media. Other .md/.txt (requirements.txt, skills/*.md) count.
+NON_CODE_EXT = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf", ".ico")
+NON_CODE_NAMES = ("readme", "changelog", "license", "notice", "authors")
+
+# One time budget for every git call of a hook run, so the hook finishes (and decides,
+# failing closed) before Claude Code's hook timeout would kill it.
+_deadline: float | None = None
+last_error = (
+    ""  # "too_large" | "unavailable" for the last content_map() that returned None
+)
+
+
+budget_exhausted = False  # some git call got no answer in time: results are incomplete
+
+
+def set_budget(seconds: float | None) -> None:
+    global _deadline, budget_exhausted
+    _deadline = None if seconds is None else time.monotonic() + seconds
+    budget_exhausted = False
 
 
 def _git(cwd: str, *args: str, stdin: str | None = None) -> str | None:
+    global budget_exhausted
+    timeout: float = GIT_TIMEOUT_S
+    if _deadline is not None:
+        remaining = _deadline - time.monotonic()
+        if remaining <= 0:
+            budget_exhausted = True
+            return None  # budget exhausted: no answer rather than a late one
+        timeout = min(timeout, remaining)
     try:
         p = subprocess.run(
             ["git", "-c", "core.quotepath=false", *args],
@@ -29,12 +56,20 @@ def _git(cwd: str, *args: str, stdin: str | None = None) -> str | None:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=GIT_TIMEOUT_S,
+            timeout=timeout,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):  # git missing or hung: no snapshot
+    except subprocess.TimeoutExpired:  # git hung: no snapshot, and say so
+        budget_exhausted = True
+        return None
+    except OSError:  # git missing: no snapshot
         return None
     return p.stdout if p.returncode == 0 else None
+
+
+def head(top: str) -> str | None:
+    out = _git(top, "rev-parse", "--verify", "-q", "HEAD")
+    return out.strip() if out else None
 
 
 def toplevel(path: str) -> str | None:
@@ -49,6 +84,8 @@ def toplevel(path: str) -> str | None:
 
 
 def content_map(top: str, watch: list[str] | None = None) -> dict[str, str] | None:
+    global last_error
+    last_error = "unavailable"  # until the map is complete
     index = _git(top, "ls-files", "-s", "-z")
     status = _git(top, "status", "--porcelain=v1", "-z", "-uall")
     if index is None or status is None:
@@ -91,7 +128,62 @@ def content_map(top: str, watch: list[str] | None = None) -> dict[str, str] | No
             return None
         for p, h in zip(present, hashes.split(), strict=False):
             files[p] = h
-    return None if len(files) > MAX_FILES else files
+    if len(files) > MAX_FILES:
+        last_error = "too_large"
+        return None
+    last_error = ""
+    return files
+
+
+# Untracked files with these suffixes are source a check may run on; other untracked files
+# (coverage.xml, .coverage, reports) are treated as check output, not as edits.
+SOURCE_EXT = (
+    ".py",
+    ".pyi",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+    ".ps1",
+    ".psm1",
+    ".psd1",
+    ".sh",
+    ".sql",
+    ".toml",
+    ".cfg",
+    ".ini",
+    ".yaml",
+    ".yml",
+    ".rs",
+    ".go",
+    ".java",
+    ".cs",
+)
+
+
+def tracked_paths(top: str) -> set[str] | None:
+    out = _git(top, "ls-files", "-z")
+    return None if out is None else {p for p in out.split("\0") if p}
+
+
+def paths_committed_since(
+    top: str, old: str, new: str, since: float
+) -> set[str] | None:
+    """Paths changed by commits in old..new whose committer time is at or after `since`
+    (commits made now, as opposed to ones a checkout/pull brought in). None if unknown."""
+    out = _git(top, "log", "--format=@%ct", "--name-only", "-z", f"{old}..{new}")
+    if out is None:
+        return None
+    paths: set[str] = set()
+    recent = False
+    for token in out.replace("\n", "\0").split("\0"):
+        if token.startswith("@") and token[1:].isdigit():
+            recent = int(token[1:]) >= int(since) - 1  # second resolution of %ct
+        elif token and recent:
+            paths.add(token)
+    return paths
 
 
 def tree_map(top: str, rev: str) -> dict[str, str] | None:
@@ -110,7 +202,12 @@ def tree_map(top: str, rev: str) -> dict[str, str] | None:
 
 # ---------------------------------------------------------------- pure helpers
 def relevant(path: str) -> bool:
-    return not path.lower().endswith(DOC_EXT)
+    """Whether a change to `path` can change behaviour (docs/, READMEs and media cannot)."""
+    low = path.lower().replace("\\", "/")
+    name = low.rsplit("/", 1)[-1]
+    if low.startswith("docs/") or "/docs/" in low or low.endswith(NON_CODE_EXT):
+        return False
+    return name.split(".", 1)[0] not in NON_CODE_NAMES
 
 
 def under(path: str, prefix: str) -> bool:

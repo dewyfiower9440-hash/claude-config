@@ -19,6 +19,15 @@ fails = 0
 
 
 def call(mode: str, session: str, **payload: object) -> dict | None:
+    if (
+        mode in ("post", "fail")
+        and payload.get("tool_name") in ("Bash", "PowerShell")
+        and "tool_use_id" not in payload
+    ):
+        # As in the real harness, every shell PostToolUse(Failure) follows its PreToolUse
+        # with the same tool_use_id. Tests that pass a tool_use_id drive PreToolUse themselves.
+        payload["tool_use_id"] = uuid.uuid4().hex
+        call("pre", session, **payload)
     p = subprocess.run(
         [sys.executable, "-I", HOOK, mode],
         input=json.dumps({"session_id": session, **payload}),

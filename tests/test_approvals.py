@@ -62,6 +62,8 @@ def state_of(session: str) -> dict:
 
 PLAN = "# Widget\n\ntask: widget\n\n## 변경 범위\n- src/**\n\n## 단계\n- [ ] 1. a\n- [ ] 2. b\n"
 (REPO / "docs" / "plans").mkdir(parents=True)
+# Its own git repository, so the project an approval is bound to is REPO (its toplevel).
+subprocess.run(["git", "init", "-q"], cwd=REPO, check=True)
 PLAN_FILE = REPO / "docs" / "plans" / "2026-11-06-widget.md"
 
 
@@ -140,6 +142,7 @@ records[d.plan_hash(forged_body)] = {
     "plan_hash": d.plan_hash(forged_body),
     "scope": [],
     "prompt_id": "x",
+    "base": os.path.normcase(str(REPO)),
     "at": time.time(),
 }
 approvals_file().write_text(json.dumps(records), encoding="utf-8")
@@ -192,6 +195,94 @@ check(
     "back to the approved in-progress plan -> re-armed",
     (rearmed() or {}).get("task_id"),
     "widget",
+)
+
+# ---- review finding 8: an approval is bound to the project it was given in
+OTHER = HERE / "_tmp_approval_other"
+shutil.rmtree(OTHER, ignore_errors=True)
+(OTHER / "docs" / "plans").mkdir(parents=True)
+(OTHER / "docs" / "plans" / PLAN_FILE.name).write_text(
+    PLAN_FILE.read_text(encoding="utf-8"), encoding="utf-8"
+)
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="o1", cwd=str(OTHER))
+check(
+    "same approved plan copied into another project -> not re-armed there",
+    state_of(s).get("approval"),
+    None,
+)
+shutil.rmtree(OTHER, ignore_errors=True)
+
+# ---- second review, finding 6: approving from a subdirectory still covers the project
+(REPO / "src").mkdir(exist_ok=True)
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="d1", cwd=str(REPO / "src"))
+call(
+    "post",
+    s,
+    tool_name="ExitPlanMode",
+    tool_input={},
+    tool_response={"plan": PLAN},
+    prompt_id="d1",
+    cwd=str(REPO / "src"),
+)
+check(
+    "approved from a subdirectory -> re-armed from the project root",
+    (rearmed() or {}).get("task_id"),
+    "widget",
+)
+
+# ---- second review, finding 5: records from before `base` existed are named as such
+records = json.loads(approvals_file().read_text(encoding="utf-8"))
+for rec in records.values():
+    rec.pop("base", None)
+approvals_file().write_text(json.dumps(records), encoding="utf-8")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="l1")
+check("old-format record -> not re-armed", state_of(s).get("approval"), None)
+check(
+    "old-format record -> reported as old format, not as forgery",
+    "이전 형식" in str(state_of(s).get("approval_warning")),
+    True,
+)
+
+# ---- review finding 7: an invalid record does not hide a valid one
+approve()
+records = json.loads(approvals_file().read_text(encoding="utf-8"))
+decoy_body = PLAN.replace("task: widget", "task: decoy")
+records[d.plan_hash(decoy_body)] = {
+    "task_id": "decoy",
+    "plan_hash": d.plan_hash(decoy_body),
+    "scope": [],
+    "prompt_id": "x",
+    "at": time.time(),
+    "mac": "0" * 64,
+}
+approvals_file().write_text(json.dumps(records), encoding="utf-8")
+decoy = REPO / "docs" / "plans" / "2026-11-05-decoy.md"  # sorts before the real plan
+decoy.write_text(f"---\nstatus: in-progress\n---\n\n{decoy_body}", encoding="utf-8")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="v1")
+check(
+    "invalid record for one plan, valid for another -> the valid one re-arms",
+    (state_of(s).get("approval") or {}).get("task_id"),
+    "widget",
+)
+decoy.unlink()
+
+# ---- review finding 2: a re-armed approval serves only the prompt that re-armed it
+check(
+    "re-armed approval is not active for a later prompt whose hook never ran",
+    d.active_approval(
+        {"approval": {"task_id": "widget", "rearmed_from": "p.md", "prompt_id": "v1"}},
+        "v2",
+    ),
+    None,
+)
+check(
+    "re-armed approval is active for its own prompt",
+    (state_of(s).get("approval") or {}).get("prompt_id"),
+    "v1",
 )
 
 # ---- protection of the approval home against tool access

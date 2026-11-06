@@ -123,6 +123,14 @@ GREEN_JOBS = {
 
 
 def call(mode: str, session: str, **payload: object) -> dict | None:
+    if (
+        mode in ("post", "fail")
+        and payload.get("tool_name") in ("Bash", "PowerShell")
+        and "tool_use_id" not in payload
+    ):
+        # As in the real harness, every shell PostToolUse(Failure) follows its PreToolUse.
+        payload["tool_use_id"] = uuid.uuid4().hex
+        call("pre", session, **payload)
     p = subprocess.run(
         [sys.executable, "-I", str(HOOK), mode],
         input=json.dumps({"session_id": session, **payload}),

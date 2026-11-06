@@ -230,8 +230,18 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
 
     # D-5: snapshot any repository this tool is about to touch, before it runs.
     if tool in ("Bash", "PowerShell"):
-        for d in shell_targets(str(ti.get("command", "")), tool == "PowerShell", cwd):
+        command = str(ti.get("command", ""))
+        for d in shell_targets(command, tool == "PowerShell", cwd):
             track_repo(state, d)
+        # A check is evidence only for the content it ran on: remember the content before it
+        # runs, so `gate && sed ...` (content changed during the command) is not bound to the
+        # post-edit content.
+        tops = check_repos(state, command, tool == "PowerShell", cwd)
+        if tops is not None and data.get("tool_use_id"):
+            pre = state.setdefault("pre_check", {})
+            pre[str(data["tool_use_id"])] = repo_snapshots(state, tops)
+            for stale in list(pre)[:-MAX_PRE_CHECKS]:
+                pre.pop(stale, None)
     elif ti.get("file_path") and not IGNORED_PATH.search(str(ti.get("file_path"))):
         track_repo(state, str(ti.get("file_path")))
 
@@ -310,7 +320,15 @@ APPROVALS_HOME = Path(
 )
 APPROVALS_FILE = APPROVALS_HOME / "approvals.json"
 KEY_FILE = APPROVALS_HOME / "key"
-SIGNED_FIELDS = ("task_id", "plan_hash", "scope", "prompt_id", "session_id", "at")
+SIGNED_FIELDS = (
+    "task_id",
+    "plan_hash",
+    "scope",
+    "prompt_id",
+    "session_id",
+    "base",
+    "at",
+)
 APPROVAL_MAX_AGE_S = 30 * 86400
 MAX_APPROVALS = 50
 SCOPE_HEADINGS = r"(변경 범위|Scope|Change scope)"
@@ -398,6 +416,8 @@ def record_is_valid(record: dict[str, Any], key: bytes | None) -> str | None:
 
     if key is None:
         return "서명 키 없음"
+    if "base" not in record:
+        return "이전 형식의 승인 기록(프로젝트 경로 없음) — 다시 승인 필요"
     mac = str(record.get("mac") or "")
     if not mac or not hmac.compare_digest(mac, sign_record(record, key)):
         return "서명 불일치(기록이 위조되거나 수정됨)"
@@ -417,6 +437,8 @@ def _load_approvals() -> tuple[dict[str, Any], str | None]:
 
 
 def record_approval(data: dict[str, Any], state: dict[str, Any]) -> None:
+    import worktree
+
     response = data.get("tool_response")
     response = response if isinstance(response, dict) else {}
     text = response.get("plan") if isinstance(response.get("plan"), str) else None
@@ -432,6 +454,9 @@ def record_approval(data: dict[str, Any], state: dict[str, Any]) -> None:
         "scope": plan_scope(text, cwd) if text else [],
         "prompt_id": data.get("prompt_id"),
         "session_id": data.get("session_id"),
+        # The project the approval was given in: its git toplevel (so approving from a
+        # subdirectory still covers the project's docs/plans), else the working directory.
+        "base": os.path.normcase(worktree.toplevel(cwd) or os.path.abspath(cwd)),
         "at": time.time(),
     }
     state["approval"] = record
@@ -482,8 +507,14 @@ def rearm_approval(cwd: str) -> tuple[dict[str, Any] | None, str | None]:
                 ):
                     continue
                 invalid = record_is_valid(record, key)
+                if not invalid and not _inside(
+                    os.path.normcase(str(plan)), str(record.get("base") or "")
+                ):
+                    invalid = "승인 당시 프로젝트 밖의 계획 파일"
                 if invalid:
-                    return None, f"{invalid}: {plan.name}"
+                    # Keep looking (another plan may hold a valid approval) but report the first.
+                    problem = problem or f"{invalid}: {plan.name}"
+                    continue
                 return {**record, "rearmed_from": str(plan)}, None
         parent = os.path.dirname(d)
         if parent == d:
@@ -496,7 +527,9 @@ def active_approval(state: dict[str, Any], prompt_id: object) -> dict[str, Any] 
     approval = state.get("approval")
     if not isinstance(approval, dict):
         return None
-    if approval.get("rearmed_from") or approval.get("prompt_id") == prompt_id:
+    if (
+        approval.get("prompt_id") == prompt_id
+    ):  # re-armed approvals carry the prompt they serve
         return approval
     return None  # approved in an earlier prompt and not re-armed for this one
 
@@ -623,6 +656,14 @@ def record_evidence(
 
     command = str(ti.get("command", ""))
     targets = shell_targets(command, is_ps, cwd)
+    pre = state.get("pre_check", {}).pop(str(data.get("tool_use_id") or ""), None)
+    # No pre-run record (pre hook killed, entry evicted, no tool_use_id) means the content the
+    # check ran on is unknown: such a run cannot be a pass.
+    changed_during = (
+        "검사 전 내용 기록이 없음(검사한 내용을 확인할 수 없음)"
+        if not isinstance(pre, dict)
+        else changed_while_running(state, pre)
+    )
     policies: dict[str, Policy] = {}
     for root, entry in state["dirty"].items():
         policies[root] = {
@@ -648,6 +689,12 @@ def record_evidence(
         )
         if ev is None:
             continue
+        if ev["outcome"] == "passed" and changed_during:
+            ev = {
+                **ev,
+                "outcome": "unknown",
+                "why": changed_during,
+            }
         old = state["evidence"].get(root) or {}
         still_valid_pass = old.get("outcome") == "passed" and float(
             old.get("at", 0)
@@ -715,6 +762,10 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
         str(data.get("cwd") or os.getcwd())
     )
     state["prompt_id"] = data.get("prompt_id")
+    if state["approval"]:
+        # Bound to this prompt: if a later prompt's hook never runs (killed, timed out), the
+        # stale approval does not carry over to it.
+        state["approval"]["prompt_id"] = data.get("prompt_id")
     track_repo(state, str(data.get("cwd") or os.getcwd()))
     refresh_turn_baselines(state)
 
@@ -726,6 +777,8 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
 # (Edit, sed, scripts) are seen, commits are not mistaken for edits, and verification
 # evidence is bound to the content hash it was produced on.
 MAX_DIR_CACHE = 200
+MAX_PRE_CHECKS = 20
+GIT_BUDGET_S = {"pre": 20.0, "prompt": 20.0, "post": 45.0, "fail": 45.0, "stop": 45.0}
 
 
 def _watch_globs(top: str) -> list[str]:
@@ -753,13 +806,31 @@ def track_repo(state: dict[str, Any], path: str) -> str | None:
         top = dir_tops[probe]
     else:
         top = worktree.toplevel(p)
-        if len(dir_tops) < MAX_DIR_CACHE:
+        if worktree.budget_exhausted:
+            missed = state.setdefault("missed_dirs", [])
+            if probe not in missed and len(missed) < MAX_DIR_CACHE:
+                missed.append(
+                    probe
+                )  # this directory's repository went unobserved for a while
+        elif len(dir_tops) < MAX_DIR_CACHE:
             dir_tops[probe] = top
     if not top:
         return None
-    if top not in repos:
+    if top not in repos or repos[top].get("session") is None:
+        # New repository, or its first snapshot failed (timeout/budget): (re)take the baseline.
+        # A baseline taken after a failed attempt may already contain unverified edits, so it
+        # is marked late: its changes are reported unknown, never taken as "unchanged".
+        late = top in repos or any(
+            _inside(d, top) for d in state.get("missed_dirs", [])
+        )
         snap = worktree.content_map(top, _watch_globs(top))
-        repos[top] = {"session": snap, "turn": snap}
+        repos[top] = {
+            "session": snap,
+            "turn": snap,
+            "turn_head": worktree.head(top),
+            "turn_at": time.time(),
+            "late": late,
+        }
     return top
 
 
@@ -768,6 +839,79 @@ def refresh_turn_baselines(state: dict[str, Any]) -> None:
 
     for top, base in state.get("repos", {}).items():
         base["turn"] = worktree.content_map(top, _watch_globs(top))
+        base["turn_head"] = worktree.head(top)
+        base["turn_at"] = time.time()
+
+
+def repo_snapshots(
+    state: dict[str, Any], tops: list[str]
+) -> dict[str, dict[str, str] | None]:
+    """Relevant file contents of each repository before a check runs (None: unavailable)."""
+    import worktree
+
+    out: dict[str, dict[str, str] | None] = {}
+    for top in tops:
+        snap = worktree.content_map(top, _watch_globs(top))
+        tracked = worktree.tracked_paths(top) if snap is not None else None
+        out[top] = (
+            None
+            if snap is None or tracked is None
+            else {
+                p: h
+                for p, h in snap.items()
+                if worktree.relevant(p)
+                and (p in tracked or p.lower().endswith(worktree.SOURCE_EXT))
+            }
+        )
+    return out
+
+
+def changed_while_running(state: dict[str, Any], pre: dict[str, Any]) -> str:
+    """Why the content a check ran on differs from the content now ("" if it does not).
+    Files the check itself created (reports, coverage) do not count; edits and deletions of
+    files that existed before it ran do."""
+    import worktree
+
+    for top, before in sorted(pre.items()):
+        now = (
+            worktree.content_map(top, _watch_globs(top)) if before is not None else None
+        )
+        if before is None or now is None:
+            return "검사 전후 내용을 확인할 수 없음(git 조회 실패)"
+        if any(now.get(p) != h for p, h in before.items()):
+            return "검사 실행 중 파일이 바뀜(검사한 내용과 현재 내용이 다를 수 있음)"
+    return ""
+
+
+def check_repos(
+    state: dict[str, Any], command: str, is_ps: bool, cwd: str
+) -> list[str] | None:
+    """Repositories whose content a check command could be evidence for (None if not a check)."""
+    from shellparse import Dialect
+    from verification import Policy, evaluate, find_policy
+
+    reresolve_dirty(state)  # the same policy grouping record_evidence() will use
+    targets = shell_targets(command, is_ps, cwd)
+    policies: list[Policy] = [find_policy(os.path.join(d, "_")) for d in targets]
+    for r, e in state.get("dirty", {}).items():
+        policies.append(
+            {
+                "root": r,
+                "gate": e.get("gate"),
+                "ci": e.get("ci", "undeclared"),
+                "validate": e.get("validate"),
+            }
+        )
+    dialect: Dialect = "powershell" if is_ps else "bash"
+    if not any(
+        evaluate(command, dialect, cwd, p, failed=False, background=False)
+        for p in policies
+    ):
+        return None
+    tops = {track_repo(state, d) for d in targets} | {
+        track_repo(state, p["root"]) for p in policies if p["root"]
+    }
+    return sorted(t for t in tops if t)
 
 
 def shell_targets(command: str, is_ps: bool, cwd: str) -> list[str]:
@@ -798,21 +942,50 @@ def refresh_content(state: dict[str, Any]) -> None:
 
     content: dict[str, Any] = {}
     unknown: list[str] = []
+    too_large: list[str] = []
+    late: list[str] = []
     turn_changes: set[str] = set()
     visible: set[str] = set()
     for top, base in state.get("repos", {}).items():
         now = worktree.content_map(top, _watch_globs(top))
         if now is None or base.get("session") is None:
-            unknown.append(top)
+            (too_large if worktree.last_error == "too_large" else unknown).append(top)
             continue
-        visible |= {
-            os.path.normcase(os.path.join(top, p))
-            for p in set(now) | set(base["session"])
-        }
-        turn_changes |= {
-            os.path.join(top, p)
-            for p in worktree.changed(base.get("turn") or base["session"], now)
-        }
+        if base.get("late"):
+            late.append(
+                top
+            )  # baseline may include unverified edits: timestamps decide there
+        else:
+            visible |= {
+                os.path.normcase(os.path.join(top, p))
+                for p in set(now) | set(base["session"])
+            }
+        turn_base = base.get("turn") or base["session"]
+        moved = worktree.changed(turn_base, now)
+        head_then, head_now = base.get("turn_head"), worktree.head(top)
+        if head_then and head_now and head_then != head_now:
+            # checkout/pull/reset moved HEAD: files whose old and new content equal the old and
+            # new commits came from git, not from an edit made in this turn.
+            old_tree, new_tree = (
+                worktree.tree_map(top, head_then),
+                worktree.tree_map(top, head_now),
+            )
+            # Commits made during this turn (`edit; git commit`) are this turn's own edits, so
+            # their paths are never excluded.
+            own = worktree.paths_committed_since(
+                top, head_then, head_now, float(base.get("turn_at") or 0)
+            )
+            if old_tree is not None and new_tree is not None and own is not None:
+                moved = {
+                    p
+                    for p in moved
+                    if p in own
+                    or not (
+                        turn_base.get(p) == old_tree.get(p)
+                        and now.get(p) == new_tree.get(p)
+                    )
+                }
+        turn_changes |= {os.path.join(top, p) for p in moved}
         changed_roots: dict[str, Any] = {}
         for p in worktree.changed(base["session"], now):
             if worktree.relevant(p):
@@ -838,6 +1011,8 @@ def refresh_content(state: dict[str, Any]) -> None:
             )
     state["content"] = content
     state["content_unknown"] = unknown
+    state["content_too_large"] = too_large
+    state["content_late"] = late
     state["turn_changes"] = sorted(turn_changes)
     # Edit-tracked roots whose files are all visible to git: content decides, not timestamps.
     state["content_tracked_roots"] = [
@@ -852,14 +1027,22 @@ def evidence_digests(state: dict[str, Any], root: str, cwd: str) -> dict[str, st
     """Content hashes a passed check was run on (bound into the evidence)."""
     import worktree
 
-    top = track_repo(state, root or cwd)
-    if not top:
+    own = track_repo(state, root or cwd)
+    if not own:
         return {}
-    snap = worktree.content_map(top, _watch_globs(top))
-    if snap is None:
-        return {}
-    prefix = (worktree.rel_prefix(top, root) or "") if root else ""
-    return {top: worktree.digest(snap, prefix)}
+    # The project root's own repository plus every tracked repository nested inside the root
+    # (same keys refresh_content() produces), so a nested repo never leaves evidence stale.
+    tops = {own} | (
+        {t for t in state.get("repos", {}) if _inside(t, root)} if root else set()
+    )
+    out: dict[str, str] = {}
+    for top in sorted(tops):
+        snap = worktree.content_map(top, _watch_globs(top))
+        if snap is None:
+            return {}  # partial evidence is no evidence
+        prefix = (worktree.rel_prefix(top, root) or "") if root else ""
+        out[top] = worktree.digest(snap, prefix)
+    return out
 
 
 REASON_UNVERIFIED = (
@@ -897,6 +1080,8 @@ REASON_CONTENT_UNKNOWN = (
     "[discipline] {top}의 변경 상태를 확인할 수 없습니다(git 조회 실패 또는 파일 수 초과). "
     "변경이 검증됐다는 근거가 없으므로 '미확인'으로 보고하세요."
 )
+REASON_TOO_LARGE_NOTE = " (파일 수가 내용 추적 한도 5,000개를 넘습니다. 이 저장소의 변경 감지는 이번 세션에서 다시 알리지 않습니다.)"
+REASON_LATE_NOTE = " (git 조회가 시간 안에 끝나지 않아 이 저장소의 기준선을 늦게 잡았습니다. 그 사이 변경은 검증 여부를 알 수 없습니다.)"
 REASON_NOT_PUSHED = (
     "[discipline] {root}의 검증 정책은 `ci: required`인데, 이번 수정분이 push되지 않아 CI 검증이 없습니다"
     "(현재 상태: Locally Verified). push가 사용자 승인 대기라면 보고에 'CI 미검증(push 전)'으로 명시하고 종료하세요."
@@ -934,6 +1119,14 @@ def _stop_decision(state: dict[str, Any]) -> tuple[str, str | None] | None:
     decision = _scope_decision(state)
     if decision:
         return decision
+    for top in state.get("content_too_large", []):
+        key = f"content-too-large|{top}"  # a size limit does not go away by itself: once per session
+        if _not_yet_notified(state, key):
+            return REASON_CONTENT_UNKNOWN.format(top=top) + REASON_TOO_LARGE_NOTE, key
+    for top in state.get("content_late", []):
+        key = f"content-late|{top}"
+        if _not_yet_notified(state, key):
+            return REASON_CONTENT_UNKNOWN.format(top=top) + REASON_LATE_NOTE, key
     for top in state.get("content_unknown", []):
         key = f"content-unknown|{top}|{state.get('turn')}"
         if _not_yet_notified(state, key):
@@ -1145,8 +1338,16 @@ def stop_block_reason(state: dict[str, Any], stop_hook_active: bool) -> str | No
 def on_stop(data: dict[str, Any], state: dict[str, Any]) -> None:
     if data.get("stop_hook_active"):
         return
+    import worktree
+
     state["stop_prompt_id"] = data.get("prompt_id") or state.get("prompt_id")
+    track_repo(state, str(data.get("cwd") or os.getcwd()))
     refresh_content(state)
+    if worktree.budget_exhausted:
+        # git could not answer in time: what changed is unknown, which never counts as unchanged.
+        marker = str(data.get("cwd") or os.getcwd())
+        if marker not in state["content_unknown"]:
+            state["content_unknown"].append(marker)
     decision = _stop_decision(state)
     if decision is None:
         return
@@ -1176,6 +1377,16 @@ def main() -> None:
     }.get(mode)
     if handler is None:
         sys.exit(0)
+    import worktree
+
+    # Every git call of this run shares one budget well inside the hook timeout in settings.json
+    # (pre/prompt 30 s, post/fail/stop 60 s), so the hook decides (closed) instead of being killed.
+    budget = os.environ.get("CLAUDE_DISCIPLINE_GIT_BUDGET_S")
+    try:
+        seconds = float(budget) if budget else GIT_BUDGET_S[mode]
+    except ValueError:  # malformed override: use the default
+        seconds = GIT_BUDGET_S[mode]
+    worktree.set_budget(seconds)
     try:
         handler(data, state)
     finally:
