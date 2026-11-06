@@ -177,7 +177,7 @@ def _find_sequence(
     return None
 
 
-def _cwd_at(cmds: list[SimpleCommand], index: int, cwd: str) -> str:
+def cwd_at(cmds: list[SimpleCommand], index: int, cwd: str) -> str:
     """Working directory in effect at cmds[index], following `cd` / `Set-Location`."""
     for c in cmds[:index]:
         program, args = program_and_args(c)
@@ -264,11 +264,11 @@ def evaluate(
         except ParseError:
             continue
         k = _find_sequence(cmds, target)
-        if k is not None and _inside(_cwd_at(cmds, k, cwd), root):
+        if k is not None and _inside(cwd_at(cmds, k, cwd), root):
             return verdict(kind, k + len(target) - 1)
 
     for i, c in enumerate(cmds):
-        if is_runner(c) and (not root or _inside(_cwd_at(cmds, i, cwd), root)):
+        if is_runner(c) and (not root or _inside(cwd_at(cmds, i, cwd), root)):
             if policy["gate"]:
                 # A test command ran, but not the declared gate (e.g. pytest without --cov).
                 return {

@@ -333,6 +333,47 @@ def record_evidence(
         if still_valid_pass and ev["outcome"] in ("partial", "unknown"):
             continue  # a later side run does not revoke a passed gate for unchanged code
         state["evidence"][root] = {**ev, "at": now}
+    record_ci_activity(str(ti.get("command", "")), is_ps, cwd, state, failed=failed)
+
+
+def record_ci_activity(
+    command: str, is_ps: bool, cwd: str, state: dict[str, Any], *, failed: bool
+) -> None:
+    """`git push` records what was pushed; `gh run watch|view|list` re-reads CI from the API."""
+    from shellparse import ParseError, parse, program_and_args
+    from verification import cwd_at
+
+    try:
+        cmds = [
+            c for c in parse(command, "powershell" if is_ps else "bash") if not c.nested
+        ]
+    except ParseError:
+        return
+    now = time.time()
+    for i, cmd in enumerate(cmds):
+        program, args = program_and_args(cmd)
+        if (
+            program == "git"
+            and "push" in args[:3]
+            and not failed
+            and not {"--dry-run", "-n"} & set(args)
+        ):
+            from ci_status import push_info
+
+            info = push_info(cwd_at(cmds, i, cwd))
+            if info:
+                state.setdefault("pushes", {})[info["toplevel"]] = {**info, "at": now}
+                state.setdefault("ci", {}).pop(info["toplevel"], None)
+        elif (
+            program == "gh"
+            and args[:1] == ["run"]
+            and args[1:2]
+            and args[1] in ("watch", "view", "list")
+        ):
+            from ci_status import fetch_ci
+
+            for top, push in state.get("pushes", {}).items():
+                state.setdefault("ci", {})[top] = {**fetch_ci(push), "at": now}
 
 
 def on_fail(data: dict[str, Any], state: dict[str, Any]) -> None:
@@ -361,6 +402,22 @@ REASON_UNKNOWN = (
     "보입니다. 검증 명령을 단독으로(또는 &&로만 이어서) 포그라운드에서 다시 실행하거나, 결과를 확인할 수 "
     "없었다는 사실을 '미완료·리스크'에 적고 종료하세요."
 )
+REASON_NOT_PUSHED = (
+    "[discipline] {root}의 검증 정책은 `ci: required`인데, 이번 수정분이 push되지 않아 CI 검증이 없습니다"
+    "(현재 상태: Locally Verified). push가 사용자 승인 대기라면 보고에 'CI 미검증(push 전)'으로 명시하고 종료하세요."
+)
+REASON_CI_UNCHECKED = (
+    "[discipline] {ref} push 이후 CI 결과를 확인하지 않았습니다. `gh run watch <run id> --exit-status`로 "
+    "확인하세요. 판정은 명령 출력이 아니라 GitHub API의 repository·branch·workflow·headSha·job 결과로 합니다."
+)
+REASON_CI_FAILED = (
+    "[discipline] {ref}의 CI가 실패했습니다({detail}). 고친 뒤 다시 push해 확인하거나, 실패한 run과 원인을 "
+    "'미완료·리스크'에 그대로 보고하세요."
+)
+REASON_CI_UNKNOWN = (
+    "[discipline] {ref}의 CI 결과를 확정할 수 없습니다({detail}). 실행이 끝난 뒤 다시 확인하거나 "
+    "'CI 미확인'으로 보고하세요."
+)
 REASON_GATE_NOT_RUN = (
     "[discipline] {root}에 선언된 품질 게이트(`{gate}`)가 마지막 수정 이후 통과하지 않았습니다"
     "(다른 테스트 명령만 실행됨). 게이트를 그대로 실행하거나, 실행하지 못한 이유를 '미확인'으로 보고하세요."
@@ -383,17 +440,79 @@ def _stop_decision(state: dict[str, Any]) -> tuple[str, str | None] | None:
             return REASON_GATE_NOT_RUN.format(root=root, gate=entry.get("gate")), None
         if outcome in ("failed", "unknown"):
             key = f"{root}|{ev_at}"
-            notified_turn = state.get("notified", {}).get(key)
-            # Block once per result; again only within the same turn (the parallel notify
-            # hook may read the state after discipline wrote the flag).
-            if notified_turn is None or notified_turn == state.get("turn"):
+            if _not_yet_notified(state, key):
                 reason = (
                     REASON_FAILED
                     if outcome == "failed"
                     else REASON_UNKNOWN.format(why=ev.get("why", ""))
                 )
                 return reason + where, key
+            continue
+        if entry.get("ci") == "required":
+            decision = _ci_decision(state, root, edited_at)
+            if decision:
+                return decision
     return None
+
+
+def _not_yet_notified(state: dict[str, Any], key: str) -> bool:
+    # Block once per result; again only within the same turn (the parallel notify hook
+    # may read the state after discipline wrote the flag).
+    turn = state.get("notified", {}).get(key)
+    return turn is None or turn == state.get("turn")
+
+
+def _inside(path: str, root: str) -> bool:
+    p, r = (
+        os.path.normcase(os.path.normpath(path)),
+        os.path.normcase(os.path.normpath(root)),
+    )
+    return p == r or p.startswith(r.rstrip("\\/") + os.sep)
+
+
+def _ci_decision(
+    state: dict[str, Any], root: str, edited_at: float
+) -> tuple[str, str] | None:
+    """CI half of the completion check for a project whose policy says `ci: required`."""
+    pushes = [
+        (top, p)
+        for top, p in state.get("pushes", {}).items()
+        if _inside(root, top)
+        and float(p.get("at", 0)) >= edited_at
+        and not any(_inside(u, root) for u in p.get("uncommitted", []))
+    ]
+    if not pushes:
+        key = f"{root}|nopush|{edited_at}"
+        return (
+            (REASON_NOT_PUSHED.format(root=root), key)
+            if _not_yet_notified(state, key)
+            else None
+        )
+    top, push = max(pushes, key=lambda tp: float(tp[1].get("at", 0)))
+    ci = state.get("ci", {}).get(top) or {}
+    ref = f"{push.get('repo')}@{str(push.get('sha', ''))[:7]}"
+    if float(ci.get("at", 0)) < float(push.get("at", 0)) or ci.get("sha") != push.get(
+        "sha"
+    ):
+        key = f"{root}|unchecked|{push.get('sha')}"
+        return (
+            (REASON_CI_UNCHECKED.format(ref=ref), key)
+            if _not_yet_notified(state, key)
+            else None
+        )
+    status = ci.get("status")
+    if status == "verified":
+        return None
+    key = f"{root}|ci|{push.get('sha')}|{status}|{ci.get('why')}"
+    if not _not_yet_notified(state, key):
+        return None
+    runs = ", ".join(
+        f"run {r.get('id')} {r.get('conclusion') or r.get('status')}"
+        for r in ci.get("runs", [])
+    )
+    detail = "; ".join(x for x in (runs, str(ci.get("why") or "")) if x)
+    template = REASON_CI_FAILED if status == "failed" else REASON_CI_UNKNOWN
+    return template.format(ref=ref, detail=detail), key
 
 
 def stop_block_reason(state: dict[str, Any], stop_hook_active: bool) -> str | None:
