@@ -18,3 +18,4 @@ __pycache__/
 !/.gitattributes
 !/.github/
 !/pyrightconfig.json
+/tests/_tmp*/

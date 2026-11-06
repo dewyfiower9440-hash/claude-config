@@ -1,6 +1,7 @@
 """Scenario tests for ~/.claude/hooks/discipline.py (run with python -I)."""
 
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -190,7 +191,22 @@ call(
     tool_name="Agent",
     tool_input={"subagent_type": "test-runner", "prompt": "run"},
 )
-check("test-runner agent counts as verify", decision(call("stop", s)), None)
+check(
+    "test-runner agent claim alone is not evidence -> block",
+    decision(call("stop", s)),
+    "block",
+)
+call(
+    "post",
+    s,
+    tool_name="Bash",
+    tool_input={"command": "uv run pytest -q"},
+    agent_id="a1",
+    agent_type="test-runner",
+)
+check(
+    "subagent's own pytest run is evidence -> allowed", decision(call("stop", s)), None
+)
 edit(s, f"{PROJ}/src/c.ps1", "a", "b", mode="post")
 call("post", s, tool_name="PowerShell", tool_input={"command": "Get-ChildItem"})
 check("non-verify command does not count -> block", decision(call("stop", s)), "block")
@@ -209,6 +225,11 @@ def state_of(session: str) -> dict:
     )
 
 
+def evidence(session: str, root: str = "") -> dict:
+    """Verification evidence for a project root ('' = no declared policy)."""
+    return state_of(session).get("evidence", {}).get(root, {})
+
+
 s = uuid.uuid4().hex
 call("prompt", s)
 edit(s, f"{PROJ}/src/a.py", "a", "b", mode="post")
@@ -219,9 +240,9 @@ call(
     tool_input={"command": "uv run pytest -q"},
     error="Exit code 1",
 )
-st = state_of(s)
-check("failed pytest recorded as verify attempt", st["last_verify"] > 0, True)
-check("failed pytest -> last_verify_ok False", st["last_verify_ok"], False)
+st = evidence(s)
+check("failed pytest recorded as verify attempt", st.get("at", 0) > 0, True)
+check("failed pytest -> outcome failed", st.get("outcome"), "failed")
 out = call("stop", s)
 check("stop after failed verify -> block", decision(out), "block")
 check("failed-verify block says report failure", "실패" in reason(out), True)
@@ -246,21 +267,23 @@ call(
 )
 check(
     "failed non-verify command ignored",
-    state_of(s)["last_verify"] == st["last_verify"],
+    evidence(s).get("at") == st.get("at"),
     True,
 )
 call("post", s, tool_name="Bash", tool_input={"command": "uv run pytest -q"})
-check("passing verify -> last_verify_ok True", state_of(s)["last_verify_ok"], True)
+check("passing verify -> outcome passed", evidence(s).get("outcome"), "passed")
 check("stop after passing verify -> allowed", decision(call("stop", s)), None)
 edit(s, f"{PROJ}/src/a.py", "b", "c", mode="post")
 call(
     "fail",
     s,
-    tool_name="Agent",
-    tool_input={"subagent_type": "test-runner"},
-    error="boom",
+    tool_name="Bash",
+    tool_input={"command": "uv run pytest -q"},
+    error="Exit code 1",
+    agent_id="a1",
+    agent_type="test-runner",
 )
-check("new failure via test-runner agent -> block", decision(call("stop", s)), "block")
+check("new failure inside a subagent -> block", decision(call("stop", s)), "block")
 edit(s, f"{PROJ}/src/a.py", "c", "d", mode="post")
 out = call("stop", s)
 check(
@@ -279,12 +302,156 @@ call(
 )
 check("failed verify without code edits -> allowed", decision(call("stop", s)), None)
 
+
+# ---- D-1a: results must be attributable, reviews are not verification
+def fresh(path: str = f"{PROJ}/src/a.py") -> str:
+    sid = uuid.uuid4().hex
+    call("prompt", sid)
+    edit(sid, path, "a", "b", mode="post")
+    return sid
+
+
+s = fresh()
+call("post", s, tool_name="Bash", tool_input={"command": "uv run pytest -q | tail -3"})
+out = call("stop", s)
+check("pytest piped to tail -> block (result unknown)", decision(out), "block")
+check("unknown reason names the cause", "확인할 수 없습니다" in reason(out), True)
+check(
+    "unknown, stop_hook_active -> allowed",
+    decision(call("stop", s, stop_hook_active=True)),
+    None,
+)
+call("prompt", s)
+check(
+    "same unknown result, next turn -> not blocked again",
+    decision(call("stop", s)),
+    None,
+)
+
+s = fresh()
+call(
+    "post",
+    s,
+    tool_name="Bash",
+    tool_input={"command": "set -o pipefail; uv run pytest -q | tail -3"},
+)
+check(
+    "pipefail makes the piped result attributable -> allowed",
+    decision(call("stop", s)),
+    None,
+)
+
+s = fresh()
+call("post", s, tool_name="Bash", tool_input={"command": "uv run pytest -q; echo done"})
+check("pytest followed by ; -> block (masked)", decision(call("stop", s)), "block")
+
+s = fresh()
+call(
+    "post",
+    s,
+    tool_name="Bash",
+    tool_input={"command": "cd x && uv run pytest -q && echo ok"},
+)
+check("&& chain keeps the exit status -> allowed", decision(call("stop", s)), None)
+
+s = fresh()
+call(
+    "post",
+    s,
+    tool_name="Bash",
+    tool_input={"command": "uv run pytest -q", "run_in_background": True},
+    tool_response={"stdout": "", "stderr": "", "backgroundTaskId": "b1"},
+)
+check("backgrounded pytest -> block (not finished)", decision(call("stop", s)), "block")
+
+s = fresh()
+call("post", s, tool_name="Bash", tool_input={"command": "python -I scratch_probe.py"})
+check(
+    "arbitrary python script is not verification -> block",
+    decision(call("stop", s)),
+    "block",
+)
+
+s = fresh()
+call(
+    "post",
+    s,
+    tool_name="Agent",
+    tool_input={"subagent_type": "code-reviewer", "prompt": "review"},
+)
+check(
+    "code-reviewer alone is not verification -> block",
+    decision(call("stop", s)),
+    "block",
+)
+check("code-reviewer recorded as review", state_of(s).get("last_review", 0) > 0, True)
+
+# ---- D-1a / FC-2: a declared project gate must be the thing that passed
+ROOT = Path(__file__).resolve().parent / "_tmp_disc_project"
+(ROOT / "src").mkdir(parents=True, exist_ok=True)
+(ROOT / "CLAUDE.md").write_text(
+    "# demo\n\n## Verification\n- gate: `uv run pytest -q --cov`\n- ci: none\n\n## Gotchas\n",
+    encoding="utf-8",
+)
+R = str(ROOT)
+s = fresh(f"{R}/src/m.py")
+call("post", s, tool_name="Bash", tool_input={"command": "uv run pytest -q"}, cwd=R)
+out = call("stop", s)
+check("FC-2: tests pass but declared gate not run -> block", decision(out), "block")
+check("FC-2 reason names the declared gate", "pytest -q --cov" in reason(out), True)
+call(
+    "post", s, tool_name="Bash", tool_input={"command": "uv run pytest -q --cov"}, cwd=R
+)
+check(
+    "declared gate passed in project root -> allowed", decision(call("stop", s)), None
+)
+
+s = fresh(f"{R}/src/m.py")
+call(
+    "post",
+    s,
+    tool_name="Bash",
+    tool_input={"command": "uv run pytest -q --cov"},
+    cwd=str(ROOT.parent),
+)
+check(
+    "gate run in another directory does not count -> block",
+    decision(call("stop", s)),
+    "block",
+)
+call(
+    "post",
+    s,
+    tool_name="Bash",
+    tool_input={"command": f'cd "{R}" && uv run pytest -q --cov'},
+    cwd=str(ROOT.parent),
+)
+check("cd into the project then gate -> allowed", decision(call("stop", s)), None)
+
+s = fresh(f"{R}/src/m.py")
+call(
+    "fail",
+    s,
+    tool_name="Bash",
+    tool_input={"command": "uv run pytest -q --cov"},
+    cwd=R,
+    error="Exit code 1",
+)
+out = call("stop", s)
+check("declared gate failed -> block with failure reason", "실패" in reason(out), True)
+
+
+shutil.rmtree(ROOT, ignore_errors=True)
+
 # ---- notify: no toast when discipline will block, toast on the final stop
 sys.path.insert(0, str(Path(HOOK).parent))
 import discipline
 import notify
 
-blocking = {"last_code_edit": 2.0, "last_verify": 1.0}
+blocking = {
+    "dirty": {"": {"at": 2.0, "gate": None, "ci": "undeclared"}},
+    "evidence": {},
+}
 check(
     "pure stop_block_reason: unverified edit -> reason",
     discipline.stop_block_reason(blocking, stop_hook_active=False) is not None,

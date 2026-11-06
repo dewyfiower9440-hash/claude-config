@@ -25,6 +25,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+# python -I drops the script dir; verification.py and shellparse.py live next to this file
+_HOOKS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _HOOKS_DIR not in sys.path:
+    sys.path.insert(0, _HOOKS_DIR)
+
 
 def temp_root() -> Path:
     """Same lookup order as tempfile.gettempdir(), without its ~90 ms import."""
@@ -73,14 +78,10 @@ TEST_PATH = re.compile(
     re.IGNORECASE,
 )
 
-VERIFY_CMD = re.compile(
-    r"\b(pytest|vitest|jest|mocha|tsc|pyright|mypy|ruff|eslint|prettier|Invoke-Pester|Invoke-ScriptAnalyzer|"
-    r"cargo\s+(test|check|clippy)|go\s+(test|vet|build)|dotnet\s+(test|build)|"
-    r"(pnpm|npm|yarn)\s+(run\s+)?(test|lint|typecheck|check|build|test:\w+)|"
-    r"uv\s+run|node\s+\S+\.(m?js|cjs)|python3?\s+\S+\.py|tsx\s+\S+|make\s+(test|check))\b",
-    re.IGNORECASE,
-)
-VERIFY_AGENTS = {"test-runner", "code-reviewer"}
+# Verification is judged by hooks/verification.py (declared project gate, real runners,
+# attributable exit status). Agents' own claims never count: a subagent's Bash runs reach
+# these hooks directly (with agent_id), and code-reviewer is recorded only as a review.
+REVIEW_AGENTS = {"code-reviewer"}
 
 # (label, regex) - counted in old vs new content; an increase is "weakening".
 SUPPRESSIONS = [
@@ -120,9 +121,13 @@ def default_state() -> dict[str, Any]:
         "turn": 0,
         "turn_files": [],
         "last_code_edit": 0.0,
-        "last_verify": 0.0,
-        "last_verify_ok": True,
-        "fail_notified": None,  # {"verify": <last_verify>, "turn": <turn>} once blocked for it
+        # project root ("" = no declared policy) -> {"at", "gate", "ci", "validate"} of the last code edit
+        "dirty": {},
+        # project root -> {"at", "outcome", "kind", "cmd", "why"} of the last verification evidence
+        "evidence": {},
+        # "<root>|<evidence at>" -> turn in which Stop was blocked for that failed/unknown result
+        "notified": {},
+        "last_review": 0.0,
         "plan_approved": False,
     }
 
@@ -269,29 +274,71 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
             if path not in state["turn_files"]:
                 state["turn_files"].append(path)
             if Path(path).suffix.lower() in CODE_EXT:
+                from verification import find_policy
+
                 state["last_code_edit"] = now
-    elif is_verification(tool, ti):
-        state["last_verify"] = now
-        state["last_verify_ok"] = True
+                policy = find_policy(path)
+                state["dirty"][policy["root"]] = {
+                    "at": now,
+                    "gate": policy["gate"],
+                    "ci": policy["ci"],
+                    "validate": policy["validate"],
+                }
+    elif tool in ("Bash", "PowerShell"):
+        record_evidence(data, state, failed=False)
+    elif tool in ("Agent", "Task"):
+        if ti.get("subagent_type") in REVIEW_AGENTS:
+            state["last_review"] = now  # a review, not verification
     elif tool == "ExitPlanMode":
         state["plan_approved"] = (
             True  # PostToolUse only fires once the user approved the plan
         )
 
 
-def is_verification(tool: str, ti: dict[str, Any]) -> bool:
-    if tool in ("Bash", "PowerShell"):
-        return bool(VERIFY_CMD.search(ti.get("command", "")))
-    if tool in ("Agent", "Task"):
-        return ti.get("subagent_type") in VERIFY_AGENTS
-    return False
+def record_evidence(
+    data: dict[str, Any], state: dict[str, Any], *, failed: bool
+) -> None:
+    """Attach what this shell command proves (if anything) to each project with unverified edits."""
+    from verification import Policy, evaluate
+
+    ti = data.get("tool_input", {}) or {}
+    response = data.get("tool_response")
+    background = bool(ti.get("run_in_background")) or (
+        isinstance(response, dict) and bool(response.get("backgroundTaskId"))
+    )
+    is_ps = data.get("tool_name") == "PowerShell"
+    cwd = str(data.get("cwd") or os.getcwd())
+    now = time.time()
+    for root, entry in state["dirty"].items():
+        policy: Policy = {
+            "root": root,
+            "gate": entry.get("gate"),
+            "ci": entry.get("ci", "undeclared"),
+            "validate": entry.get("validate"),
+        }
+        ev = evaluate(
+            str(ti.get("command", "")),
+            "powershell" if is_ps else "bash",
+            cwd,
+            policy,
+            failed=failed,
+            background=background,
+        )
+        if ev is None:
+            continue
+        old = state["evidence"].get(root) or {}
+        still_valid_pass = old.get("outcome") == "passed" and float(
+            old.get("at", 0)
+        ) >= float(entry.get("at", 0))
+        if still_valid_pass and ev["outcome"] in ("partial", "unknown"):
+            continue  # a later side run does not revoke a passed gate for unchanged code
+        state["evidence"][root] = {**ev, "at": now}
 
 
 def on_fail(data: dict[str, Any], state: dict[str, Any]) -> None:
-    """PostToolUseFailure: a failed test/lint run is still a verification attempt."""
-    if is_verification(data.get("tool_name", ""), data.get("tool_input", {}) or {}):
-        state["last_verify"] = time.time()
-        state["last_verify_ok"] = False
+    """PostToolUseFailure: a failed check is still evidence (of failure)."""
+    if data.get("tool_name") in ("Bash", "PowerShell"):
+        record_evidence(data, state, failed=True)
 
 
 def on_prompt(_data: dict[str, Any], state: dict[str, Any]) -> None:
@@ -309,42 +356,63 @@ REASON_FAILED = (
     "고칠 수 있으면 고치고 다시 검증하세요. 아니면 실패한 명령, 실패 내용, 원인 추정을 보고의 "
     "'미완료·리스크'에 그대로 적고 종료하세요(이미 그렇게 보고했다면 바로 종료해도 됩니다)."
 )
+REASON_UNKNOWN = (
+    "[discipline] 마지막 검증의 결과를 확인할 수 없습니다({why}). 종료 코드가 가려지면 실패해도 성공처럼 "
+    "보입니다. 검증 명령을 단독으로(또는 &&로만 이어서) 포그라운드에서 다시 실행하거나, 결과를 확인할 수 "
+    "없었다는 사실을 '미완료·리스크'에 적고 종료하세요."
+)
+REASON_GATE_NOT_RUN = (
+    "[discipline] {root}에 선언된 품질 게이트(`{gate}`)가 마지막 수정 이후 통과하지 않았습니다"
+    "(다른 테스트 명령만 실행됨). 게이트를 그대로 실행하거나, 실행하지 못한 이유를 '미확인'으로 보고하세요."
+)
 
 
-def failure_pending(state: dict[str, Any]) -> bool:
-    """Last verification (after the last code edit) failed and was not yet flagged in an earlier turn."""
-    last_verify = float(state.get("last_verify", 0))
-    last_edit = float(state.get("last_code_edit", 0))
-    if last_edit <= 0 or last_verify < last_edit or state.get("last_verify_ok", True):
-        return False
-    notified = state.get("fail_notified")
-    if not isinstance(notified, dict) or notified.get("verify") != last_verify:
-        return True
-    # Already flagged for this failure: block again only within the same turn (the
-    # parallel notify hook may read the state after discipline wrote the flag).
-    return notified.get("turn") == state.get("turn")
+def _stop_decision(state: dict[str, Any]) -> tuple[str, str | None] | None:
+    """(reason, notify key) for the first project whose edits lack passing evidence."""
+    for root, entry in sorted(state.get("dirty", {}).items()):
+        edited_at = float(entry.get("at", 0))
+        if edited_at <= 0:
+            continue
+        where = f" (프로젝트: {root})" if root else ""
+        ev = state.get("evidence", {}).get(root) or {}
+        ev_at = float(ev.get("at", 0))
+        if ev_at < edited_at:
+            return REASON_UNVERIFIED + where, None
+        outcome = ev.get("outcome")
+        if outcome == "partial":
+            return REASON_GATE_NOT_RUN.format(root=root, gate=entry.get("gate")), None
+        if outcome in ("failed", "unknown"):
+            key = f"{root}|{ev_at}"
+            notified_turn = state.get("notified", {}).get(key)
+            # Block once per result; again only within the same turn (the parallel notify
+            # hook may read the state after discipline wrote the flag).
+            if notified_turn is None or notified_turn == state.get("turn"):
+                reason = (
+                    REASON_FAILED
+                    if outcome == "failed"
+                    else REASON_UNKNOWN.format(why=ev.get("why", ""))
+                )
+                return reason + where, key
+    return None
 
 
 def stop_block_reason(state: dict[str, Any], stop_hook_active: bool) -> str | None:
     """Pure decision shared with notify.py: why this Stop is blocked, or None."""
     if stop_hook_active:
         return None  # already blocked once this turn; let Claude stop
-    if float(state.get("last_code_edit", 0)) > float(state.get("last_verify", 0)):
-        return REASON_UNVERIFIED
-    if failure_pending(state):
-        return REASON_FAILED
-    return None
+    decision = _stop_decision(state)
+    return decision[0] if decision else None
 
 
 def on_stop(data: dict[str, Any], state: dict[str, Any]) -> None:
-    reason = stop_block_reason(state, bool(data.get("stop_hook_active")))
-    if reason is None:
+    if data.get("stop_hook_active"):
         return
-    if reason == REASON_FAILED:
-        state["fail_notified"] = {
-            "verify": state["last_verify"],
-            "turn": state.get("turn"),
-        }
+    decision = _stop_decision(state)
+    if decision is None:
+        return
+    reason, notify_key = decision
+    if notify_key:
+        state.setdefault("notified", {})[notify_key] = state.get("turn")
     print(json.dumps({"decision": "block", "reason": reason}))
 
 
