@@ -95,6 +95,19 @@ def find_policy(file_path: str) -> Policy:
 
 
 # ---------------------------------------------------------------- attribution (pure)
+def silent_on_failure(cmd: SimpleCommand) -> bool:
+    """PowerShell cmdlet runners whose failures do not reach the exit status (measured on 5.1:
+    the PowerShell tool reports success after failing Pester tests unless -CI/-EnableExit is set,
+    and Invoke-ScriptAnalyzer findings never fail without -EnableExit)."""
+    program, args = program_and_args(cmd)
+    low = {a.lower() for a in args}
+    if program == "invoke-pester":
+        return not low & {"-ci", "-enableexit"}
+    if program == "invoke-scriptanalyzer":
+        return "-enableexit" not in low
+    return False
+
+
 def is_runner(cmd: SimpleCommand) -> bool:
     program, args = program_and_args(cmd)
     low = [a.lower() for a in args]
@@ -231,7 +244,19 @@ def evaluate(
             }
         return None
 
-    def verdict(kind: str, index: int) -> Evidence:
+    def verdict(kind: str, index: int, start: int | None = None) -> Evidence:
+        silent = [
+            c
+            for c in cmds[index if start is None else start : index + 1]
+            if silent_on_failure(c)
+        ]
+        if silent and not failed:
+            return {
+                "outcome": "unknown",
+                "kind": kind,
+                "cmd": command[:200],
+                "why": f"{silent[0].words[0]} reports failures without a failing exit status (add -CI / -EnableExit)",
+            }
         if failed:
             return {
                 "outcome": "failed",
@@ -265,7 +290,7 @@ def evaluate(
             continue
         k = _find_sequence(cmds, target)
         if k is not None and _inside(cwd_at(cmds, k, cwd), root):
-            return verdict(kind, k + len(target) - 1)
+            return verdict(kind, k + len(target) - 1, start=k)
 
     for i, c in enumerate(cmds):
         if is_runner(c) and (not root or _inside(cwd_at(cmds, i, cwd), root)):

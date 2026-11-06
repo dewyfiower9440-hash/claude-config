@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TESTS = [
     "test_shellparse",
     "test_verification",
+    "test_powershell_semantics",
     "test_ci_status",
     "test_guard",
     "test_discipline",

@@ -181,5 +181,50 @@ check(
     "passed",
 )
 
+# ---- D-6: PowerShell cmdlet runners report failure only with exit switches (measured)
+check(
+    "Invoke-Pester without -CI -> not passed",
+    outcome("Invoke-Pester", dialect="powershell"),
+    "unknown",
+)
+check(
+    "Invoke-Pester -Output Detailed (no -CI) -> not passed",
+    outcome("Invoke-Pester -Output Detailed", dialect="powershell"),
+    "unknown",
+)
+check(
+    "Invoke-Pester -CI -> passed",
+    outcome("Invoke-Pester -CI", dialect="powershell"),
+    "passed",
+)
+check(
+    "Invoke-Pester -EnableExit -> passed",
+    outcome("Invoke-Pester -EnableExit", dialect="powershell"),
+    "passed",
+)
+check(
+    "Invoke-ScriptAnalyzer without -EnableExit -> not passed",
+    outcome("Invoke-ScriptAnalyzer -Path . -Recurse", dialect="powershell"),
+    "unknown",
+)
+check(
+    "Invoke-ScriptAnalyzer -EnableExit -> passed",
+    outcome("Invoke-ScriptAnalyzer -Path . -EnableExit", dialect="powershell"),
+    "passed",
+)
+check(
+    "EAP Stop does not make a later statement safe -> unknown",
+    outcome(
+        "$ErrorActionPreference = 'Stop'; uv run pytest -q; Write-Output done",
+        dialect="powershell",
+    ),
+    "unknown",
+)
+check(
+    "PS native runner then native command -> unknown",
+    outcome("uv run pytest -q; cmd /c exit 0", dialect="powershell"),
+    "unknown",
+)
+
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)
