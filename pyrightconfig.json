@@ -1,0 +1,4 @@
+{
+  "extraPaths": ["hooks"],
+  "include": ["hooks", "tests"]
+}

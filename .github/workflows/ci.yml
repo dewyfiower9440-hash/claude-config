@@ -24,7 +24,8 @@ jobs:
         shell: pwsh
         run: |
           $py = uv python find 3.13
-          foreach ($t in 'test_guard', 'test_discipline', 'test_session_context', 'test_format_lint') {
+          # test_guard_corpus is local-only: it replays this machine's transcripts.
+          foreach ($t in 'test_shellparse', 'test_guard', 'test_discipline', 'test_session_context', 'test_format_lint') {
             & $py -I "tests/$t.py"
             if ($LASTEXITCODE -ne 0) { throw "$t failed" }
           }
