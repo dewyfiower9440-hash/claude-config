@@ -1,0 +1,30 @@
+name: ci
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  hooks:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+      - name: Install Python, ruff and PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          uv python install 3.13
+          uv tool install ruff
+          uv tool dir --bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          powershell -NoProfile -Command "Install-Module PSScriptAnalyzer -Force -Scope CurrentUser"
+      - name: Lint
+        shell: pwsh
+        run: |
+          ruff check hooks tests
+          ruff format --check hooks tests
+      - name: Hook tests
+        shell: pwsh
+        run: |
+          $py = uv python find 3.13
+          foreach ($t in 'test_guard', 'test_discipline', 'test_session_context', 'test_format_lint') {
+            & $py -I "tests/$t.py"
+            if ($LASTEXITCODE -ne 0) { throw "$t failed" }
+          }
