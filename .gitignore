@@ -1,0 +1,18 @@
+# Whitelist: ~/.claude holds credentials, history, transcripts and caches.
+# Track only hand-maintained configuration; everything else stays ignored.
+/*
+!/.gitignore
+!/CLAUDE.md
+!/settings.json
+!/rules/
+!/hooks/
+!/skills/
+!/agents/
+!/tests/
+
+# Inside tracked folders
+/skills/synced/
+__pycache__/
+.ruff_cache/
+.pytest_cache/
+!/.gitattributes
