@@ -263,6 +263,68 @@ rec(
     "GitHub MCP auth (get_me)",
     out.splitlines()[-1] if out else "",
 )
+rec(
+    "PASS" if "excluded tools absent: True" in out else "FAIL",
+    "GitHub MCP repo create/fork/delete removed server-side",
+)
+code, out = run(
+    [sys.executable, "-I", str(SCRATCH / "smoke_playwright_mcp.py")], timeout=120
+)
+rec(
+    "PASS" if code == 0 else "FAIL",
+    "Playwright MCP pinned + gated tools present",
+    " / ".join(out.splitlines()[-3:]) if out else "",
+)
+cfg = json.loads((HOME / ".claude.json").read_text(encoding="utf-8"))
+pw = cfg.get("mcpServers", {}).get("playwright", {})
+rec(
+    "PASS"
+    if "playwright-mcp.cmd" in pw.get("command", "") and "@latest" not in json.dumps(pw)
+    else "FAIL",
+    "Playwright MCP uses pinned launcher (no npx @latest)",
+    pw.get("command", ""),
+)
+rec(
+    "PASS"
+    if not [k for k in cfg.get("mcpServers", {}) if "jarvis" in k.lower()]
+    else "FAIL",
+    "no Jarvis MCP servers",
+)
+perm = json.loads((CLAUDE / "settings.json").read_text(encoding="utf-8"))["permissions"]
+want_ask = {
+    "mcp__github__push_files",
+    "mcp__github__create_or_update_file",
+    "mcp__github__delete_file",
+    "mcp__github__merge_pull_request",
+    "mcp__github__update_pull_request_branch",
+    "mcp__github__create_pull_request",
+    "mcp__github__actions_run_trigger",
+    "mcp__playwright__browser_run_code_unsafe",
+    "mcp__playwright__browser_file_upload",
+}
+missing_ask = sorted(want_ask - set(perm["ask"]))
+rec(
+    "PASS" if not missing_ask else "FAIL",
+    "MCP write/unsafe tools require approval (ask)",
+    ", ".join(missing_ask),
+)
+rec(
+    "PASS" if "mcp__github__delete_repository" in perm["deny"] else "FAIL",
+    "GitHub delete_repository denied",
+)
+for repo in (CLAUDE, Path("C:/dev/tools")):
+    code, out = run(["git", "status", "--porcelain"], cwd=repo)
+    rec(
+        "PASS" if code == 0 and not out else "FAIL", f"git repo clean: {repo}", out[:80]
+    )
+code, out = run(
+    ["git", "ls-files", ".credentials.json", "history.jsonl", "projects"], cwd=CLAUDE
+)
+rec(
+    "PASS" if code == 0 and not out else "FAIL",
+    "~/.claude repo does not track secrets/history",
+    out[:80],
+)
 code, out = run(["gh", "auth", "status"])
 rec(
     "PASS" if code == 0 and "Logged in" in out else "FAIL",
