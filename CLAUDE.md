@@ -11,7 +11,7 @@
 3. **No repeated attempts.** If the same approach fails twice, stop. Re-check the assumptions (right file, right env, right version, cache, build output, am I running what I think?), state what you learned, and change the approach or ask. Never loop on near-identical edits.
 4. **Minimal change, stay in scope.** Change only what was asked. Refactors, renames, dependency bumps and "while I'm here" fixes are proposed, not done. Mention adjacent problems you notice; don't fix them silently.
 5. **Read before writing.** Match the existing structure, naming and patterns. Search for an existing helper before writing a new one.
-6. **Verify before "done".** Run the relevant tests, type check and lint, or the program itself, after the last edit, and show the result. A Stop hook blocks ending a turn with unverified code edits.
+6. **Verify before "done", by evidence.** Completion has states reached only through evidence the hooks record: **Implemented** → **Locally Verified** (the project's declared `gate` passed with an attributable exit status) → **CI Verified** (`ci: required`: every push-triggered workflow for the pushed repo/branch/SHA completed with all jobs green, read from the GitHub API) → **Validated** (optional `validate`, a real-environment check). A failed, masked (`|`, `;`, `||` after the check, background, timeout) or unreadable result is **Blocked/Unknown**, never success; a reviewer's or subagent's claim is not evidence. Each project declares its policy in a `## Verification` section of its CLAUDE.md (`gate:`, `ci: required|none`, optional `validate:`). Run the gate verbatim, from the project root, in the foreground. The Stop hook blocks once per missing/failed/unknown state; reports name the state reached and cite CI run ids.
 
 ## 2. Planning (multi-file or design work)
 - Triggers: the change touches **3+ files**, adds a module/dependency/schema/API, or involves a real design choice. Then use `/plan` (or plan mode): goal, findings from the code, 2-3 options with trade-offs, recommended option, step list, risks, verification per step. **Get approval before editing.** A hook stops a turn that edits more than 5 files without an approved plan.
@@ -60,7 +60,7 @@ At the end of a task, report only:
 ```
 결과: <one line: done / partially done / blocked>
 변경: <file:line or file, one line each, what and why>
-검증: <commands run + results (pass/fail counts)>
+검증: <state reached (Locally Verified / CI Verified run <id> / Blocked·Unknown) + commands run + results (pass/fail counts)>
 미완료·리스크: <anything unfinished, unverified (미확인), or risky; "없음" if none>
 다음 단계: <only if there is a real decision for the user>
 ```
@@ -75,3 +75,8 @@ No preamble, no restating the request, no self-praise, no long explanations unle
 ## 8. Skills & subagents
 - Skill registry and acquisition policy: `~/.claude/skills/SKILLS.md`. When a task would clearly benefit from a skill that does not exist (a recurring workflow done 2+ times, or a missing capability), **propose** it: search the official Anthropic plugin marketplace first, otherwise draft our own. Third-party skills are read in full and reviewed (scripts, commands, network calls) before proposing. Install only after my approval, then update SKILLS.md.
 - Subagents: `code-reviewer` (after non-trivial changes), `test-runner` (long suites), `researcher` (library/API questions; uses Context7), `security-auditor` (before deploys; auth/secrets/deps changes). `/deep-review` runs them together. `/predeploy` gates every deploy.
+
+## Verification (applies only to this config repository, ~/.claude itself)
+<!-- Read by hooks/verification.py for edits under ~/.claude. Other projects declare their own in their CLAUDE.md. -->
+- gate: `python -I tests/run_all.py`
+- ci: required
