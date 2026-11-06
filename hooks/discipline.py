@@ -128,7 +128,8 @@ def default_state() -> dict[str, Any]:
         # "<root>|<evidence at>" -> turn in which Stop was blocked for that failed/unknown result
         "notified": {},
         "last_review": 0.0,
-        "plan_approved": False,
+        # plan approval: {task_id, plan_hash, scope, prompt_id[, rearmed_from]} or None
+        "approval": None,
     }
 
 
@@ -239,17 +240,23 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
     if not path or IGNORED_PATH.search(path):
         return
 
-    # 1) Large change without an approved plan.
-    files = set(state["turn_files"])
+    # 1) Large change without an approved plan covering it.
+    approval = active_approval(state, data.get("prompt_id"))
+    counted = [f for f in state["turn_files"] if not in_approved_scope(approval, f)]
     if (
-        path not in files
-        and not state.get("plan_approved")
-        and len(files) >= MAX_FILES_WITHOUT_PLAN
+        path not in state["turn_files"]
+        and not in_approved_scope(approval, path)
+        and len(counted) >= MAX_FILES_WITHOUT_PLAN
     ):
+        scope_note = (
+            f" 승인된 계획(task: {approval.get('task_id')})의 변경 범위 밖 파일입니다."
+            if approval
+            else ""
+        )
         emit_pre(
             "deny",
-            f"[discipline] 이번 턴에 이미 {len(files)}개 파일을 수정했습니다(한도 {MAX_FILES_WITHOUT_PLAN}). "
-            "더 진행하기 전에 /plan 으로 계획을 세우고 ExitPlanMode 로 사용자 승인을 받으세요.",
+            f"[discipline] 이번 턴에 승인 범위 밖 파일을 이미 {len(counted)}개 수정했습니다(한도 {MAX_FILES_WITHOUT_PLAN}).{scope_note} "
+            "더 진행하기 전에 /plan 으로 계획을 세우거나 갱신하고 ExitPlanMode 로 사용자 승인을 받으세요.",
         )
 
     # 2) Test weakening / suppressions.
@@ -282,9 +289,162 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
         if ti.get("subagent_type") in REVIEW_AGENTS:
             state["last_review"] = now  # a review, not verification
     elif tool == "ExitPlanMode":
-        state["plan_approved"] = (
-            True  # PostToolUse only fires once the user approved the plan
-        )
+        # PostToolUse only fires once the user approved the plan.
+        record_approval(data, state)
+
+
+# ---------------------------------------------------------------- plan approval scope
+APPROVALS_FILE = STATE_DIR / "approvals.json"
+MAX_APPROVALS = 50
+SCOPE_HEADINGS = r"(변경 범위|Scope|Change scope)"
+
+
+def normalize_plan(text: str) -> str:
+    """Plan body without frontmatter, checkbox state or progress log: what the user approved."""
+    text = text.replace("\r\n", "\n")
+    text = re.sub(r"\A---\s*\n.*?\n---\s*\n", "", text, flags=re.DOTALL)
+    text = re.sub(r"^(\s*[-*]\s)\[[xX]\]", r"\1[ ]", text, flags=re.MULTILINE)
+    text = re.sub(
+        r"^##\s*(진행 기록|Progress)\b.*?(?=^##\s|\Z)",
+        "",
+        text,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    return "\n".join(line.rstrip() for line in text.strip().splitlines())
+
+
+def plan_hash(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(normalize_plan(text).encode("utf-8")).hexdigest()
+
+
+def plan_task(text: str) -> str | None:
+    m = re.search(r"^task:\s*(\S+)\s*$", text, re.MULTILINE)
+    return m.group(1) if m else None
+
+
+def plan_scope(text: str, base: str) -> list[str]:
+    """Glob patterns under `## 변경 범위`, made absolute against `base` (the approving cwd)."""
+    m = re.search(
+        rf"^##\s*{SCOPE_HEADINGS}\b[^\n]*\n(.*?)(?=^##\s|\Z)",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    if not m:
+        return []
+    globs: list[str] = []
+    for line in m.group(2).splitlines():
+        item = re.match(r"^\s*[-*]\s+`?([^`\s(]+)`?", line)
+        if item:
+            g = item.group(1)
+            absolute = re.match(r"^[A-Za-z]:[\\/]", g) or g.startswith(("/", "~"))
+            g = os.path.expanduser(g) if g.startswith("~") else g
+            globs.append(_norm(g if absolute else os.path.join(base, g)))
+    return globs
+
+
+def _norm(path: str) -> str:
+    return os.path.normpath(path).replace("\\", "/").lower()
+
+
+def _load_approvals() -> dict[str, Any]:
+    try:
+        data = json.loads(APPROVALS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):  # missing or corrupt: no persisted approvals
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def record_approval(data: dict[str, Any], state: dict[str, Any]) -> None:
+    response = data.get("tool_response")
+    response = response if isinstance(response, dict) else {}
+    text = response.get("plan") if isinstance(response.get("plan"), str) else None
+    if text is None and isinstance(response.get("filePath"), str):
+        try:
+            text = Path(response["filePath"]).read_text(encoding="utf-8")
+        except OSError:  # plan file gone: approval stays prompt-only
+            text = None
+    cwd = str(data.get("cwd") or os.getcwd())
+    record = {
+        "task_id": plan_task(text) if text else None,
+        "plan_hash": plan_hash(text) if text else None,
+        "scope": plan_scope(text, cwd) if text else [],
+        "prompt_id": data.get("prompt_id"),
+        "session_id": data.get("session_id"),
+        "at": time.time(),
+    }
+    state["approval"] = record
+    if record["task_id"] and record["plan_hash"]:
+        approvals = _load_approvals()
+        approvals[record["plan_hash"]] = record
+        newest = sorted(approvals.items(), key=lambda kv: float(kv[1].get("at", 0)))[
+            -MAX_APPROVALS:
+        ]
+        APPROVALS_FILE.write_text(json.dumps(dict(newest)), encoding="utf-8")
+
+
+def rearm_approval(cwd: str) -> dict[str, Any] | None:
+    """An approval survives into a new prompt or session only for the same, still in-progress plan."""
+    approvals = _load_approvals()
+    if not approvals:
+        return None
+    d = os.path.abspath(cwd)
+    for _ in range(6):
+        plans_dir = Path(d) / "docs" / "plans"
+        if plans_dir.is_dir():
+            for plan in sorted(plans_dir.glob("*.md")):
+                try:
+                    text = plan.read_text(encoding="utf-8")
+                except OSError:  # unreadable plan: skip it
+                    continue
+                fm = re.match(r"\A---\s*\n(.*?)\n---", text, re.DOTALL)
+                in_progress = bool(
+                    fm
+                    and re.search(
+                        r"^status:\s*in-progress\s*$", fm.group(1), re.MULTILINE
+                    )
+                )
+                unchecked = re.search(r"^\s*[-*]\s\[ \]", text, re.MULTILINE)
+                if not (in_progress and unchecked):
+                    continue
+                record = approvals.get(plan_hash(text))
+                if (
+                    record
+                    and record.get("task_id")
+                    and record.get("task_id") == plan_task(text)
+                ):
+                    return {**record, "rearmed_from": str(plan)}
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return None
+
+
+def active_approval(state: dict[str, Any], prompt_id: object) -> dict[str, Any] | None:
+    approval = state.get("approval")
+    if not isinstance(approval, dict):
+        return None
+    if approval.get("rearmed_from") or approval.get("prompt_id") == prompt_id:
+        return approval
+    return None  # approved in an earlier prompt and not re-armed for this one
+
+
+def in_approved_scope(approval: dict[str, Any] | None, path: str) -> bool:
+    import fnmatch
+
+    if approval is None:
+        return False
+    scope = approval.get("scope") or []
+    if not scope:
+        return not approval.get(
+            "rearmed_from"
+        )  # unscoped approval covers only its own prompt
+    target = _norm(path)
+    if "/docs/plans/" in target:
+        return True  # keeping the plan file up to date is part of the approved work
+    return any(fnmatch.fnmatch(target, g) or target == g for g in scope)
 
 
 MAX_DIRTY_FILES = 200
@@ -410,9 +570,11 @@ def on_fail(data: dict[str, Any], state: dict[str, Any]) -> None:
         record_evidence(data, state, failed=True)
 
 
-def on_prompt(_data: dict[str, Any], state: dict[str, Any]) -> None:
+def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
     state["turn"] = int(state.get("turn", 0)) + 1
     state["turn_files"] = []
+    # A new prompt never inherits the previous approval; only the same in-progress plan re-arms it.
+    state["approval"] = rearm_approval(str(data.get("cwd") or os.getcwd()))
 
 
 REASON_UNVERIFIED = (

@@ -170,6 +170,186 @@ check(
     None,
 )
 
+
+# ---- D-2: approval bound to task_id + plan hash + approved scope
+def d2_edit(
+    session: str, path: str, prompt_id: str, cwd: str, mode: str = "pre"
+) -> dict | None:
+    return call(
+        mode,
+        session,
+        tool_name="Edit",
+        tool_input={"file_path": path, "old_string": "a", "new_string": "b"},
+        prompt_id=prompt_id,
+        cwd=cwd,
+    )
+
+
+def d2_prompt(session: str, prompt_id: str, cwd: str) -> None:
+    call("prompt", session, prompt_id=prompt_id, prompt="continue", cwd=cwd)
+
+
+def approve(session: str, plan: str, prompt_id: str, cwd: str) -> None:
+    call(
+        "post",
+        session,
+        tool_name="ExitPlanMode",
+        tool_input={},
+        tool_response={"plan": plan, "filePath": "C:/x/plans/p.md", "isAgent": False},
+        prompt_id=prompt_id,
+        cwd=cwd,
+    )
+
+
+D2 = Path(__file__).resolve().parent / "_tmp_d2"
+shutil.rmtree(D2, ignore_errors=True)
+(D2 / "docs" / "plans").mkdir(parents=True)
+REPO2 = str(D2)
+PLAN_BODY = (
+    "# Widget\n\ntask: widget-api\n\n## 목표\nShip it.\n\n## 변경 범위\n- src/**\n- tests/**\n\n"
+    "## 단계\n- [ ] 1. first\n- [ ] 2. second\n"
+)
+PLAN_FILE = D2 / "docs" / "plans" / "2026-11-06-widget.md"
+
+
+def save_plan(body: str, status: str = "in-progress") -> None:
+    PLAN_FILE.write_text(f"---\nstatus: {status}\n---\n\n{body}", encoding="utf-8")
+
+
+def fill_outside(session: str, prompt_id: str, n: int = 5) -> None:
+    for i in range(n):
+        d2_edit(session, f"{REPO2}/other/o{i}.py", prompt_id, REPO2, mode="post")
+
+
+s = uuid.uuid4().hex
+d2_prompt(s, "p1", REPO2)
+approve(s, PLAN_BODY, "p1", REPO2)
+for i in range(7):
+    d2_edit(s, f"{REPO2}/src/m{i}.py", "p1", REPO2, mode="post")
+check(
+    "D-2: same prompt, files in approved scope are not counted -> allowed",
+    decision(d2_edit(s, f"{REPO2}/src/m9.py", "p1", REPO2)),
+    None,
+)
+fill_outside(s, "p1")
+check(
+    "D-2: same prompt, 6th file outside the approved scope -> deny",
+    decision(d2_edit(s, f"{REPO2}/other/o9.py", "p1", REPO2)),
+    "deny",
+)
+
+s = uuid.uuid4().hex
+d2_prompt(s, "q1", REPO2)
+approve(s, PLAN_BODY, "q1", REPO2)
+d2_prompt(s, "q2", REPO2)  # no in-progress plan file exists yet
+fill_outside(s, "q2", 0)
+for i in range(5):
+    d2_edit(s, f"{REPO2}/src/n{i}.py", "q2", REPO2, mode="post")
+check(
+    "D-2: next prompt without an in-progress plan -> approval not reused -> deny",
+    decision(d2_edit(s, f"{REPO2}/src/n9.py", "q2", REPO2)),
+    "deny",
+)
+
+save_plan(
+    PLAN_BODY.replace("- [ ] 1. first", "- [x] 1. first")
+)  # same plan, a step ticked
+s = uuid.uuid4().hex
+d2_prompt(s, "r1", REPO2)
+approve(s, PLAN_BODY, "r1", REPO2)
+d2_prompt(s, "r2", REPO2)
+for i in range(6):
+    d2_edit(s, f"{REPO2}/src/k{i}.py", "r2", REPO2, mode="post")
+check(
+    "D-2: next prompt, same in-progress plan (checkbox ticked) -> re-armed -> allowed",
+    decision(d2_edit(s, f"{REPO2}/src/k9.py", "r2", REPO2)),
+    None,
+)
+fill_outside(s, "r2")
+check(
+    "D-2: re-armed approval still counts files outside scope -> deny",
+    decision(d2_edit(s, f"{REPO2}/other/z.py", "r2", REPO2)),
+    "deny",
+)
+
+s_resume = (
+    uuid.uuid4().hex
+)  # brand-new session id (e.g. after /clear), same plan on disk
+d2_prompt(s_resume, "u1", REPO2)
+for i in range(6):
+    d2_edit(s_resume, f"{REPO2}/tests/t{i}.py", "u1", REPO2, mode="post")
+check(
+    "D-2: new session resumes the same in-progress plan -> allowed",
+    decision(d2_edit(s_resume, f"{REPO2}/tests/t9.py", "u1", REPO2)),
+    None,
+)
+
+save_plan(
+    PLAN_BODY.replace("2. second", "2. second, plus a new endpoint")
+)  # plan edited after approval
+s = uuid.uuid4().hex
+d2_prompt(s, "v1", REPO2)
+for i in range(5):
+    d2_edit(s, f"{REPO2}/src/e{i}.py", "v1", REPO2, mode="post")
+check(
+    "D-2: plan steps changed after approval -> not re-armed -> deny",
+    decision(d2_edit(s, f"{REPO2}/src/e9.py", "v1", REPO2)),
+    "deny",
+)
+
+save_plan(PLAN_BODY, status="done")
+s = uuid.uuid4().hex
+d2_prompt(s, "w1", REPO2)
+for i in range(5):
+    d2_edit(s, f"{REPO2}/src/d{i}.py", "w1", REPO2, mode="post")
+check(
+    "D-2: plan marked done -> not re-armed -> deny",
+    decision(d2_edit(s, f"{REPO2}/src/d9.py", "w1", REPO2)),
+    "deny",
+)
+
+OTHER = PLAN_BODY.replace("task: widget-api", "task: billing").replace(
+    "Ship it.", "Bill it."
+)
+save_plan(OTHER)  # a different task's plan is in progress; only widget-api was approved
+s = uuid.uuid4().hex
+d2_prompt(s, "x1", REPO2)
+for i in range(5):
+    d2_edit(s, f"{REPO2}/src/b{i}.py", "x1", REPO2, mode="post")
+check(
+    "D-2: approval of one plan never re-arms another task -> deny",
+    decision(d2_edit(s, f"{REPO2}/src/b9.py", "x1", REPO2)),
+    "deny",
+)
+
+s = uuid.uuid4().hex
+d2_prompt(s, "y1", REPO2)
+call(
+    "post",
+    s,
+    tool_name="ExitPlanMode",
+    tool_input={},
+    tool_response={},
+    prompt_id="y1",
+    cwd=REPO2,
+)
+for i in range(6):
+    d2_edit(s, f"{REPO2}/any/a{i}.py", "y1", REPO2, mode="post")
+check(
+    "D-2: approval without plan text -> valid for that prompt only (allowed now)",
+    decision(d2_edit(s, f"{REPO2}/any/a9.py", "y1", REPO2)),
+    None,
+)
+d2_prompt(s, "y2", REPO2)
+for i in range(5):
+    d2_edit(s, f"{REPO2}/any/c{i}.py", "y2", REPO2, mode="post")
+check(
+    "D-2: ... and not reused on the next prompt -> deny",
+    decision(d2_edit(s, f"{REPO2}/any/c9.py", "y2", REPO2)),
+    "deny",
+)
+shutil.rmtree(D2, ignore_errors=True)
+
 # ---- stop verification
 s = uuid.uuid4().hex
 check("stop with no edits -> allowed", decision(call("stop", s)), None)

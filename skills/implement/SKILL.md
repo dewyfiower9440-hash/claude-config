@@ -25,7 +25,7 @@ Proceed through all remaining steps without asking between them. For each step:
 ### Stop conditions (the only reasons to pause and ask)
 Stop, leave the step unchecked, write the reason under `## 진행 기록`, and report to the user when:
 1. **The same gate fails twice** for the same step (global rule 1.3): state what you learned and the options.
-2. **Reality diverges from the plan**: unexpected coupling, a missing API, a step much larger than planned, or an assumption in the plan turns out false.
+2. **Reality diverges from the plan**: unexpected coupling, a missing API, a step much larger than planned, an assumption in the plan turns out false, or a file outside `## 변경 범위` must change (update the plan and get it re-approved; the discipline hook counts out-of-scope files against the 5-file guard).
 3. **A design decision the plan does not cover** is needed (new dependency, schema/API shape, behavior choice the user would care about).
 4. **An outward-facing action** is next: `git push`, deploy, publish, sending anything to an external service, or anything destructive/irreversible.
 Anything else (a lint fix, a missing import, a test fixture) is handled without asking. Never improvise a different design silently.

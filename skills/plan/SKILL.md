@@ -35,8 +35,14 @@ created: YYYY-MM-DD
 
 # <title>
 
+task: <slug, same as the file name's slug>
+
 ## 목표
 <1-3 sentences>. 비목표: <...>
+
+## 변경 범위
+- <glob, absolute or relative to the project root, e.g. src/billing/**>
+- <one per line; files outside it stay subject to the 5-file guard>
 
 ## 가정
 ## 선택한 접근
@@ -57,8 +63,8 @@ created: YYYY-MM-DD
 ```
 - Each step is independently verifiable and committable (ideally < ~200 changed lines); one checkbox per step, numbered.
 - Order the steps so the system stays working after each one (expand, then migrate, then contract for breaking changes).
-- `## 목표` and the checkbox format are parsed by `~/.claude/hooks/session_context.py`; keep them.
+- `## 목표` and the checkbox format are parsed by `~/.claude/hooks/session_context.py`; `task:` and `## 변경 범위` are parsed by `discipline.py`. Keep them. Relative scope globs resolve against the session's working directory at approval: start the session in the project root, or write absolute globs.
 
 ## 5. Approval
-- Present the plan with **ExitPlanMode** (this is the user's approval gate, and it unlocks the >5-file edit guard). If the user wants changes, revise the file and present again.
-- On approval, set the frontmatter to `status: in-progress` (only one in-progress plan per project; set any older one to `done` or back to `draft` after asking), then continue with `/implement docs/plans/<file>.md`.
+- Present the plan with **ExitPlanMode** (the user's approval gate). The approval is bound to `task:` + the plan text + `## 변경 범위`: it lifts the >5-file guard only for files inside that scope, and only for the approving prompt.
+- On approval, save the approved text **verbatim** as the body of `docs/plans/<file>.md` with frontmatter `status: in-progress` (only one in-progress plan per project; set any older one to `done` or back to `draft` after asking). Later prompts and new sessions re-arm the approval only while that file stays in progress with unchecked steps and its text (ignoring checkboxes and `## 진행 기록`) is unchanged; changing steps or scope needs a new approval. Then continue with `/implement docs/plans/<file>.md`.
