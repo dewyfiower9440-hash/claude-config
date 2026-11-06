@@ -570,6 +570,23 @@ check(
     (call("stop", s, prompt_id="b2", cwd=str(BIG)) or {}).get("reason"),
     None,
 )
+# A turn that runs shell commands there (edits invisible) must never end as verified.
+call("prompt", s, prompt_id="b3", cwd=str(BIG))
+(BIG / "src" / "f0.py").write_text("x = 1\n", encoding="utf-8")
+call(
+    "post",
+    s,
+    tool_name="Bash",
+    tool_input={"command": "echo x = 1 > src/f0.py"},
+    prompt_id="b3",
+    cwd=str(BIG),
+)
+r = (call("stop", s, prompt_id="b3", cwd=str(BIG)) or {}).get("reason") or ""
+check(
+    "over the file limit, Bash used this turn -> blocked as unknown again",
+    "확인할 수 없습니다" in r,
+    True,
+)
 
 remove_tree(WORK)
 print("FAILURES:", fails)

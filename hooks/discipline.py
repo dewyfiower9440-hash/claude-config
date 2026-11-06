@@ -231,8 +231,13 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
     # D-5: snapshot any repository this tool is about to touch, before it runs.
     if tool in ("Bash", "PowerShell"):
         command = str(ti.get("command", ""))
+        shell_tops = state.setdefault("turn_shell_tops", [])
         for d in shell_targets(command, tool == "PowerShell", cwd):
-            track_repo(state, d)
+            top = track_repo(state, d)
+            if top and top not in shell_tops:
+                shell_tops.append(
+                    top
+                )  # Bash edits there are visible only via content maps
         # A check is evidence only for the content it ran on: remember the content before it
         # runs, so `gate && sed ...` (content changed during the command) is not bound to the
         # post-edit content.
@@ -757,6 +762,7 @@ def on_fail(data: dict[str, Any], state: dict[str, Any]) -> None:
 def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
     state["turn"] = int(state.get("turn", 0)) + 1
     state["turn_files"] = []
+    state["turn_shell_tops"] = []
     # A new prompt never inherits the previous approval; only the same in-progress plan re-arms it.
     state["approval"], state["approval_warning"] = rearm_approval(
         str(data.get("cwd") or os.getcwd())
@@ -1080,7 +1086,7 @@ REASON_CONTENT_UNKNOWN = (
     "[discipline] {top}의 변경 상태를 확인할 수 없습니다(git 조회 실패 또는 파일 수 초과). "
     "변경이 검증됐다는 근거가 없으므로 '미확인'으로 보고하세요."
 )
-REASON_TOO_LARGE_NOTE = " (파일 수가 내용 추적 한도 5,000개를 넘습니다. 이 저장소의 변경 감지는 이번 세션에서 다시 알리지 않습니다.)"
+REASON_TOO_LARGE_NOTE = " (파일 수가 내용 추적 한도 5,000개를 넘습니다. Bash·스크립트로 한 변경은 감지할 수 없으므로, 이 저장소에서 셸 명령을 쓴 턴은 매번 '미확인'입니다.)"
 REASON_LATE_NOTE = " (git 조회가 시간 안에 끝나지 않아 이 저장소의 기준선을 늦게 잡았습니다. 그 사이 변경은 검증 여부를 알 수 없습니다.)"
 REASON_NOT_PUSHED = (
     "[discipline] {root}의 검증 정책은 `ci: required`인데, 이번 수정분이 push되지 않아 CI 검증이 없습니다"
@@ -1120,7 +1126,11 @@ def _stop_decision(state: dict[str, Any]) -> tuple[str, str | None] | None:
     if decision:
         return decision
     for top in state.get("content_too_large", []):
-        key = f"content-too-large|{top}"  # a size limit does not go away by itself: once per session
+        # Once per session, and again in every turn that ran shell commands there: that turn's
+        # edits cannot be seen, so it must never end as verified.
+        key = f"content-too-large|{top}"
+        if top in state.get("turn_shell_tops", []):
+            key += f"|{state.get('turn')}"
         if _not_yet_notified(state, key):
             return REASON_CONTENT_UNKNOWN.format(top=top) + REASON_TOO_LARGE_NOTE, key
     for top in state.get("content_late", []):
