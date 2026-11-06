@@ -42,9 +42,13 @@ def step(name: str, cmd: list[str]) -> bool:
     print(
         f"{'PASS' if p.returncode == 0 else 'FAIL'} {name}: {tail[0][:120]}", flush=True
     )
-    if p.returncode != 0:
+    if p.returncode != 0 or name in ALWAYS_SHOW:
         print((p.stdout + p.stderr)[-3000:])
     return p.returncode == 0
+
+
+# Measurement output worth keeping in CI logs even when the test passes (pwsh 7 values).
+ALWAYS_SHOW = {"test_powershell_semantics"}
 
 
 def main() -> None:
