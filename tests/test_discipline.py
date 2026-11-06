@@ -7,7 +7,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
-HOOK = str(Path.home() / ".claude" / "hooks" / "discipline.py")
+HOOK = str(Path(__file__).resolve().parent.parent / "hooks" / "discipline.py")
 TMP = Path(tempfile.mkdtemp(prefix="disc-"))
 fails = 0
 

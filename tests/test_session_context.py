@@ -10,7 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-HOOK = Path.home() / ".claude" / "hooks" / "session_context.py"
+HOOK = Path(__file__).resolve().parent.parent / "hooks" / "session_context.py"
 ROOT = Path(tempfile.mkdtemp(prefix="sessctx-"))
 LIMIT = 4000
 fails = 0
