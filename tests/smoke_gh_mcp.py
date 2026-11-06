@@ -39,7 +39,12 @@ send(
 send({"jsonrpc": "2.0", "method": "notifications/initialized"})
 tools = send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
 assert tools
-print("tool count:", len(tools["result"]["tools"]))
+names = {t["name"] for t in tools["result"]["tools"]}
+print("tool count:", len(names))
+EXCLUDED = {"delete_repository", "fork_repository", "create_repository"}
+leaked = sorted(EXCLUDED & names)
+print("excluded tools absent:", not leaked, leaked or "")
+print("write tools still available (gated by ask):", "push_files" in names)
 me = send(
     {
         "jsonrpc": "2.0",
