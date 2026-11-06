@@ -282,7 +282,7 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
                 state["turn_files"].append(path)
             if Path(path).suffix.lower() in CODE_EXT:
                 state["last_code_edit"] = now
-                mark_dirty(state, path, now)
+                mark_dirty(state, path, now, changed_lines(tool, ti))
     elif tool in ("Bash", "PowerShell"):
         record_evidence(data, state, failed=False)
     elif tool in ("Agent", "Task"):
@@ -450,7 +450,7 @@ def in_approved_scope(approval: dict[str, Any] | None, path: str) -> bool:
 MAX_DIRTY_FILES = 200
 
 
-def mark_dirty(state: dict[str, Any], path: str, at: float) -> None:
+def mark_dirty(state: dict[str, Any], path: str, at: float, lines: int = 0) -> None:
     """Group an edited code file under its project's verification policy (nearest declaration)."""
     from verification import find_policy
 
@@ -467,6 +467,8 @@ def mark_dirty(state: dict[str, Any], path: str, at: float) -> None:
     files = entry.setdefault("files", [])
     if path not in files and len(files) < MAX_DIRTY_FILES:
         files.append(path)
+    changed = entry.setdefault("lines", {})
+    changed[path] = int(changed.get(path, 0)) + lines
 
 
 def reresolve_dirty(state: dict[str, Any]) -> None:
@@ -478,7 +480,57 @@ def reresolve_dirty(state: dict[str, Any]) -> None:
         if not files:
             continue  # state written by an older hook version: nothing to regroup
         for f in files:
-            mark_dirty(state, f, float(entry.get("at", 0)))
+            mark_dirty(
+                state,
+                f,
+                float(entry.get("at", 0)),
+                int((entry.get("lines") or {}).get(f, 0)),
+            )
+
+
+def changed_lines(tool: str, ti: dict[str, Any]) -> int:
+    """Approximate size of one edit (used only for the review-needed rule)."""
+    if tool == "Write":
+        return len(str(ti.get("content", "")).splitlines())
+    pairs = ti.get("edits") if tool == "MultiEdit" else [ti]
+    total = 0
+    for e in pairs or []:
+        if isinstance(e, dict):
+            total += max(
+                len(str(e.get("old_string", "")).splitlines()),
+                len(str(e.get("new_string", "")).splitlines()),
+            )
+    return total
+
+
+# ---------------------------------------------------------------- E-1 independent review (A/B switch)
+RISKY_PATH = re.compile(
+    r"[\\/](hooks|migrations|scaffold)[\\/]|[\\/]\.github[\\/]workflows[\\/]|settings\.json$|auth|secret|credential",
+    re.IGNORECASE,
+)
+REVIEW_MIN_FILES = 3
+REVIEW_MIN_LINES = 150
+
+
+def review_triggers(entry: dict[str, Any], root: str = "") -> list[str]:
+    """Why this project's change needs an independent review (empty = it does not)."""
+    files = [str(f) for f in entry.get("files") or []]
+    why: list[str] = []
+    if len(files) >= REVIEW_MIN_FILES:
+        why.append(f"코드 파일 {len(files)}개")
+    lines = sum(int(n) for n in (entry.get("lines") or {}).values())
+    if lines >= REVIEW_MIN_LINES:
+        why.append(f"변경 {lines}줄")
+    # Classify by the path inside the project: a project under some ".../tests/..." folder
+    # must not make every file look like a test or a risky path.
+    rel = [os.path.relpath(f, root) if root and _inside(f, root) else f for f in files]
+    risky = [r for r in rel if RISKY_PATH.search(os.sep + r)]
+    if risky:
+        why.append(f"위험 경로 {Path(risky[0]).name}")
+    tests = [r for r in rel if TEST_PATH.search(r)]
+    if tests and len(tests) < len(files):
+        why.append("테스트와 구현 동시 변경")
+    return why
 
 
 def record_evidence(
@@ -608,6 +660,11 @@ REASON_CI_UNKNOWN = (
     "[discipline] {ref}의 CI 결과를 확정할 수 없습니다({detail}). 실행이 끝난 뒤 다시 확인하거나 "
     "'CI 미확인'으로 보고하세요."
 )
+REASON_REVIEW = (
+    "[discipline] {root}의 변경이 독립 리뷰 기준({why})에 해당합니다(CLAUDE_REVIEW_GATE=1). 기존 `code-reviewer` "
+    "에이전트로 리뷰하고, CONFIRMED 지적은 테스트로 재현해 고친 뒤 게이트를 다시 실행하세요. "
+    "리뷰 통과 자체는 완료 근거가 아닙니다."
+)
 REASON_GATE_NOT_RUN = (
     "[discipline] {root}에 선언된 품질 게이트(`{gate}`)가 마지막 수정 이후 통과하지 않았습니다"
     "(다른 테스트 명령만 실행됨). 게이트를 그대로 실행하거나, 실행하지 못한 이유를 '미확인'으로 보고하세요."
@@ -638,6 +695,17 @@ def _stop_decision(state: dict[str, Any]) -> tuple[str, str | None] | None:
                 )
                 return reason + where, key
             continue
+        if os.environ.get("CLAUDE_REVIEW_GATE") == "1":
+            why = review_triggers(entry, root)
+            key = f"{root}|review|{edited_at}"
+            if (
+                why
+                and float(state.get("last_review", 0)) < edited_at
+                and _not_yet_notified(state, key)
+            ):
+                return REASON_REVIEW.format(
+                    root=root or "이 프로젝트", why=", ".join(why)
+                ), key
         if entry.get("ci") == "required":
             decision = _ci_decision(state, root, edited_at)
             if decision:

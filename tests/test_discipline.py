@@ -1,6 +1,7 @@
 """Scenario tests for ~/.claude/hooks/discipline.py (run with python -I)."""
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -645,6 +646,96 @@ call(
 out = call("stop", s)
 check("declared gate failed -> block with failure reason", "실패" in reason(out), True)
 
+
+# ---- E-1: independent-review switch (off by default; A/B arm B turns it on)
+def gate_passed(session: str) -> None:
+    call(
+        "post",
+        session,
+        tool_name="Bash",
+        tool_input={"command": "uv run pytest -q --cov"},
+        cwd=R,
+    )
+
+
+def edits(session: str, paths: list[str], new: str = "b") -> None:
+    for p in paths:
+        call(
+            "post",
+            session,
+            tool_name="Edit",
+            tool_input={"file_path": p, "old_string": "a", "new_string": new},
+        )
+
+
+os.environ["CLAUDE_REVIEW_GATE"] = "1"
+s = uuid.uuid4().hex
+call("prompt", s)
+edits(s, [f"{R}/src/a.py", f"{R}/src/b.py", f"{R}/src/c.py"])
+gate_passed(s)
+out = call("stop", s)
+check("E-1 on: 3 code files, gate passed, no review -> block", decision(out), "block")
+check("E-1 reason asks for code-reviewer", "code-reviewer" in reason(out), True)
+call(
+    "post",
+    s,
+    tool_name="Agent",
+    tool_input={"subagent_type": "code-reviewer", "prompt": "review"},
+)
+check("E-1 on: after code-reviewer -> allowed", decision(call("stop", s)), None)
+
+s = uuid.uuid4().hex
+call("prompt", s)
+edits(s, [f"{R}/src/a.py"])
+gate_passed(s)
+check("E-1 on: one small file -> no review needed", decision(call("stop", s)), None)
+
+s = uuid.uuid4().hex
+call("prompt", s)
+edits(s, [f"{R}/hooks/x.py"])
+gate_passed(s)
+check(
+    "E-1 on: risky path (hooks/) -> review needed", decision(call("stop", s)), "block"
+)
+
+s = uuid.uuid4().hex
+call("prompt", s)
+edits(s, [f"{R}/src/a.py", f"{R}/tests/test_a.py"])
+gate_passed(s)
+check(
+    "E-1 on: tests and implementation changed together -> review needed",
+    decision(call("stop", s)),
+    "block",
+)
+
+s = uuid.uuid4().hex
+call("prompt", s)
+edits(s, [f"{R}/src/big.py"], new="\n".join(f"line {i}" for i in range(160)))
+gate_passed(s)
+check("E-1 on: 150+ changed lines -> review needed", decision(call("stop", s)), "block")
+
+s = uuid.uuid4().hex
+call("prompt", s)
+edits(s, [f"{R}/src/a.py", f"{R}/src/b.py", f"{R}/src/c.py"])
+call(
+    "post",
+    s,
+    tool_name="Agent",
+    tool_input={"subagent_type": "code-reviewer", "prompt": "review"},
+)
+out = call("stop", s)
+check(
+    "E-1 on: review is never completion evidence (gate not run) -> unverified",
+    "실행하지 않았습니다" in reason(out),
+    True,
+)
+
+del os.environ["CLAUDE_REVIEW_GATE"]
+s = uuid.uuid4().hex
+call("prompt", s)
+edits(s, [f"{R}/src/a.py", f"{R}/src/b.py", f"{R}/src/c.py"])
+gate_passed(s)
+check("E-1 off (default): no review requirement", decision(call("stop", s)), None)
 
 shutil.rmtree(ROOT, ignore_errors=True)
 
