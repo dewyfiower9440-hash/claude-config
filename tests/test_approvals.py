@@ -216,7 +216,9 @@ for f in home_files:
         )
         check(f"guard blocks {tool} on {f.name}", p.returncode, 2)
 settings = json.loads(
-    (Path.home() / ".claude" / "settings.json").read_text(encoding="utf-8")
+    (HERE.parent / "settings.json").read_text(
+        encoding="utf-8"
+    )  # the repo's settings, not $HOME's (CI)
 )
 deny = settings["permissions"]["deny"]
 check(
