@@ -260,7 +260,7 @@ def evaluate(
         if not declared:
             continue
         try:
-            target = [c for c in parse(declared, "bash") if not c.nested]
+            target = [c for c in parse(declared, dialect) if not c.nested]
         except ParseError:
             continue
         k = _find_sequence(cmds, target)

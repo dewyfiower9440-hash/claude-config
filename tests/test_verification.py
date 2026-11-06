@@ -162,5 +162,24 @@ check(
     "passed",
 )
 
+# ---- a PowerShell project gate run from the PowerShell tool
+PS_GATE = 'powershell -NoProfile -Command "Invoke-ScriptAnalyzer -Path . -Recurse -EnableExit; Invoke-Pester -CI"'
+PS_POLICY = {"root": ROOT, "gate": PS_GATE, "ci": "none", "validate": None}
+check(
+    "PS gate via PowerShell tool -> passed",
+    outcome(PS_GATE, PS_POLICY, dialect="powershell"),
+    "passed",
+)
+PS_GATE2 = "Invoke-ScriptAnalyzer -Path .\\src -EnableExit"
+check(
+    "PS gate with backslash path parsed in the command's dialect -> passed",
+    outcome(
+        PS_GATE2,
+        {"root": ROOT, "gate": PS_GATE2, "ci": "none", "validate": None},
+        dialect="powershell",
+    ),
+    "passed",
+)
+
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)
