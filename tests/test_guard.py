@@ -1,8 +1,9 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
 
-GUARD = r"C:\Users\user\.claude\hooks\guard.py"
+GUARD = str(Path(__file__).resolve().parent.parent / "hooks" / "guard.py")
 
 CASES = [
     # (tool, input, expect_block)
@@ -29,6 +30,32 @@ CASES = [
     ("Write", {"file_path": "C:\\dev\\app\\server.key"}, True),
     ("Grep", {"pattern": "load .env", "path": "C:\\dev\\app"}, False),
     ("Glob", {"pattern": "**/.env"}, True),
+    # search patterns are content regexes, not file access
+    ("Bash", {"command": "grep -n '.env' settings.json"}, False),
+    (
+        "Bash",
+        {"command": "grep -nE 'Write\\(\\*\\*/.env\\)' ~/.claude/settings.json"},
+        False,
+    ),
+    ("Bash", {"command": "rg -e '\\.env' src"}, False),
+    ("Bash", {"command": "rg --regexp=.env -n src"}, False),
+    (
+        "PowerShell",
+        {"command": "Select-String -Pattern '.env' -Path .\\README.md"},
+        False,
+    ),
+    ("Bash", {"command": "git grep -n '.env.local' -- src"}, False),
+    # ...but the files a search reads are still checked
+    ("Bash", {"command": "grep x .env"}, True),
+    ("Bash", {"command": "grep -e foo -- .env.local"}, True),
+    ("Bash", {"command": "cat .env | grep x"}, True),
+    ("Bash", {"command": "grep token .env; echo done"}, True),
+    ("Bash", {"command": "grep -r token ~/.ssh/"}, True),
+    ("Bash", {"command": "grep -f .env src"}, True),
+    ("Bash", {"command": "findstr token .env.production"}, True),
+    ("Bash", {"command": "rg secret -g '*.pem' certs/server.pem"}, True),
+    ("PowerShell", {"command": "Select-String -Pattern 'x' -Path .\\.env"}, True),
+    ("Bash", {"command": "echo hi && grep -n '.env' a.txt && cat id_rsa"}, True),
 ]
 
 fails = 0
@@ -47,3 +74,4 @@ for tool, ti, expect in CASES:
         ("OK  " if ok else "FAIL"), tool, ti, "-> blocked" if blocked else "-> allowed"
     )
 print("FAILURES:", fails)
+sys.exit(1 if fails else 0)

@@ -110,10 +110,86 @@ def is_secret_path(path: str) -> bool:
     return any(re.search(s, p, re.IGNORECASE) for s in SECRET_PATH_PATTERNS)
 
 
+# Search commands: their pattern argument is a content regex, not a file, so a pattern such
+# as '.env' must not count as touching a secret file. Every other argument is still checked.
+SEARCH_HEADS = {
+    "grep",
+    "egrep",
+    "fgrep",
+    "rg",
+    "ag",
+    "ack",
+    "findstr",
+    "select-string",
+    "sls",
+}
+PATTERN_FLAGS = {"-e", "--regexp", "-pattern"}
+VALUE_FLAGS = {  # flags whose next token is a value, never the positional pattern
+    "-A", "-B", "-C", "-m", "--max-count", "-g", "--glob", "-t", "--type", "-T",
+    "--type-not", "-f", "--file", "-j", "--threads",
+    "-path", "-literalpath", "-include", "-exclude", "-encoding", "-context",
+}  # fmt: skip
+
+
+def search_patterns(tokens: list[str]) -> set[int]:
+    """Indexes of the pattern arguments when `tokens` is a grep-like command, else empty."""
+    if not tokens:
+        return set()
+    head = tokens[0].lower().removesuffix(".exe")
+    start = 1
+    if head == "git" and len(tokens) > 1 and tokens[1] == "grep":
+        start = 2
+    elif head not in SEARCH_HEADS:
+        return set()
+    ps = head in ("select-string", "sls")
+    found: set[int] = set()
+    positional_open = True
+    expect: str | None = None
+    for i in range(start, len(tokens)):
+        tok = tokens[i]
+        if expect == "pattern":
+            found.add(i)
+            expect = None
+        elif expect == "value":
+            expect = None
+        elif tok == "--":
+            break  # everything after is a file operand
+        elif tok.startswith("-") and len(tok) > 1:
+            name, eq, _ = tok.partition("=")
+            key = name.lower() if ps or name.startswith("--") else name
+            if key in PATTERN_FLAGS or (ps and key == "-pattern"):
+                positional_open = False
+                if eq:
+                    found.add(i)  # --regexp=PATTERN in one token
+                else:
+                    expect = "pattern"
+            elif key in VALUE_FLAGS and not eq:
+                expect = "value"
+        elif positional_open:
+            found.add(i)
+            positional_open = False
+    return found
+
+
+def split_segment(segment: str) -> list[str]:
+    import shlex  # lazy: only shell commands need it
+
+    try:
+        return shlex.split(
+            segment, posix=False
+        )  # posix=False keeps Windows backslashes
+    except ValueError:  # unbalanced quotes: fall back to checking the raw text
+        return [segment]
+
+
 def tokens_look_secret(command: str) -> str | None:
-    for tok in re.split(r"[\s'\"<>|;&()=,]+", command):
-        if tok and is_secret_path(tok):
-            return tok
+    for segment in re.split(r"\|\|?|&&?|;|\n", command):
+        tokens = split_segment(segment)
+        skip = search_patterns(tokens)
+        checked = " ".join(t for i, t in enumerate(tokens) if i not in skip)
+        for tok in re.split(r"[\s'\"<>|;&()=,]+", checked):
+            if tok and is_secret_path(tok):
+                return tok
     return None
 
 
