@@ -7,6 +7,7 @@ and the hook only sees a Bash PostToolUse with the command text (as in the real 
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -16,6 +17,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 HOOK = HERE.parent / "hooks" / "discipline.py"
+# Plan approvals made by these tests go to an isolated store, never the real one.
+os.environ["CLAUDE_DISCIPLINE_HOME"] = str(HERE / "_tmp_worktree_approvals")
 WORK = HERE / "_tmp_wt"
 REPO = WORK / "repo"
 fails = 0

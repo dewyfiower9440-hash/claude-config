@@ -10,6 +10,10 @@ import uuid
 from pathlib import Path
 
 HOOK = str(Path(__file__).resolve().parent.parent / "hooks" / "discipline.py")
+# Plan approvals made by these tests go to an isolated store, never the real one.
+APPROVAL_HOME = Path(__file__).resolve().parent / "_tmp_discipline_approvals"
+shutil.rmtree(APPROVAL_HOME, ignore_errors=True)
+os.environ["CLAUDE_DISCIPLINE_HOME"] = str(APPROVAL_HOME)
 TMP = Path(tempfile.mkdtemp(prefix="disc-"))
 fails = 0
 

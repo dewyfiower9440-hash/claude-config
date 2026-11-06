@@ -302,7 +302,16 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------- plan approval scope
-APPROVALS_FILE = STATE_DIR / "approvals.json"
+# Approvals outlive %TEMP% cleanup (Storage Sense) and reboots; records are HMAC-signed with a
+# per-machine key so an edited or injected record never re-arms anything. Tools are kept away
+# from this folder by guard.py and the settings deny rules.
+APPROVALS_HOME = Path(
+    os.environ.get("CLAUDE_DISCIPLINE_HOME") or (Path.home() / ".claude" / "discipline")
+)
+APPROVALS_FILE = APPROVALS_HOME / "approvals.json"
+KEY_FILE = APPROVALS_HOME / "key"
+SIGNED_FIELDS = ("task_id", "plan_hash", "scope", "prompt_id", "session_id", "at")
+APPROVAL_MAX_AGE_S = 30 * 86400
 MAX_APPROVALS = 50
 SCOPE_HEADINGS = r"(변경 범위|Scope|Change scope)"
 
@@ -356,12 +365,55 @@ def _norm(path: str) -> str:
     return os.path.normpath(path).replace("\\", "/").lower()
 
 
-def _load_approvals() -> dict[str, Any]:
+def load_key(*, create: bool) -> bytes | None:
+    """HMAC key for approval records; created on first approval, never shown to tools (guard/deny)."""
+    try:
+        return bytes.fromhex(KEY_FILE.read_text(encoding="utf-8").strip())
+    except (
+        OSError,
+        ValueError,
+    ):  # missing or unreadable key: records cannot be verified
+        if not create:
+            return None
+    APPROVALS_HOME.mkdir(parents=True, exist_ok=True)
+    key = os.urandom(32)
+    KEY_FILE.write_text(key.hex(), encoding="utf-8")
+    return key
+
+
+def sign_record(record: dict[str, Any], key: bytes | None) -> str:
+    import hashlib
+    import hmac
+
+    if key is None:
+        return ""
+    body = {k: record.get(k) for k in SIGNED_FIELDS}
+    payload = json.dumps(body, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hmac.new(key, payload, hashlib.sha256).hexdigest()
+
+
+def record_is_valid(record: dict[str, Any], key: bytes | None) -> str | None:
+    """None if the record is authentic and fresh, else why it must not re-arm anything."""
+    import hmac
+
+    if key is None:
+        return "서명 키 없음"
+    mac = str(record.get("mac") or "")
+    if not mac or not hmac.compare_digest(mac, sign_record(record, key)):
+        return "서명 불일치(기록이 위조되거나 수정됨)"
+    if time.time() - float(record.get("at") or 0) > APPROVAL_MAX_AGE_S:
+        return "승인 기록 만료(30일 초과)"
+    return None
+
+
+def _load_approvals() -> tuple[dict[str, Any], str | None]:
     try:
         data = json.loads(APPROVALS_FILE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):  # missing or corrupt: no persisted approvals
-        return {}
-    return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}, None
+    except (OSError, ValueError):  # corrupt or unreadable: nothing is trusted
+        return {}, "승인 기록 파일 손상"
+    return (data, None) if isinstance(data, dict) else ({}, "승인 기록 파일 손상")
 
 
 def record_approval(data: dict[str, Any], state: dict[str, Any]) -> None:
@@ -384,19 +436,25 @@ def record_approval(data: dict[str, Any], state: dict[str, Any]) -> None:
     }
     state["approval"] = record
     if record["task_id"] and record["plan_hash"]:
-        approvals = _load_approvals()
-        approvals[record["plan_hash"]] = record
+        key = load_key(create=True)
+        approvals, _problem = (
+            _load_approvals()
+        )  # a corrupt file is replaced by valid records
+        approvals[record["plan_hash"]] = {**record, "mac": sign_record(record, key)}
         newest = sorted(approvals.items(), key=lambda kv: float(kv[1].get("at", 0)))[
             -MAX_APPROVALS:
         ]
+        APPROVALS_HOME.mkdir(parents=True, exist_ok=True)
         APPROVALS_FILE.write_text(json.dumps(dict(newest)), encoding="utf-8")
 
 
-def rearm_approval(cwd: str) -> dict[str, Any] | None:
-    """An approval survives into a new prompt or session only for the same, still in-progress plan."""
-    approvals = _load_approvals()
+def rearm_approval(cwd: str) -> tuple[dict[str, Any] | None, str | None]:
+    """(approval, warning): an approval survives into a new prompt or session only for the same,
+    still in-progress plan, from an authentic (HMAC) and fresh record."""
+    approvals, problem = _load_approvals()
     if not approvals:
-        return None
+        return None, problem
+    key = load_key(create=False)
     d = os.path.abspath(cwd)
     for _ in range(6):
         plans_dir = Path(d) / "docs" / "plans"
@@ -417,17 +475,21 @@ def rearm_approval(cwd: str) -> dict[str, Any] | None:
                 if not (in_progress and unchecked):
                     continue
                 record = approvals.get(plan_hash(text))
-                if (
-                    record
+                if not (
+                    isinstance(record, dict)
                     and record.get("task_id")
                     and record.get("task_id") == plan_task(text)
                 ):
-                    return {**record, "rearmed_from": str(plan)}
+                    continue
+                invalid = record_is_valid(record, key)
+                if invalid:
+                    return None, f"{invalid}: {plan.name}"
+                return {**record, "rearmed_from": str(plan)}, None
         parent = os.path.dirname(d)
         if parent == d:
             break
         d = parent
-    return None
+    return None, problem
 
 
 def active_approval(state: dict[str, Any], prompt_id: object) -> dict[str, Any] | None:
@@ -649,7 +711,9 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
     state["turn"] = int(state.get("turn", 0)) + 1
     state["turn_files"] = []
     # A new prompt never inherits the previous approval; only the same in-progress plan re-arms it.
-    state["approval"] = rearm_approval(str(data.get("cwd") or os.getcwd()))
+    state["approval"], state["approval_warning"] = rearm_approval(
+        str(data.get("cwd") or os.getcwd())
+    )
     state["prompt_id"] = data.get("prompt_id")
     track_repo(state, str(data.get("cwd") or os.getcwd()))
     refresh_turn_baselines(state)
@@ -813,6 +877,10 @@ REASON_UNKNOWN = (
     "보입니다. 검증 명령을 단독으로(또는 &&로만 이어서) 포그라운드에서 다시 실행하거나, 결과를 확인할 수 "
     "없었다는 사실을 '미완료·리스크'에 적고 종료하세요."
 )
+REASON_APPROVAL_INVALID = (
+    "[discipline] 저장된 계획 승인 기록을 신뢰할 수 없어 자동 재승인하지 않았습니다({why}). "
+    "이 작업을 계속하려면 계획을 다시 제시해 사용자 승인을 받으세요. 이 사실을 보고에 적으세요."
+)
 REASON_STALE = (
     "[discipline] {root}: 마지막 검증 이후 파일 내용이 바뀌었습니다(Bash·스크립트 수정 포함, 내용 해시 기준). "
     "검증 증거가 무효이니 게이트를 다시 실행하세요."
@@ -858,6 +926,11 @@ REASON_GATE_NOT_RUN = (
 
 def _stop_decision(state: dict[str, Any]) -> tuple[str, str | None] | None:
     """(reason, notify key) for the first problem: scope, unreadable state, content, then timestamps."""
+    warning = state.get("approval_warning")
+    if warning:
+        key = f"approval-warning|{state.get('turn')}|{warning}"
+        if _not_yet_notified(state, key):
+            return REASON_APPROVAL_INVALID.format(why=warning), key
     decision = _scope_decision(state)
     if decision:
         return decision

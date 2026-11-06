@@ -28,6 +28,8 @@ SECRET_PATH_PATTERNS = [
     r"(^|[\\/])\.git-credentials$",
     r"(^|[\\/])\.netrc$",
     r"(^|[\\/])secrets?\.(json|ya?ml|toml)$",
+    # discipline's signed plan approvals and their HMAC key: hooks only, never tools
+    r"(^|[\\/])\.claude[\\/]discipline([\\/]|$)",
 ]
 SECRET_ALLOW = [r"\.env\.(example|sample|template)$", r"\.pub$"]
 
