@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import re
@@ -182,16 +183,29 @@ try:
 except (OSError, ValueError) as e:
     rec("FAIL", "settings.json", str(e))
 
-for test in ("test_guard.py", "test_discipline.py", "test_session_context.py"):
-    code, out = run([sys.executable, "-I", str(SCRATCH / test)])
-    last = out.splitlines()[-1] if out else ""
-    rec(
-        "PASS" if code in (0, None) and "FAILURES: 0" in out else "FAIL",
-        f"hook tests {test}",
-        last,
+code, out = run([sys.executable, "-I", str(SCRATCH / "run_all.py")], cwd=CLAUDE)
+rec(
+    "PASS" if code == 0 and "GATE PASSED" in out else "FAIL",
+    "claude-config declared gate (lint + all hook tests + local corpus)",
+    out.splitlines()[-1] if out else "",
+)
+sys.path.insert(0, str(CLAUDE / "hooks"))
+verification = importlib.import_module("verification")
+
+for sample, want_root in (
+    (CLAUDE / "hooks" / "guard.py", CLAUDE),
+    (Path("C:/dev/tools/db-mcp/src/db_mcp/server.py"), Path("C:/dev/tools/db-mcp")),
+    (Path("C:/dev/tools/scaffold/new_project.py"), Path("C:/dev/tools/scaffold")),
+):
+    pol = verification.find_policy(str(sample))
+    ok = (
+        Path(pol["root"]) == want_root and bool(pol["gate"]) and pol["ci"] == "required"
     )
-code, out = run(["ruff", "check", str(CLAUDE / "hooks")])
-rec("PASS" if code == 0 else "FAIL", "hooks lint", out.splitlines()[-1] if out else "")
+    rec(
+        "PASS" if ok else "FAIL",
+        f"verification policy declared: {want_root}",
+        f"gate={pol['gate']!s:.50} ci={pol['ci']}",
+    )
 
 # ------------------------------------------------------------ 3. CLAUDE.md / rules / skills / agents
 cm = (CLAUDE / "CLAUDE.md").read_text(encoding="utf-8")
