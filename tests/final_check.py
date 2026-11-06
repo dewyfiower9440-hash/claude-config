@@ -325,6 +325,51 @@ rec(
     "~/.claude repo does not track secrets/history",
     out[:80],
 )
+for repo in (CLAUDE, Path("C:/dev/tools")):
+    code, out = run(["git", "status", "-sb"], cwd=repo)
+    first = out.splitlines()[0] if out else ""
+    rec(
+        "PASS" if "origin/main" in first and "ahead" not in first else "FAIL",
+        f"pushed to origin: {repo}",
+        first,
+    )
+    code, out = run(
+        [
+            "gh",
+            "run",
+            "list",
+            "-L",
+            "1",
+            "--branch",
+            "main",
+            "--json",
+            "conclusion,headSha",
+            "-q",
+            ".[0].conclusion",
+        ],
+        cwd=repo,
+    )
+    rec("PASS" if out == "success" else "FAIL", f"latest CI on main: {repo.name}", out)
+code, out = run(
+    [
+        "uv",
+        "run",
+        "--no-project",
+        "--python",
+        "3.13",
+        "--with",
+        "pytest",
+        "pytest",
+        "scaffold/tests",
+        "-q",
+    ],
+    cwd=Path("C:/dev/tools"),
+)
+rec(
+    "PASS" if code == 0 else "FAIL",
+    "scaffold generated-file tests",
+    out.splitlines()[-1] if out else "",
+)
 code, out = run(["gh", "auth", "status"])
 rec(
     "PASS" if code == 0 and "Logged in" in out else "FAIL",
