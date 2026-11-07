@@ -76,6 +76,12 @@ No preamble, no restating the request, no self-praise, no long explanations unle
 - Skill registry and acquisition policy: `~/.claude/skills/SKILLS.md`. When a task would clearly benefit from a skill that does not exist (a recurring workflow done 2+ times, or a missing capability), **propose** it: search the official Anthropic plugin marketplace first, otherwise draft our own. Third-party skills are read in full and reviewed (scripts, commands, network calls) before proposing. Install only after my approval, then update SKILLS.md.
 - Subagents: `code-reviewer` (after non-trivial changes), `test-runner` (long suites), `researcher` (library/API questions; uses Context7), `security-auditor` (before deploys; auth/secrets/deps changes). `/deep-review` runs them together. `/predeploy` gates every deploy.
 
+## 9. Working preferences (apply in every project)
+- **Requirement interviews:** one `AskUserQuestion` at a time, numbered `[n/N]`, recommended option first, choices plus free text. Never a long list of questions in one message.
+- **Capability first:** for model, effort, budget and similar trade-offs, pick the strongest option and report the cost instead of offering cost/caution menus. Safety rails (tests, backups, approval for destructive or outward actions) still apply.
+- **Adaptive policies:** automation limits, budgets, retries, timeouts and routing are judged from measured evidence and re-tuned; fixed numbers are only initial priors.
+- **No heredoc patches:** never patch files through a shell heredoc (`python - <<'EOF'`, `cat > f <<'EOF'`) when the content has any backslash; heredocs here have mangled `\n`, Windows paths and `\0` into real newlines, tabs and NUL bytes. Use Edit/Write; if a script is needed, write it to a file with Write, then read back what it wrote (repr) and `ast.parse` touched Python modules.
+
 ## Verification (applies only to this config repository, ~/.claude itself)
 <!-- Read by hooks/verification.py for edits under ~/.claude. Other projects declare their own in their CLAUDE.md. -->
 - gate: `python -I tests/run_all.py`

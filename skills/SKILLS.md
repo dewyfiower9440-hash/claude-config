@@ -19,6 +19,10 @@ Related hooks (`~/.claude/hooks/`): `session_context.py` (SessionStart: git stat
 
 Built-in or plugin skills used as-is: `code-review`, `simplify`, `security-review`, `skill-creator` (anthropic-skills), `claude-api`, `init`.
 
+Account-synced skills: `skills/synced/` is written by claude.ai (anthropic-skills such as docx, pdf, pptx, xlsx, docs, deep-research, browser/computer-use guides). It is gitignored and managed outside this repository; do not edit it here.
+
+Usage evidence (transcripts 2026-07-22..2026-11-07, 34 sessions): none of the own skills above has been invoked through the Skill tool yet, and `code-reviewer` ran in one session. Judge additions and pruning from real project use, not from this baseline.
+
 ## Acquisition policy (what Claude does when a skill is missing)
 
 1. **Notice.** A workflow has been done by hand 2+ times, or a task needs a capability no listed skill covers.
