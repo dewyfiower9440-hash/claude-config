@@ -18,10 +18,10 @@ __pycache__/
 !/.gitattributes
 !/.github/
 !/pyrightconfig.json
-# Only the devenv master plan is tracked under docs/ (other plan files stay local).
+# Approved plan files are tracked (their history is evidence); nothing else under docs/.
 !/docs/
 /docs/*
 !/docs/plans/
 /docs/plans/*
-!/docs/plans/2026-11-11-devenv-evolution-master.md
+!/docs/plans/*.md
 /tests/_tmp*/
