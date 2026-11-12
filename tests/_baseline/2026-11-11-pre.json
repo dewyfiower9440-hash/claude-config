@@ -1,0 +1,255 @@
+{
+ "label": "pre",
+ "commit": "c9fc3ec",
+ "hooks_dirty": false,
+ "python": "3.14.2",
+ "runs_per_hook": 20,
+ "latency": {
+  "guard(Bash)": {
+   "p50_ms": 164.1,
+   "p95_ms": 198.1,
+   "max_ms": 222.0
+  },
+  "discipline pre(Edit)": {
+   "p50_ms": 256.3,
+   "p95_ms": 833.6,
+   "max_ms": 1393.4
+  },
+  "discipline post(Edit)": {
+   "p50_ms": 259.5,
+   "p95_ms": 473.1,
+   "max_ms": 629.0
+  },
+  "discipline prompt": {
+   "p50_ms": 629.8,
+   "p95_ms": 1738.5,
+   "max_ms": 3486.1
+  },
+  "discipline stop": {
+   "p50_ms": 245.0,
+   "p95_ms": 1093.5,
+   "max_ms": 1343.1
+  },
+  "session_context(startup)": {
+   "p50_ms": 568.7,
+   "p95_ms": 1538.5,
+   "max_ms": 5055.2
+  },
+  "format_lint(.md)": {
+   "p50_ms": 182.1,
+   "p95_ms": 203.2,
+   "max_ms": 204.0
+  },
+  "format_lint(.py)": {
+   "p50_ms": 393.9,
+   "p95_ms": 693.7,
+   "max_ms": 956.5
+  }
+ },
+ "sessions": {
+  "A cwd like C:\\ (not a repo)": {
+   "exit": 0,
+   "injected_chars": 0,
+   "context_head": "",
+   "plans_shown": [],
+   "plans_in_repo": [
+    "alpha",
+    "widget",
+    "parked(blocked)"
+   ]
+  },
+  "B cwd like C:\\dev (holds repos)": {
+   "exit": 0,
+   "injected_chars": 0,
+   "context_head": "",
+   "plans_shown": [],
+   "plans_in_repo": [
+    "alpha",
+    "widget",
+    "parked(blocked)"
+   ]
+  },
+  "C project root": {
+   "exit": 0,
+   "injected_chars": 214,
+   "context_head": "[session-context] 자동 주입된 작업 상태 (SessionStart hook)",
+   "plans_shown": [
+    "widget"
+   ],
+   "plans_in_repo": [
+    "alpha",
+    "widget",
+    "parked(blocked)"
+   ]
+  },
+  "D project subdirectory": {
+   "exit": 0,
+   "injected_chars": 214,
+   "context_head": "[session-context] 자동 주입된 작업 상태 (SessionStart hook)",
+   "plans_shown": [
+    "widget"
+   ],
+   "plans_in_repo": [
+    "alpha",
+    "widget",
+    "parked(blocked)"
+   ]
+  },
+  "E resume": {
+   "exit": 0,
+   "injected_chars": 214,
+   "context_head": "[session-context] 자동 주입된 작업 상태 (SessionStart hook)",
+   "plans_shown": [
+    "widget"
+   ],
+   "plans_in_repo": [
+    "alpha",
+    "widget",
+    "parked(blocked)"
+   ]
+  },
+  "F compact": {
+   "exit": 0,
+   "injected_chars": 337,
+   "context_head": "[session-context] 자동 주입된 작업 상태 (SessionStart hook)",
+   "plans_shown": [
+    "widget"
+   ],
+   "plans_in_repo": [
+    "alpha",
+    "widget",
+    "parked(blocked)"
+   ]
+  },
+  "G non-repo folder under C:\\dev": {
+   "exit": 0,
+   "injected_chars": 0,
+   "context_head": "",
+   "plans_shown": [],
+   "plans_in_repo": [
+    "alpha",
+    "widget",
+    "parked(blocked)"
+   ]
+  }
+ },
+ "corpus": [
+  {
+   "kind": "attack",
+   "id": "A1",
+   "case": "no task named in the prompt -> no re-arm",
+   "got": "alpha",
+   "want": null,
+   "pass": false,
+   "owner": "P0-03"
+  },
+  {
+   "kind": "attack",
+   "id": "A2",
+   "case": "prompt names another task -> no re-arm",
+   "got": "alpha",
+   "want": null,
+   "pass": false,
+   "owner": "P0-03"
+  },
+  {
+   "kind": "attack",
+   "id": "A3",
+   "case": "nested git root under the project -> no inherited approval",
+   "got": "alpha",
+   "want": null,
+   "pass": false,
+   "owner": "P0-03"
+  },
+  {
+   "kind": "attack",
+   "id": "A4",
+   "case": "two active approved plans, prompt names widget -> widget",
+   "got": "alpha",
+   "want": "widget",
+   "pass": false,
+   "owner": "P0-03"
+  },
+  {
+   "kind": "attack",
+   "id": "A5",
+   "case": "other repo's docs/plans file inside an approval scope -> refused",
+   "got": true,
+   "want": false,
+   "pass": false,
+   "owner": "P0-05"
+  },
+  {
+   "kind": "attack",
+   "id": "A6",
+   "case": "data path approved through a code scope -> refused",
+   "got": true,
+   "want": false,
+   "pass": false,
+   "owner": "P0-05"
+  },
+  {
+   "kind": "attack",
+   "id": "A7",
+   "case": "Edits allowed in one prompt without any approval (policy B: 0)",
+   "got": 5,
+   "want": 0,
+   "pass": false,
+   "owner": "P0-06"
+  },
+  {
+   "kind": "attack",
+   "id": "A8",
+   "case": "unapproved Bash redirect write -> denied before it runs",
+   "got": false,
+   "want": true,
+   "pass": false,
+   "owner": "P0-07"
+  },
+  {
+   "kind": "attack",
+   "id": "A9",
+   "case": "plan parked as blocked then flipped back -> old approval revoked",
+   "got": "widget",
+   "want": null,
+   "pass": false,
+   "owner": "P0-04"
+  },
+  {
+   "kind": "normal",
+   "id": "N1",
+   "case": "prompt names the approved task -> re-armed",
+   "got": "alpha",
+   "want": "widget",
+   "pass": false,
+   "owner": "P0-03"
+  },
+  {
+   "kind": "normal",
+   "id": "N2",
+   "case": "prompt names the plan file -> re-armed",
+   "got": "alpha",
+   "want": "widget",
+   "pass": false,
+   "owner": "P0-03"
+  },
+  {
+   "kind": "normal",
+   "id": "N3",
+   "case": "project subdirectory, task named -> re-armed",
+   "got": "alpha",
+   "want": "widget",
+   "pass": false,
+   "owner": "P0-03"
+  },
+  {
+   "kind": "normal",
+   "id": "N4",
+   "case": "7 in-scope edits under a re-armed approval -> none denied",
+   "got": false,
+   "want": false,
+   "pass": true,
+   "owner": "P0-03"
+  }
+ ]
+}
