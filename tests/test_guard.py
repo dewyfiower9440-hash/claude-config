@@ -110,6 +110,14 @@ CASES = [
     ("Bash", {"command": "grep x < .env"}, True),
     ("Bash", {"command": "printenv"}, True),
     ("Bash", {"command": "env"}, True),
+    # Bare `env` anywhere in a pipeline streams every value, whatever filters it downstream.
+    (
+        "Bash",
+        {"command": "env | grep -oE '^(ANTHROPIC|CLAUDE)[A-Z_]*' | sort -u"},
+        True,
+    ),
+    ("Bash", {"command": "claude --version; env | grep -oE '^CLAUDE[A-Z_]*'"}, True),
+    ("Bash", {"command": "env FOO=1 python -V"}, False),
     ("Bash", {"command": 'echo "unterminated && git push -f'}, True),
     (
         "PowerShell",

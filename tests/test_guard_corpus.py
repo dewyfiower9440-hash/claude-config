@@ -19,6 +19,12 @@ from types import ModuleType
 HOOKS = Path(__file__).resolve().parent.parent / "hooks"
 TRANSCRIPTS = Path.home() / ".claude" / "projects" / "C--"
 # New blocks that were reviewed and are intended (prefix of the command -> reason).
+REVIEWED_NEW_BLOCKS_EXACT = {
+    # 2026-11-12: blocked only by its last segment `env | grep -oE '^(ANTHROPIC|CLAUDE)[A-Z_]*'`
+    # (each segment checked alone; pinned in test_guard.py). Exact match, so another command
+    # sharing its harmless prefix is never excused.
+    "claude --version 2>&1; claude auth status --json 2>/dev/null | python -c \"import json,sys;d=json.load(sys.stdin);print({k:d.get(k) for k in ('loggedIn','authMethod','apiProvider','subscriptionType','planTier')})\"; env | grep -oE '^(ANTHROPIC|CLAUDE)[A-Z_]*' | sort -u": "bare `env` piped to grep in a later segment streams every environment value; legacy only caught `env` at line end",
+}
 REVIEWED_NEW_BLOCKS = {
     "env | cut -d= -f1": "bare `env` streams every environment value into the pipe; legacy only caught `env` at line end",
 }
@@ -81,7 +87,7 @@ def main() -> None:
             old = blocked(guard.legacy_check, cmd)
             new = blocked(guard.check_command, cmd, dialect)
         if new and not old:
-            reviewed = next(
+            reviewed = REVIEWED_NEW_BLOCKS_EXACT.get(cmd) or next(
                 (r for p, r in REVIEWED_NEW_BLOCKS.items() if cmd.startswith(p)), None
             )
             if reviewed:
