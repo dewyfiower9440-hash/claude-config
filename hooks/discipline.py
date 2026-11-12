@@ -279,7 +279,8 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
         emit_pre(
             "deny",
             f"[discipline] 이번 턴에 승인 범위 밖 파일을 이미 {len(counted)}개 수정했습니다(한도 {MAX_FILES_WITHOUT_PLAN}).{scope_note} "
-            "더 진행하기 전에 /plan 으로 계획을 세우거나 갱신하고 ExitPlanMode 로 사용자 승인을 받으세요.",
+            "더 진행하기 전에 /plan 으로 계획을 세우거나 갱신하고 ExitPlanMode 로 사용자 승인을 받으세요. "
+            "이미 승인된 진행 중 계획을 이어가는 것이라면, 사용자가 프롬프트 첫 줄에 task:<id>를 적어야 재무장됩니다.",
         )
 
     # 2) Test weakening / suppressions.
@@ -478,54 +479,121 @@ def record_approval(data: dict[str, Any], state: dict[str, Any]) -> None:
         APPROVALS_FILE.write_text(json.dumps(dict(newest)), encoding="utf-8")
 
 
-def rearm_approval(cwd: str) -> tuple[dict[str, Any] | None, str | None]:
-    """(approval, warning): an approval survives into a new prompt or session only for the same,
-    still in-progress plan, from an authentic (HMAC) and fresh record."""
+# `task:<id>`, `task_id: <id>`, `task=<id>` (optionally in backticks). ASCII ids only, so a
+# Korean particle right after the id (`task:widget을`) is not part of it.
+TASK_REF = re.compile(
+    r"\btask(?:_id)?\s*[:=]\s*`?([A-Za-z0-9][A-Za-z0-9_.-]*)", re.IGNORECASE | re.ASCII
+)
+# ASCII path characters only: `@docs/...` (file mention) and `계획docs/...` still yield the path,
+# and a sentence period after `.md` is not part of it. Paths with spaces are not recognised.
+PLAN_REF = re.compile(
+    r"[A-Za-z0-9_.:/\\~-]+\.md(?![A-Za-z0-9_-])", re.IGNORECASE | re.ASCII
+)
+COMMAND_HEADER = re.compile(r"\A\s*<command-(?:message|name)>")
+COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.DOTALL)
+RELAY_HEADERS = ("another claude session", "[system notification")
+AMBIGUOUS = "재무장 후보가 여러 개"
+
+
+def naming_text(prompt: str) -> str:
+    """The part of a prompt allowed to name a task. A slash command (the prompt starts with the
+    harness's <command-...> header) names it in its first <command-args> block only; any other
+    prompt in its first non-empty line only, and not at all when that line is markup or a relay
+    header (relayed agent messages, task notifications). Pasted documents and relayed text below
+    the first line never re-arm an approval."""
+    if COMMAND_HEADER.match(prompt):
+        args = COMMAND_ARGS.search(prompt)
+        return args.group(1) if args else ""
+    first = next((line for line in prompt.splitlines() if line.strip()), "").strip()
+    if first.startswith("<") or first.lower().startswith(RELAY_HEADERS):
+        return ""
+    return first
+
+
+def prompt_tasks(text: str) -> set[str]:
+    """Task ids named explicitly; only these may re-arm an earlier approval."""
+    return {m.group(1).rstrip(".").lower() for m in TASK_REF.finditer(text)}
+
+
+def names_plan(text: str, plan: Path, root: str, cwd: str) -> bool:
+    """True when `text` names this plan file: by its exact file name, or by a path that
+    resolves (relative to `cwd` or the git `root`) to it. A same-named file in another project
+    does not count."""
+    want = os.path.normcase(str(plan))
+    for ref in PLAN_REF.findall(text):
+        if "/" in ref or "\\" in ref:
+            bases = [""] if os.path.isabs(ref) else [cwd, root]
+            if any(
+                os.path.normcase(os.path.abspath(os.path.join(b, ref))) == want
+                for b in bases
+            ):
+                return True
+        elif ref.lower() == plan.name.lower():
+            return True
+    return False
+
+
+def rearm_approval(
+    cwd: str, prompt: str = ""
+) -> tuple[dict[str, Any] | None, str | None]:
+    """(approval, warning): an approval survives into a new prompt or session only when the
+    prompt's first line (or slash-command arguments) names its task (`task:<id>`) or its plan
+    file, the plan is still in progress in the git root the prompt runs in (never a parent or
+    another project), and the record is authentic (HMAC) and fresh. Two named plans that could
+    both re-arm -> none (ambiguous)."""
+    import worktree
+
+    naming = naming_text(prompt)
+    tasks = prompt_tasks(naming)
+    if not tasks and not PLAN_REF.search(naming):
+        return None, None  # nothing named: a new prompt starts without plan approval
+    root = os.path.normcase(worktree.toplevel(cwd) or os.path.abspath(cwd))
+    plans_dir = Path(root) / "docs" / "plans"
+    named: list[tuple[Path, str, str | None]] = []
+    for plan in sorted(plans_dir.glob("*.md")) if plans_dir.is_dir() else []:
+        try:
+            text = plan.read_text(encoding="utf-8")
+        except OSError:  # unreadable plan: skip it
+            continue
+        task = plan_task(text)
+        if (task and task.lower() in tasks) or names_plan(
+            naming, plan, root, os.path.abspath(cwd)
+        ):
+            named.append((plan, text, task))
+    if not named:
+        return None, None  # the named work has no plan here
     approvals, problem = _load_approvals()
     if not approvals:
         return None, problem
     key = load_key(create=False)
-    d = os.path.abspath(cwd)
-    for _ in range(6):
-        plans_dir = Path(d) / "docs" / "plans"
-        if plans_dir.is_dir():
-            for plan in sorted(plans_dir.glob("*.md")):
-                try:
-                    text = plan.read_text(encoding="utf-8")
-                except OSError:  # unreadable plan: skip it
-                    continue
-                fm = re.match(r"\A---\s*\n(.*?)\n---", text, re.DOTALL)
-                in_progress = bool(
-                    fm
-                    and re.search(
-                        r"^status:\s*in-progress\s*$", fm.group(1), re.MULTILINE
-                    )
-                )
-                unchecked = re.search(r"^\s*[-*]\s\[ \]", text, re.MULTILINE)
-                if not (in_progress and unchecked):
-                    continue
-                record = approvals.get(plan_hash(text))
-                if not (
-                    isinstance(record, dict)
-                    and record.get("task_id")
-                    and record.get("task_id") == plan_task(text)
-                ):
-                    continue
-                invalid = record_is_valid(record, key)
-                if not invalid and not _inside(
-                    os.path.normcase(str(plan)), str(record.get("base") or "")
-                ):
-                    invalid = "승인 당시 프로젝트 밖의 계획 파일"
-                if invalid:
-                    # Keep looking (another plan may hold a valid approval) but report the first.
-                    problem = problem or f"{invalid}: {plan.name}"
-                    continue
-                return {**record, "rearmed_from": str(plan)}, None
-        parent = os.path.dirname(d)
-        if parent == d:
-            break
-        d = parent
-    return None, problem
+    found: list[dict[str, Any]] = []
+    for plan, text, task in named:
+        fm = re.match(r"\A---\s*\n(.*?)\n---", text, re.DOTALL)
+        in_progress = bool(
+            fm and re.search(r"^status:\s*in-progress\s*$", fm.group(1), re.MULTILINE)
+        )
+        unchecked = re.search(r"^\s*[-*]\s\[ \]", text, re.MULTILINE)
+        if not (in_progress and unchecked):
+            continue
+        record = approvals.get(plan_hash(text))
+        if not (
+            isinstance(record, dict)
+            and record.get("task_id")
+            and record.get("task_id") == task
+        ):
+            continue
+        invalid = record_is_valid(record, key)
+        if not invalid and os.path.normcase(str(record.get("base") or "")) != root:
+            invalid = "승인 당시와 다른 git 루트(프로젝트)"
+        if invalid:
+            # Keep looking (another plan may hold a valid approval) but report the first.
+            problem = problem or f"{invalid}: {plan.name}"
+            continue
+        found.append({**record, "rearmed_from": str(plan)})
+    if len(found) > 1:
+        names = ", ".join(str(f.get("task_id")) for f in found)
+        return None, f"{AMBIGUOUS}({names}) — task:<id> 하나만 지정 필요"
+    return (found[0], None) if found else (None, problem)
 
 
 def active_approval(state: dict[str, Any], prompt_id: object) -> dict[str, Any] | None:
@@ -763,9 +831,12 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
     state["turn"] = int(state.get("turn", 0)) + 1
     state["turn_files"] = []
     state["turn_shell_tops"] = []
-    # A new prompt never inherits the previous approval; only the same in-progress plan re-arms it.
+    # A new prompt never inherits the previous approval; only a prompt that names the same
+    # in-progress plan's task (or plan file) re-arms it.
+    prompt = data.get("prompt")
     state["approval"], state["approval_warning"] = rearm_approval(
-        str(data.get("cwd") or os.getcwd())
+        str(data.get("cwd") or os.getcwd()),
+        prompt if isinstance(prompt, str) else "",
     )
     state["prompt_id"] = data.get("prompt_id")
     if state["approval"]:
@@ -1070,6 +1141,10 @@ REASON_APPROVAL_INVALID = (
     "[discipline] 저장된 계획 승인 기록을 신뢰할 수 없어 자동 재승인하지 않았습니다({why}). "
     "이 작업을 계속하려면 계획을 다시 제시해 사용자 승인을 받으세요. 이 사실을 보고에 적으세요."
 )
+REASON_APPROVAL_AMBIGUOUS = (
+    "[discipline] 프롬프트가 승인된 진행 중 계획 여러 개를 가리켜 어느 것도 재무장하지 않았습니다({why}). "
+    "승인 기록은 유효합니다. 프롬프트 첫 줄에 task:<id> 하나만 적어 다시 요청해 달라고 사용자에게 알리세요."
+)
 REASON_STALE = (
     "[discipline] {root}: 마지막 검증 이후 파일 내용이 바뀌었습니다(Bash·스크립트 수정 포함, 내용 해시 기준). "
     "검증 증거가 무효이니 게이트를 다시 실행하세요."
@@ -1121,7 +1196,12 @@ def _stop_decision(state: dict[str, Any]) -> tuple[str, str | None] | None:
     if warning:
         key = f"approval-warning|{state.get('turn')}|{warning}"
         if _not_yet_notified(state, key):
-            return REASON_APPROVAL_INVALID.format(why=warning), key
+            template = (
+                REASON_APPROVAL_AMBIGUOUS
+                if str(warning).startswith(AMBIGUOUS)
+                else REASON_APPROVAL_INVALID
+            )
+            return template.format(why=warning), key
     decision = _scope_decision(state)
     if decision:
         return decision

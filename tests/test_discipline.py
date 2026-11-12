@@ -200,7 +200,15 @@ def d2_edit(
 
 
 def d2_prompt(session: str, prompt_id: str, cwd: str) -> None:
-    call("prompt", session, prompt_id=prompt_id, prompt="continue", cwd=cwd)
+    # Re-arming needs the prompt to name the task (P0-03); every D-2 prompt names it, so the
+    # negative cases below are refused for their own reason, not for a missing task.
+    call(
+        "prompt",
+        session,
+        prompt_id=prompt_id,
+        prompt="task:widget-api continue",
+        cwd=cwd,
+    )
 
 
 def approve(session: str, plan: str, prompt_id: str, cwd: str) -> None:
@@ -218,6 +226,9 @@ def approve(session: str, plan: str, prompt_id: str, cwd: str) -> None:
 D2 = Path(__file__).resolve().parent / "_tmp_d2"
 shutil.rmtree(D2, ignore_errors=True)
 (D2 / "docs" / "plans").mkdir(parents=True)
+# Its own git root: approvals re-arm only from the cwd's git toplevel, and without this the
+# toplevel would be the enclosing ~/.claude repository.
+subprocess.run(["git", "init", "-q"], cwd=D2, check=True)
 REPO2 = str(D2)
 PLAN_BODY = (
     "# Widget\n\ntask: widget-api\n\n## 목표\nShip it.\n\n## 변경 범위\n- src/**\n- tests/**\n\n"
@@ -754,8 +765,9 @@ shutil.rmtree(ROOT, ignore_errors=True)
 
 # ---- notify: no toast when discipline will block, toast on the final stop
 sys.path.insert(0, str(Path(HOOK).parent))
-import discipline
 import notify
+
+import discipline
 
 blocking = {
     "dirty": {"": {"at": 2.0, "gate": None, "ci": "undeclared"}},
