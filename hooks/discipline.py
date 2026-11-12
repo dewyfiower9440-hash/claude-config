@@ -18,12 +18,16 @@ notify.py imports session_key/load_state/stop_block_reason so it never toasts on
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sys
 import time
 from pathlib import Path
 from typing import Any
+
+# stderr only (a successful hook's stderr is not shown as a result); never secrets.
+log = logging.getLogger("discipline")
 
 # python -I drops the script dir; verification.py and shellparse.py live next to this file
 _HOOKS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -263,6 +267,16 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
     if not path or IGNORED_PATH.search(path):
         return
 
+    # 0) v2: the approval (and the store itself) is verified now, before this write.
+    if v2_active():
+        try:
+            denial = v2_write_check(state, cwd, path)
+        except Exception as e:  # hook boundary: refuse instead of crashing (fail-open)
+            log.exception("approvals.v2_hook_failure")
+            denial = v2_failure(e)
+        if denial:
+            emit_pre("deny", denial)
+
     # 1) Large change without an approved plan covering it.
     approval = active_approval(state, data.get("prompt_id"))
     counted = [f for f in state["turn_files"] if not in_approved_scope(approval, f)]
@@ -309,6 +323,13 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
                 mark_dirty(state, path, now, changed_lines(tool, ti))
     elif tool in ("Bash", "PowerShell"):
         record_evidence(data, state, failed=False)
+        if v2_active():  # a shell may have changed a plan: record what is seen now
+            try:
+                v2_write_check(state, str(data.get("cwd") or os.getcwd()))
+            except Exception as e:  # hook boundary: the approval is lost, not ignored
+                log.exception("approvals.v2_hook_failure")
+                state["approval"] = None
+                state["approval_warning"] = v2_failure(e)
     elif tool in ("Agent", "Task"):
         if ti.get("subagent_type") in REVIEW_AGENTS:
             state["last_review"] = now  # a review, not verification
@@ -451,9 +472,17 @@ def record_approval(data: dict[str, Any], state: dict[str, Any]) -> None:
     if text is None and isinstance(response.get("filePath"), str):
         try:
             text = Path(response["filePath"]).read_text(encoding="utf-8")
-        except OSError:  # plan file gone: approval stays prompt-only
+        except (OSError, ValueError):  # gone or not UTF-8: approval stays prompt-only
             text = None
     cwd = str(data.get("cwd") or os.getcwd())
+    if v2_active() and text and plan_task(text):
+        try:
+            v2_record_approval(data, state, text, response, cwd)
+        except Exception as e:  # hook boundary: no approval rather than a crash
+            log.exception("approvals.v2_hook_failure")
+            state["approval"] = None
+            state["approval_warning"] = v2_failure(e)
+        return
     record = {
         "task_id": plan_task(text) if text else None,
         "plan_hash": plan_hash(text) if text else None,
@@ -490,22 +519,27 @@ PLAN_REF = re.compile(
     r"[A-Za-z0-9_.:/\\~-]+\.md(?![A-Za-z0-9_-])", re.IGNORECASE | re.ASCII
 )
 COMMAND_HEADER = re.compile(r"\A\s*<command-(?:message|name)>")
-COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.DOTALL)
+# The args block counts only directly after the header tags, never later in an expanded body.
+COMMAND_ARGS = re.compile(
+    r"\A\s*(?:<command-(message|name)>.*?</command-\1>\s*)+<command-args>(.*?)</command-args>",
+    re.DOTALL,
+)
 RELAY_HEADERS = ("another claude session", "[system notification")
 AMBIGUOUS = "재무장 후보가 여러 개"
+NOTE = "참고:"  # a warning that informs (another named plan was refused) without demanding anything
 
 
 def naming_text(prompt: str) -> str:
     """The part of a prompt allowed to name a task. A slash command (the prompt starts with the
-    harness's <command-...> header) names it in its first <command-args> block only; any other
-    prompt in its first non-empty line only, and not at all when that line is markup or a relay
-    header (relayed agent messages, task notifications). Pasted documents and relayed text below
-    the first line never re-arm an approval."""
+    harness's <command-...> header) names it in the <command-args> block right after the header
+    only; any other prompt in its first non-empty line only, and not at all when that line is
+    markup, a harness note in brackets (`[Image: ...]`, `[Usage limit ...]`) or a relay header.
+    Pasted documents and relayed text below the first line never re-arm an approval."""
     if COMMAND_HEADER.match(prompt):
-        args = COMMAND_ARGS.search(prompt)
-        return args.group(1) if args else ""
+        args = COMMAND_ARGS.match(prompt)
+        return args.group(2) if args else ""
     first = next((line for line in prompt.splitlines() if line.strip()), "").strip()
-    if first.startswith("<") or first.lower().startswith(RELAY_HEADERS):
+    if first.startswith(("<", "[")) or first.lower().startswith(RELAY_HEADERS):
         return ""
     return first
 
@@ -541,27 +575,9 @@ def rearm_approval(
     file, the plan is still in progress in the git root the prompt runs in (never a parent or
     another project), and the record is authentic (HMAC) and fresh. Two named plans that could
     both re-arm -> none (ambiguous)."""
-    import worktree
-
-    naming = naming_text(prompt)
-    tasks = prompt_tasks(naming)
-    if not tasks and not PLAN_REF.search(naming):
-        return None, None  # nothing named: a new prompt starts without plan approval
-    root = os.path.normcase(worktree.toplevel(cwd) or os.path.abspath(cwd))
-    plans_dir = Path(root) / "docs" / "plans"
-    named: list[tuple[Path, str, str | None]] = []
-    for plan in sorted(plans_dir.glob("*.md")) if plans_dir.is_dir() else []:
-        try:
-            text = plan.read_text(encoding="utf-8")
-        except OSError:  # unreadable plan: skip it
-            continue
-        task = plan_task(text)
-        if (task and task.lower() in tasks) or names_plan(
-            naming, plan, root, os.path.abspath(cwd)
-        ):
-            named.append((plan, text, task))
+    root, named = named_plans(cwd, prompt)
     if not named:
-        return None, None  # the named work has no plan here
+        return None, None  # nothing named, or the named work has no plan here
     approvals, problem = _load_approvals()
     if not approvals:
         return None, problem
@@ -593,7 +609,38 @@ def rearm_approval(
     if len(found) > 1:
         names = ", ".join(str(f.get("task_id")) for f in found)
         return None, f"{AMBIGUOUS}({names}) — task:<id> 하나만 지정 필요"
-    return (found[0], None) if found else (None, problem)
+    if (
+        found
+    ):  # another named plan's record was refused: say so, without demanding anything
+        return found[0], (f"{NOTE} {problem}" if problem else None)
+    return None, problem
+
+
+def named_plans(
+    cwd: str, prompt: str
+) -> tuple[str, list[tuple[Path, str, str | None]]]:
+    """(git root, [(plan file, text, task)]) of the plans in this root's docs/plans that the
+    prompt's naming text names by task id or by plan file."""
+    import worktree
+
+    naming = naming_text(prompt)
+    tasks = prompt_tasks(naming)
+    if not tasks and not PLAN_REF.search(naming):
+        return "", []  # nothing named: no git call needed
+    root = os.path.normcase(worktree.toplevel(cwd) or os.path.abspath(cwd))
+    plans_dir = Path(root) / "docs" / "plans"
+    named: list[tuple[Path, str, str | None]] = []
+    for plan in sorted(plans_dir.glob("*.md")) if plans_dir.is_dir() else []:
+        try:
+            text = plan.read_text(encoding="utf-8")
+        except (OSError, ValueError):  # unreadable or not UTF-8: skip it
+            continue
+        task = plan_task(text)
+        if (task and task.lower() in tasks) or names_plan(
+            naming, plan, root, os.path.abspath(cwd)
+        ):
+            named.append((plan, text, task))
+    return root, named
 
 
 def active_approval(state: dict[str, Any], prompt_id: object) -> dict[str, Any] | None:
@@ -621,6 +668,354 @@ def in_approved_scope(approval: dict[str, Any] | None, path: str) -> bool:
     if "/docs/plans/" in target:
         return True  # keeping the plan file up to date is part of the approved work
     return any(fnmatch.fnmatch(target, g) or target == g for g in scope)
+
+
+# ---------------------------------------------------------------- P0-04: v2 approval instances
+# Dormant until the admin `activate` command (approvals.py, interactive TTY only) creates
+# APPROVALS_HOME/v2-active; until then everything above (v1) runs unchanged and nothing is
+# written by v2. Under v2 the session keeps only a pointer (approval_id); every protected
+# write re-reads and verifies the store and the plan file.
+REVOKE_CMD = re.compile(
+    r"^\s*revoke\s+task(?:_id)?\s*[:=]\s*`?([A-Za-z0-9][A-Za-z0-9_.-]*)",
+    re.IGNORECASE | re.ASCII,
+)
+NOT_GLOBAL = "전역 취소 미완료"
+REASON_V2_STORE = (
+    "[discipline] 승인 저장소를 신뢰할 수 없어 모든 보호 대상 쓰기와 승인 발급을 차단합니다({why}). "
+    "복구는 사용자가 대화형 터미널에서 `python -I ~/.claude/hooks/approvals.py reset`을 직접 실행해야 하며"
+    "(권한은 발급되지 않음), 그 뒤 계획마다 다시 승인받아야 합니다. Claude는 이를 대신 실행할 수 없습니다."
+)
+REASON_V2_INVALID = (
+    "[discipline] 승인(task: {task})이 더 이상 유효하지 않아 쓰기를 차단합니다: {why}. "
+    "계속하려면 계획을 다시 제시해 ExitPlanMode로 새 승인을 받으세요(과거 승인은 되살아나지 않습니다)."
+)
+
+
+# == approvals.V2_FILES (test_approvals checks it): the marker, or any v2 file, means v2, so
+# deleting the marker alone never falls back to v1.
+V2_FILES = ("v2-active", "approvals.v2.json", "hwm")
+
+
+def v2_active() -> bool:
+    # Stats only: importing approvals on every hook call costs ~50-100 ms while v2 is dormant.
+    return any((APPROVALS_HOME / n).exists() for n in V2_FILES)
+
+
+def v2_failure(e: BaseException) -> str:
+    """An unexpected failure in a v2 check, at the hook boundary: it must refuse, never let
+    the tool proceed (a crashing hook is non-blocking in Claude Code)."""
+    return REASON_V2_STORE.format(why=f"검사 중 오류 {type(e).__name__}: {e}")
+
+
+def _v2_store() -> Any:
+    import approvals
+
+    return approvals.Store(APPROVALS_HOME, approvals.default_witness())
+
+
+def _seen(state: dict[str, Any]) -> int:
+    return int(state.get("approvals_seen_gen") or 0)
+
+
+def _v2_load(state: dict[str, Any]) -> Any:
+    snap = _v2_store().load(
+        _seen(state)
+    )  # this session's memory is a rollback witness too
+    state["approvals_seen_gen"] = max(_seen(state), snap.gen)
+    return snap
+
+
+def _v2_update(state: dict[str, Any], fn: Any) -> Any:
+    snap = _v2_store().update(fn, _seen(state))
+    state["approvals_seen_gen"] = snap.gen
+    return snap
+
+
+def _v2_root(cwd: str) -> str:
+    import worktree
+
+    return os.path.normcase(worktree.toplevel(cwd) or os.path.abspath(cwd))
+
+
+def _v2_find_plan(root: str, task: object, core: object) -> str | None:
+    """The one plan file in root/docs/plans with this task and core hash (else None)."""
+    import approvals
+
+    plans_dir = Path(root) / "docs" / "plans"
+    hits: list[Path] = []
+    for plan in sorted(plans_dir.glob("*.md")) if plans_dir.is_dir() else []:
+        try:
+            text = plan.read_text(encoding="utf-8")
+        except (
+            OSError,
+            ValueError,
+        ):  # unreadable or not UTF-8: cannot be the approved one
+            continue
+        if plan_task(text) == task and approvals.core_hash(text) == core:
+            hits.append(plan)
+    return os.path.normcase(os.path.relpath(hits[0], root)) if len(hits) == 1 else None
+
+
+UNBOUND = "승인된 계획 파일이 아직 docs/plans에 없음(계획 파일을 먼저 기록하세요)"
+
+
+def _v2_read_plan(
+    rec: dict[str, Any] | None, root: str
+) -> tuple[str | None, str | None]:
+    """(text, None); (None, None) when the bound plan file is gone (-> revoke); (None, why)
+    when it cannot be judged now (unbound, locked, not UTF-8): refused, never revoked."""
+    rel = (rec or {}).get("plan_path")
+    if not rel:
+        return None, UNBOUND
+    try:
+        return (Path(root) / str(rel)).read_text(encoding="utf-8"), None
+    except FileNotFoundError:
+        return None, None
+    except (OSError, ValueError) as e:
+        return None, f"계획 파일을 지금 읽을 수 없음({type(e).__name__})"
+
+
+def v2_observe(state: dict[str, Any], root: str) -> None:
+    """Record permanently what is seen now: ACTIVE approvals of `root` whose plan left
+    in-progress, changed its core or disappeared are revoked; unbound plan paths are bound.
+    Raises StoreError when the store cannot be trusted. When the write fails, the causes stay
+    pending (this session refuses them) and the failure is reported as not global."""
+    import approvals as ap
+
+    now = time.time()
+    snap = _v2_load(state)
+    pending: dict[str, str] = dict(state.get("pending_revocations") or {})
+    binds: dict[str, str] = {}
+    for rid, rec in snap.records.items():
+        if rec.get("state") != ap.ACTIVE or rec.get("git_root") != root:
+            continue
+        if not rec.get("plan_path"):
+            rel = _v2_find_plan(root, rec.get("task_id"), rec.get("core_hash"))
+            if rel:
+                binds[rid] = rel
+            continue
+        text, unreadable = _v2_read_plan(rec, root)
+        if unreadable:
+            continue  # cannot be judged now: refused at the write, never revoked for it
+        verdict = ap.check(rec, root=root, plan_text=text, now=now)
+        if verdict.revoke and verdict.reason:
+            pending[rid] = verdict.reason
+    pending = {
+        rid: why
+        for rid, why in pending.items()
+        if (snap.records.get(rid) or {}).get("state") == ap.ACTIVE
+    }
+    if not pending and not binds:
+        state["pending_revocations"] = {}
+        return
+
+    def apply(recs: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        out = dict(recs)
+        for rid, rel in binds.items():
+            if rid in out and not out[rid].get("plan_path"):
+                out[rid] = {**out[rid], "plan_path": rel}
+        for rid, why in pending.items():
+            out = ap.revoke(out, [rid], why, now)
+        return out
+
+    try:
+        _v2_update(state, apply)
+    except ap.StoreError as e:
+        state["pending_revocations"] = pending
+        if pending:
+            state["approval_warning"] = (
+                f"승인 폐기를 저장하지 못했습니다({e}) — {NOT_GLOBAL}: 이 세션에서만 차단되며 "
+                "다른 세션에는 반영되지 않았을 수 있습니다"
+            )
+        return
+    state["pending_revocations"] = {}
+
+
+def v2_record_approval(
+    data: dict[str, Any],
+    state: dict[str, Any],
+    text: str,
+    response: dict[str, Any],
+    cwd: str,
+) -> None:
+    """ExitPlanMode: issue a new approval instance; nothing is granted unless it is stored."""
+    import approvals as ap
+
+    now = time.time()
+    root = _v2_root(cwd)
+    task = plan_task(text) or ""
+    core = ap.core_hash(text)
+    plan_path = None
+    fp = response.get("filePath")
+    if isinstance(fp, str) and _inside(fp, os.path.join(root, "docs", "plans")):
+        try:
+            same = ap.core_hash(Path(fp).read_text(encoding="utf-8")) == core
+        except (OSError, ValueError):  # not written yet / unreadable: bound later
+            same = False
+        if same:
+            plan_path = os.path.normcase(os.path.relpath(fp, root))
+    plan_path = plan_path or _v2_find_plan(root, task, core)
+    rec = ap.new_record(
+        task_id=task,
+        git_root=root,
+        plan_path=plan_path,
+        core=core,
+        scope=plan_scope(text, cwd),
+        session_id=data.get("session_id"),
+        prompt_id=data.get("prompt_id"),
+        now=now,
+    )
+    state["approval"] = None
+    try:
+        _v2_update(state, lambda recs: ap.issue(recs, rec, now))
+    except ap.StoreError as e:
+        state["approval_warning"] = (
+            f"승인을 저장하지 못해 발급하지 않았습니다({e}). 쓰기는 차단됩니다. "
+            "저장소 문제를 해결한 뒤 계획을 다시 승인받으세요"
+        )
+        return
+    state["approval"] = {
+        "v": 2,
+        "approval_id": rec["approval_id"],
+        "task_id": task,
+        "scope": rec["scope"],
+        "prompt_id": data.get("prompt_id"),
+        "base": root,
+    }
+
+
+def v2_revoke_task(state: dict[str, Any], root: str, task: str) -> str | None:
+    """`revoke task:<id>` (first line): revoke this root's ACTIVE approvals of the task."""
+    import approvals as ap
+
+    now = time.time()
+    ids: list[str] = []
+    try:
+        snap = _v2_load(state)
+        ids = [
+            rid
+            for rid, r in snap.records.items()
+            if r.get("state") == ap.ACTIVE
+            and str(r.get("task_id") or "").lower() == task.lower()
+            and r.get("git_root") == root
+        ]
+        if not ids:
+            return f"{NOTE} 취소할 ACTIVE 승인이 없습니다(task:{task})"
+        _v2_update(state, lambda recs: ap.revoke(recs, ids, "user_revoked", now))
+    except ap.StoreError as e:
+        state.setdefault("pending_revocations", {}).update(
+            {rid: "user_revoked" for rid in ids}
+        )
+        return (
+            f"승인 취소를 저장하지 못했습니다({e}) — {NOT_GLOBAL}: 이 세션에서만 차단되며 "
+            "다른 세션에는 반영되지 않았을 수 있습니다"
+        )
+    return None
+
+
+def v2_rearm(
+    cwd: str, prompt: str, state: dict[str, Any]
+) -> tuple[dict[str, Any] | None, str | None]:
+    """v2 counterpart of rearm_approval: the named plan's ACTIVE instance, verified now."""
+    import approvals as ap
+
+    revoke_cmd = REVOKE_CMD.match(naming_text(prompt))
+    if revoke_cmd:
+        return None, v2_revoke_task(state, _v2_root(cwd), revoke_cmd.group(1))
+    root, named = named_plans(cwd, prompt)
+    if not named:
+        return None, None
+    try:
+        v2_observe(state, root)
+        snap = _v2_load(state)
+    except ap.StoreError as e:
+        return None, f"승인 저장소를 신뢰할 수 없음({e})"
+    now = time.time()
+    pending = state.get("pending_revocations") or {}
+    found: list[dict[str, Any]] = []
+    problems: list[str] = []
+    for plan, text, task in named:
+        rel = os.path.normcase(os.path.relpath(plan, root))
+        recs = [
+            r
+            for r in snap.records.values()
+            if r.get("state") == ap.ACTIVE
+            and r.get("task_id") == task
+            and r.get("git_root") == root
+            and r.get("plan_path") == rel
+        ]
+        if not recs:
+            problems.append(f"유효한 v2 승인 없음: {plan.name}")
+        for rec in recs:
+            why = (
+                f"폐기 대기({NOT_GLOBAL})"
+                if rec["approval_id"] in pending
+                else ap.check(rec, root=root, plan_text=text, now=now).reason
+            )
+            if why:
+                problems.append(f"{why}: {plan.name}")
+            else:
+                found.append(rec)
+    if len(found) > 1:
+        names = ", ".join(str(f.get("task_id")) for f in found)
+        return None, f"{AMBIGUOUS}({names}) — task:<id> 하나만 지정 필요"
+    if not found:
+        return None, "; ".join(problems) or None
+    rec = found[0]
+    pointer = {
+        "v": 2,
+        "approval_id": rec["approval_id"],
+        "task_id": rec.get("task_id"),
+        "scope": list(rec.get("scope") or []),
+        "base": root,
+        "rearmed_from": str(Path(root) / str(rec.get("plan_path"))),
+    }
+    return pointer, (f"{NOTE} {'; '.join(problems)}" if problems else None)
+
+
+def v2_write_check(
+    state: dict[str, Any], cwd: str, path: str | None = None
+) -> str | None:
+    """Denial reason for a protected write under v2, else None. The store is re-read and
+    verified every time; a cached ACTIVE pointer alone never authorizes anything. Only a
+    lost approval (revoked, expired, superseded, missing) sticks for the rest of the prompt;
+    a plan that cannot be judged right now refuses this write only."""
+    import approvals as ap
+
+    ptr = state.get("approval")
+    has_ptr = isinstance(ptr, dict) and bool(ptr.get("approval_id"))
+    root = str(ptr.get("base")) if has_ptr and isinstance(ptr, dict) else _v2_root(cwd)
+    try:
+        v2_observe(state, root)
+        snap = _v2_load(state)
+    except ap.StoreError as e:
+        state["v2_block"] = str(e)
+        return REASON_V2_STORE.format(why=e)
+    if not (has_ptr and isinstance(ptr, dict)):
+        return None  # no approval: the five-file allowance applies (P0-06)
+    rid = str(ptr["approval_id"])
+    why = state.get("approval_invalid")
+    if not why and rid in (state.get("pending_revocations") or {}):
+        why = f"폐기 대기({NOT_GLOBAL})"
+    if not why:
+        rec = snap.records.get(rid)
+        text, unreadable = _v2_read_plan(rec, root)
+        if rec and rec.get("state") == ap.ACTIVE and unreadable:
+            plans = os.path.normcase(os.path.join(root, "docs", "plans"))
+            if unreadable == UNBOUND and path and _inside(path, plans):
+                return None  # writing the approved plan file itself is what binds it
+            state["v2_block"] = unreadable
+            return REASON_V2_INVALID.format(task=ptr.get("task_id"), why=unreadable)
+        verdict = ap.check(rec, root=root, plan_text=text, now=time.time())
+        if verdict.reason is None and rec:
+            ptr["scope"] = list(
+                rec.get("scope") or []
+            )  # the stored scope, not the cache
+            return None
+        why = verdict.reason
+    state["approval_invalid"] = why
+    state["v2_block"] = why
+    return REASON_V2_INVALID.format(task=ptr.get("task_id"), why=why)
 
 
 MAX_DIRTY_FILES = 200
@@ -834,10 +1229,18 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
     # A new prompt never inherits the previous approval; only a prompt that names the same
     # in-progress plan's task (or plan file) re-arms it.
     prompt = data.get("prompt")
-    state["approval"], state["approval_warning"] = rearm_approval(
-        str(data.get("cwd") or os.getcwd()),
-        prompt if isinstance(prompt, str) else "",
-    )
+    prompt = prompt if isinstance(prompt, str) else ""
+    cwd = str(data.get("cwd") or os.getcwd())
+    state["approval_invalid"] = None
+    state["v2_block"] = None
+    if v2_active():
+        try:
+            state["approval"], state["approval_warning"] = v2_rearm(cwd, prompt, state)
+        except Exception as e:  # hook boundary: nothing re-armed rather than a crash
+            log.exception("approvals.v2_hook_failure")
+            state["approval"], state["approval_warning"] = None, v2_failure(e)
+    else:
+        state["approval"], state["approval_warning"] = rearm_approval(cwd, prompt)
     state["prompt_id"] = data.get("prompt_id")
     if state["approval"]:
         # Bound to this prompt: if a later prompt's hook never runs (killed, timed out), the
@@ -1145,6 +1548,10 @@ REASON_APPROVAL_AMBIGUOUS = (
     "[discipline] 프롬프트가 승인된 진행 중 계획 여러 개를 가리켜 어느 것도 재무장하지 않았습니다({why}). "
     "승인 기록은 유효합니다. 프롬프트 첫 줄에 task:<id> 하나만 적어 다시 요청해 달라고 사용자에게 알리세요."
 )
+REASON_APPROVAL_NOTE = (
+    "[discipline] {why}. 지정한 승인 작업은 계속할 수 있습니다. "
+    "거부된 쪽이 의도한 계획이었다면 그 사실을 사용자에게 알리세요."
+)
 REASON_STALE = (
     "[discipline] {root}: 마지막 검증 이후 파일 내용이 바뀌었습니다(Bash·스크립트 수정 포함, 내용 해시 기준). "
     "검증 증거가 무효이니 게이트를 다시 실행하세요."
@@ -1199,6 +1606,8 @@ def _stop_decision(state: dict[str, Any]) -> tuple[str, str | None] | None:
             template = (
                 REASON_APPROVAL_AMBIGUOUS
                 if str(warning).startswith(AMBIGUOUS)
+                else REASON_APPROVAL_NOTE
+                if str(warning).startswith(NOTE)
                 else REASON_APPROVAL_INVALID
             )
             return template.format(why=warning), key
@@ -1431,6 +1840,18 @@ def on_stop(data: dict[str, Any], state: dict[str, Any]) -> None:
     import worktree
 
     state["stop_prompt_id"] = data.get("prompt_id") or state.get("prompt_id")
+    if v2_active():
+        try:
+            refused = v2_write_check(state, str(data.get("cwd") or os.getcwd()))
+        except Exception as e:  # hook boundary: block with the failure, never crash
+            log.exception("approvals.v2_hook_failure")
+            refused, state["v2_block"] = v2_failure(e), v2_failure(e)
+        if refused:
+            # A revoked/invalid approval (or an untrusted store) covers nothing this turn did.
+            state["approval"] = None
+            state["approval_warning"] = state.get("approval_warning") or state.get(
+                "v2_block"
+            )
     track_repo(state, str(data.get("cwd") or os.getcwd()))
     refresh_content(state)
     if worktree.budget_exhausted:

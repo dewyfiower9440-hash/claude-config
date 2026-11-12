@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -501,6 +502,548 @@ check(
     True,
 )
 
+# ================================================================ P0-04: v2 approval instances
+# Isolated homes/witnesses; the `v2-active` marker exists only inside these test homes.
+sys.path.insert(0, str(HOOKS))
+import approvals as ap
+
+# Write decisions ignore %TEMP% paths (discipline IGNORED_PATH): a checkout under %TEMP%
+# (a scratch worktree) points CLAUDE_TEST_TMP at a folder outside it.
+TROOT = Path(os.environ.get("CLAUDE_TEST_TMP") or HERE)
+TROOT.mkdir(parents=True, exist_ok=True)
+V2HOME, V2W = TROOT / "_tmp_approval_v2home", TROOT / "_tmp_approval_v2w"
+V2REPO = TROOT / "_tmp_approval_v2repo"
+for p in (V2HOME, V2W, V2REPO):
+    shutil.rmtree(p, ignore_errors=True)
+os.environ["CLAUDE_DISCIPLINE_HOME"] = str(V2HOME)
+os.environ["CLAUDE_DISCIPLINE_WITNESS"] = str(V2W / "hwm")
+(V2REPO / "docs" / "plans").mkdir(parents=True)
+(V2REPO / "src").mkdir()
+subprocess.run(["git", "init", "-q"], cwd=V2REPO, check=True)
+V2PLAN = (
+    "---\nstatus: in-progress\ntask: widget\n---\n\n# Widget\n\n## 보안 조건\n- keep data\n\n"
+    "## 변경 범위\n- src/**\n\n## 단계\n- [ ] 1. a\n- [ ] 2. b\n\n## 진행 기록\n- start\n"
+)
+V2FILE = V2REPO / "docs" / "plans" / "2026-11-12-widget.md"
+V2ALPHA = V2REPO / "docs" / "plans" / "2026-11-12-alpha.md"
+TARGET = V2REPO / "src" / "w.py"
+_pid = 0
+
+
+def pid() -> str:
+    global _pid
+    _pid += 1
+    return f"v2p{_pid}"
+
+
+def v2_save(text: str = V2PLAN) -> None:
+    V2FILE.write_bytes(text.encode("utf-8"))
+
+
+def v2_approve(text: str = V2PLAN) -> tuple[str, str]:
+    """A user approval (ExitPlanMode) in a fresh session: (session, prompt_id)."""
+    s, p = uuid.uuid4().hex, pid()
+    call("prompt", s, prompt_id=p, prompt="plan the widget", cwd=str(V2REPO))
+    call(
+        "post",
+        s,
+        prompt_id=p,
+        tool_name="ExitPlanMode",
+        tool_input={},
+        tool_response={"plan": text, "filePath": str(V2FILE)},
+        cwd=str(V2REPO),
+    )
+    return s, p
+
+
+def v2_prompt(prompt: str, s: str | None = None, cwd: Path = V2REPO) -> tuple[str, str]:
+    s, p = s or uuid.uuid4().hex, pid()
+    call("prompt", s, prompt_id=p, prompt=prompt, cwd=str(cwd))
+    return s, p
+
+
+def edit_decision(s: str, p: str, path: Path = TARGET) -> str:
+    """'allow' only via a live approval: five out-of-scope files were already edited this turn,
+    so the five-file allowance cannot be what lets an in-scope edit through."""
+    for i in range(5):
+        other = V2REPO / f"o{i}.txt"
+        call(
+            "post",
+            s,
+            prompt_id=p,
+            tool_name="Edit",
+            tool_input={"file_path": str(other)},
+            cwd=str(V2REPO),
+        )
+    out = call(
+        "pre",
+        s,
+        prompt_id=p,
+        tool_name="Edit",
+        tool_input={"file_path": str(path), "old_string": "a", "new_string": "b"},
+        cwd=str(V2REPO),
+    )
+    return out["hookSpecificOutput"]["permissionDecision"] if out else "allow"
+
+
+def raw_pre(s: str, p: str, path: Path = TARGET) -> dict | None:
+    return call(
+        "pre",
+        s,
+        prompt_id=p,
+        tool_name="Edit",
+        tool_input={"file_path": str(path), "old_string": "a", "new_string": "b"},
+        cwd=str(V2REPO),
+    )
+
+
+def v2_store() -> ap.Store:
+    return ap.Store(V2HOME, V2W / "hwm")
+
+
+sys.path.insert(0, str(HOOKS))
+import discipline as _disc
+
+check(
+    "discipline's v2 detection uses the same files as approvals",
+    _disc.V2_FILES,
+    ap.V2_FILES,
+)
+
+
+# ---- T28 dormant: no marker -> v1 behaviour, no v2 files anywhere
+v2_save()
+s, p = v2_approve()
+s2, p2 = v2_prompt("task:widget 계속")
+check(
+    "T28 dormant: v1 approval re-armed as before",
+    (state_of(s2).get("approval") or {}).get("task_id"),
+    "widget",
+)
+check(
+    "T28 dormant: no v2 store, witness or marker written",
+    [
+        x.exists()
+        for x in (
+            V2HOME / ap.STORE_NAME,
+            V2HOME / ap.HWM_NAME,
+            V2W / "hwm",
+            V2HOME / ap.MARKER_NAME,
+        )
+    ],
+    [False, False, False, False],
+)
+
+# ---- activate v2 in the isolated home (admin path, confirmed in-test)
+v2_store().admin_activate(lambda code: True, "test")
+check("v2 marker exists only in the test home", ap.is_active(V2HOME), True)
+
+# ---- T13 v1 approvals grant nothing under v2
+s, p = v2_prompt("task:widget 계속")
+check("T13 v1 approval is not re-armed under v2", state_of(s).get("approval"), None)
+check("T13 edit denied without a v2 approval", edit_decision(s, p), "deny")
+
+# ---- normal approval, resume, progress updates
+s1, p1 = v2_approve()
+a1 = state_of(s1).get("approval") or {}
+check("v2 approval issued with an approval_id", bool(a1.get("approval_id")), True)
+check(
+    "v2 approved edit allowed in the approving prompt", edit_decision(s1, p1), "allow"
+)
+s, p = v2_prompt("task:widget 계속")
+check(
+    "v2 resume in a new session (task named) -> same approval",
+    (state_of(s).get("approval") or {}).get("approval_id"),
+    a1.get("approval_id"),
+)
+check("v2 resumed edit allowed", edit_decision(s, p), "allow")
+for name, text in (
+    ("checkbox checked", V2PLAN.replace("- [ ] 1. a", "- [x] 1. a")),
+    ("all checked", V2PLAN.replace("- [ ]", "- [x]")),
+    ("unchecked again", V2PLAN.replace("- [ ] 1. a", "- [ ] 1. a")),
+    ("progress log appended", V2PLAN + "- step 1 done\n"),
+    ("CRLF", V2PLAN.replace("\n", "\r\n")),
+):
+    v2_save(text)
+    s, p = v2_prompt("task:widget")
+    check(f"T12 {name}: approval kept and edit allowed", edit_decision(s, p), "allow")
+v2_save()
+
+# ---- T22 (5) command-args must follow the command header directly; (3) note on other named plan
+s, p = v2_prompt(
+    "<command-message>implement</command-message>\n<command-name>/implement</command-name>\n<command-args>task:widget</command-args>"
+)
+check(
+    "T22 /implement with task in its args re-arms",
+    (state_of(s).get("approval") or {}).get("task_id"),
+    "widget",
+)
+s, p = v2_prompt(
+    "<command-name>/x</command-name>\nexpanded body\n<command-args>task:widget</command-args>"
+)
+check(
+    "T22 command-args not right after the header -> not re-armed",
+    state_of(s).get("approval"),
+    None,
+)
+V2ALPHA.write_text(V2PLAN.replace("task: widget", "task: alpha"), encoding="utf-8")
+s, p = v2_prompt("task:widget task:alpha")
+st = state_of(s)
+check(
+    "T22 widget re-armed although alpha has no approval",
+    (st.get("approval") or {}).get("task_id"),
+    "widget",
+)
+check(
+    "T22 the problem with alpha is reported as a note",
+    "alpha" in str(st.get("approval_warning")),
+    True,
+)
+V2ALPHA.unlink()
+
+# ---- T5 / T6 other task, other root
+s, p = v2_prompt("task:gadget")
+check(
+    "T5 a task without approval -> nothing re-armed", state_of(s).get("approval"), None
+)
+V2OTHER = TROOT / "_tmp_approval_v2other"
+shutil.rmtree(V2OTHER, ignore_errors=True)
+(V2OTHER / "docs" / "plans").mkdir(parents=True)
+subprocess.run(["git", "init", "-q"], cwd=V2OTHER, check=True)
+(V2OTHER / "docs" / "plans" / V2FILE.name).write_text(V2PLAN, encoding="utf-8")
+s, p = v2_prompt("task:widget", cwd=V2OTHER)
+check(
+    "T6 same plan in another git root -> not re-armed",
+    state_of(s).get("approval"),
+    None,
+)
+shutil.rmtree(V2OTHER, ignore_errors=True)
+
+# ---- T15 / T3 revocation in one session reaches a cached approval in another
+sB, pB = v2_prompt("task:widget")
+check(
+    "T15 session B holds the approval",
+    bool((state_of(sB).get("approval") or {}).get("approval_id")),
+    True,
+)
+sA, pA = v2_prompt("revoke task:widget")
+recs = v2_store().load().records
+check(
+    "T3 revoke persisted (REVOKED, user_revoked)",
+    recs[a1["approval_id"]]["state_reason"],
+    "user_revoked",
+)
+out = raw_pre(sB, pB)
+check(
+    "T15 B's cached approval is denied at the next write",
+    (out or {}).get("hookSpecificOutput", {}).get("permissionDecision"),
+    "deny",
+)
+s, p = v2_prompt("task:widget")
+check(
+    "T3 revoked approval is not re-armed in a new session",
+    state_of(s).get("approval"),
+    None,
+)
+
+# ---- T7 re-approval issues a new id; the old one stays revoked
+s7, p7 = v2_approve()
+a7 = state_of(s7).get("approval") or {}
+check(
+    "T7 re-approval: new approval_id",
+    bool(a7.get("approval_id")) and a7.get("approval_id") != a1.get("approval_id"),
+    True,
+)
+check(
+    "T7 old id stays REVOKED",
+    v2_store().load().records[a1["approval_id"]]["state"],
+    "REVOKED",
+)
+check("T7 new approval allows edits", edit_decision(s7, p7), "allow")
+
+# ---- T1 / T2 / T11 / T23 / T24: plan changes revoke, restoring them does not revive
+for name, change in (
+    ("T1 blocked", V2PLAN.replace("in-progress", "blocked")),
+    ("T2 done", V2PLAN.replace("in-progress", "done")),
+    ("T11 core step changed", V2PLAN.replace("1. a", "1. a, also delete tests")),
+    ("T23 scope extended", V2PLAN.replace("- src/**\n", "- src/**\n- C:/**\n")),
+    ("T24 task id changed", V2PLAN.replace("task: widget", "task: gadget")),
+    ("T25 security constraint removed", V2PLAN.replace("- keep data\n", "")),
+):
+    v2_save()
+    s, p = v2_approve()
+    aid = (state_of(s).get("approval") or {}).get("approval_id")
+    v2_save(change)
+    sx, px = v2_prompt("task:widget")  # observes the change
+    check(f"{name}: not re-armed while changed", state_of(sx).get("approval"), None)
+    check(
+        f"{name}: write by the approving session denied",
+        (raw_pre(s, p) or {}).get("hookSpecificOutput", {}).get("permissionDecision"),
+        "deny",
+    )
+    v2_save()  # restore the approved text / in-progress
+    sy, py = v2_prompt("task:widget")
+    check(
+        f"{name}: restored plan does not revive the approval",
+        state_of(sy).get("approval"),
+        None,
+    )
+    check(
+        f"{name}: approval REVOKED in the store",
+        v2_store().load().records[aid]["state"],
+        "REVOKED",
+    )
+
+# ---- T20 revocation that cannot be persisted: this session blocked, reported as not global
+v2_save()
+s, p = v2_approve()
+aid = (state_of(s).get("approval") or {}).get("approval_id")
+os.chmod(V2HOME / ap.STORE_NAME, stat.S_IREAD)
+sr, pr = v2_prompt("revoke task:widget")
+check(
+    "T20 failed revocation reported as not global",
+    "전역 취소 미완료" in str(state_of(sr).get("approval_warning")),
+    True,
+)
+check(
+    "T20 the store still says ACTIVE (not globally revoked)",
+    v2_store().load().records[aid]["state"],
+    "ACTIVE",
+)
+os.chmod(V2HOME / ap.STORE_NAME, stat.S_IREAD | stat.S_IWRITE)
+
+# ---- T21 / T9 corrupt store: every protected write and issuance refused
+good = (V2HOME / ap.STORE_NAME).read_bytes()
+(V2HOME / ap.STORE_NAME).write_text("garbage", encoding="utf-8")
+out = raw_pre(s, p)
+check(
+    "T21 corrupt store: write denied",
+    (out or {}).get("hookSpecificOutput", {}).get("permissionDecision"),
+    "deny",
+)
+s9, p9 = v2_prompt("make a small change")
+out = raw_pre(s9, p9)
+check(
+    "T9 corrupt store: even the five-file allowance is denied",
+    (out or {}).get("hookSpecificOutput", {}).get("permissionDecision"),
+    "deny",
+)
+s9b, _ = v2_approve()
+check(
+    "T9 corrupt store: ExitPlanMode issues nothing", state_of(s9b).get("approval"), None
+)
+check(
+    "T9 issuance failure is reported",
+    "승인" in str(state_of(s9b).get("approval_warning")),
+    True,
+)
+v2_prompt("discipline: reset-approvals")
+check(
+    "T27 the prompt text resets nothing",
+    (V2HOME / ap.STORE_NAME).read_text(encoding="utf-8"),
+    "garbage",
+)
+
+# ---- T14 rollback of the store snapshot
+(V2HOME / ap.STORE_NAME).write_bytes(good)
+v2_prompt("revoke task:widget")  # gen advances
+(V2HOME / ap.STORE_NAME).write_bytes(
+    good
+)  # restore the older snapshot where it was ACTIVE
+s14, p14 = v2_prompt("task:widget")
+check("T14 restored snapshot: nothing re-armed", state_of(s14).get("approval"), None)
+check(
+    "T14 restored snapshot: write denied",
+    (raw_pre(s14, p14) or {}).get("hookSpecificOutput", {}).get("permissionDecision"),
+    "deny",
+)
+
+# ---- T10 admin reset grants nothing; only a new approval works
+v2_store().admin_reset(lambda code: True, "test")
+s, p = v2_prompt("task:widget")
+check("T10 after reset: nothing re-armed", state_of(s).get("approval"), None)
+check("T10 after reset: edit denied", edit_decision(s, p), "deny")
+s, p = v2_approve()
+check("T10 after reset: a new approval works", edit_decision(s, p), "allow")
+
+
+def decision(out: dict | None) -> str:
+    return (out or {}).get("hookSpecificOutput", {}).get(
+        "permissionDecision"
+    ) or "allow"
+
+
+# ---- review: plan-mode approval (plan file outside the root, docs/plans copy written later)
+V2FILE.unlink()
+PM = TROOT / "_tmp_approval_planmode" / "cached-plan.md"
+PM.parent.mkdir(parents=True, exist_ok=True)
+PM.write_text(V2PLAN.replace("in-progress", "draft"), encoding="utf-8")
+s, p = uuid.uuid4().hex, pid()
+call("prompt", s, prompt_id=p, prompt="plan it", cwd=str(V2REPO))
+call(
+    "post",
+    s,
+    prompt_id=p,
+    tool_name="ExitPlanMode",
+    tool_input={},
+    tool_response={"plan": PM.read_text(encoding="utf-8"), "filePath": str(PM)},
+    cwd=str(V2REPO),
+)
+check(
+    "plan mode: approval issued although the plan file is not in docs/plans yet",
+    bool((state_of(s).get("approval") or {}).get("approval_id")),
+    True,
+)
+check(
+    "plan mode: writing the plan file itself is allowed before binding",
+    decision(raw_pre(s, p, V2FILE)),
+    "allow",
+)
+check("plan mode: other writes wait for the plan file", decision(raw_pre(s, p)), "deny")
+v2_save()  # the approved text, now in-progress, in docs/plans
+check(
+    "plan mode: once the plan file exists, the same prompt may write in scope",
+    edit_decision(s, p),
+    "allow",
+)
+shutil.rmtree(PM.parent, ignore_errors=True)
+
+# ---- review: a plan that cannot be read now refuses without crashing or revoking
+V2FILE.write_bytes(V2FILE.read_bytes() + b"\xff\xfe")
+check(
+    "non-UTF-8 plan: write denied (hook exits 0 with deny, no crash)",
+    decision(raw_pre(s, p)),
+    "deny",
+)
+stop_out = call("stop", s, prompt_id=p, cwd=str(V2REPO))
+check(
+    "non-UTF-8 plan: Stop runs and blocks for the unreadable plan (no crash)",
+    (
+        (stop_out or {}).get("decision"),
+        "계획 파일을 지금 읽을 수 없음" in str((stop_out or {}).get("reason")),
+    ),
+    ("block", True),
+)
+v2_save()
+s, p = v2_prompt("task:widget")
+check(
+    "non-UTF-8 plan was not revoked: re-armed after the file is fixed",
+    edit_decision(s, p),
+    "allow",
+)
+
+# ---- review: a store that crashes the JSON parser denies (no RecursionError crash)
+good = (V2HOME / ap.STORE_NAME).read_bytes()
+(V2HOME / ap.STORE_NAME).write_text("[" * 200_000, encoding="utf-8")
+check(
+    "deeply nested store: write denied, hook exits 0", decision(raw_pre(s, p)), "deny"
+)
+(V2HOME / ap.STORE_NAME).write_bytes(good)
+
+# ---- review: deleting the marker alone does not fall back to v1
+(V2HOME / ap.MARKER_NAME).unlink()
+s, p = v2_prompt("task:widget")
+check(
+    "marker deleted, store present: still v2 (pointer is a v2 approval)",
+    (state_of(s).get("approval") or {}).get("v"),
+    2,
+)
+(V2HOME / ap.MARKER_NAME).write_text("test", encoding="utf-8")
+
+# ---- T13 code rollback to the v1 path: activation retired v1 and rotated the key
+V1HOME = TROOT / "_tmp_approval_v1home"
+shutil.rmtree(V1HOME, ignore_errors=True)
+os.environ["CLAUDE_DISCIPLINE_HOME"] = str(V1HOME)
+os.environ["CLAUDE_DISCIPLINE_WITNESS"] = str(V1HOME) + "-w/hwm"
+v2_save()
+v2_approve()  # dormant: a v1 record
+s, p = v2_prompt("task:widget")
+check(
+    "T13 control: v1 record re-arms before activation",
+    (state_of(s).get("approval") or {}).get("task_id"),
+    "widget",
+)
+ap.Store(V1HOME, Path(str(V1HOME) + "-w") / "hwm").admin_activate(
+    lambda code: True, "t"
+)
+(V1HOME / ap.MARKER_NAME).unlink()  # code/marker rolled back: the v1 path runs again
+s, p = v2_prompt("task:widget")
+check(
+    "T13 v1 path after activation: old approval not re-armed",
+    state_of(s).get("approval"),
+    None,
+)
+os.replace(V1HOME / "approvals.v1.retired-t.json", V1HOME / "approvals.json")
+s, p = v2_prompt("task:widget")
+check(
+    "T13 retired v1 file restored: still not re-armed (key rotated)",
+    state_of(s).get("approval"),
+    None,
+)
+base = subprocess.run(
+    ["git", "rev-parse", "--verify", "-q", "devenv-baseline-2026-11-11^{commit}"],
+    cwd=HERE,
+    capture_output=True,
+    text=True,
+    check=False,
+)
+if (
+    base.returncode == 0
+):  # local only: the tag is never pushed, CI checkouts have no tags
+    OLD = HERE / "_tmp_approval_oldhooks"
+    shutil.rmtree(OLD, ignore_errors=True)
+    OLD.mkdir()
+    names = subprocess.run(
+        ["git", "ls-tree", "--name-only", "devenv-baseline-2026-11-11", "hooks/"],
+        cwd=HERE.parent,  # the pathspec is relative to the cwd
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    for n in names:
+        if n.endswith(".py"):
+            blob = subprocess.run(
+                ["git", "show", f"devenv-baseline-2026-11-11:{n}"],
+                cwd=HERE,
+                capture_output=True,
+                check=True,
+            ).stdout
+            (OLD / Path(n).name).write_bytes(blob)
+    so = uuid.uuid4().hex
+    old_run = subprocess.run(
+        [sys.executable, "-I", str(OLD / "discipline.py"), "prompt"],
+        input=json.dumps(
+            {
+                "session_id": so,
+                "cwd": str(V2REPO),
+                "prompt": "task:widget",
+                "prompt_id": "old",
+            }
+        ),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    check(
+        "T13 baseline-tag v1 code runs",
+        (old_run.returncode, old_run.stderr[-300:]),
+        (0, ""),
+    )
+    check(
+        "T13 baseline-tag v1 code after activation: nothing re-armed",
+        state_of(so).get("approval"),
+        None,
+    )
+    shutil.rmtree(OLD, ignore_errors=True)
+else:
+    print(
+        "NOTICE: baseline tag absent (CI); the v1-path rollback checks above still ran"
+    )
+
+for p_ in (V2HOME, V2W, V2REPO, V1HOME, Path(str(V1HOME) + "-w")):
+    shutil.rmtree(p_, ignore_errors=True)
 shutil.rmtree(HOME, ignore_errors=True)
 shutil.rmtree(REPO, ignore_errors=True)
 print("FAILURES:", fails)
