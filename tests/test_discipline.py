@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 HOOK = str(Path(__file__).resolve().parent.parent / "hooks" / "discipline.py")
@@ -803,6 +804,701 @@ check(
     notify.should_toast_on_stop(block_reason=None, elapsed=None),
     False,
 )
+
+# ---- P0-04b: path classes. A git worktree under %TEMP% is code like any repository; only a
+# non-git temp folder (scratch) stays out of scope. Links never move a path into or out of it.
+PB = Path("C:/dev/_disc_p004b")  # outside %TEMP%
+
+
+def rm_tree(p: Path) -> None:
+    """Remove a test tree, including git's read-only object files (Windows)."""
+    import stat
+
+    def writable(
+        func: Callable[[str], object], target: str, _exc: BaseException
+    ) -> None:
+        os.chmod(target, stat.S_IWRITE)
+        func(target)
+
+    if p.exists():
+        shutil.rmtree(p, onexc=writable)
+
+
+rm_tree(PB)
+REPO_A = PB / "repoA"
+REPO_A.mkdir(parents=True)
+for args in (
+    ["init", "-q"],
+    ["config", "user.email", "t@t"],
+    ["config", "user.name", "t"],
+):
+    subprocess.run(["git", *args], cwd=REPO_A, check=True)
+(REPO_A / "README").write_text("x\n", encoding="utf-8")
+subprocess.run(["git", "add", "-A"], cwd=REPO_A, check=True)
+subprocess.run(["git", "commit", "-qm", "init"], cwd=REPO_A, check=True)
+WT_B = TMP / "wtB"
+subprocess.run(
+    ["git", "worktree", "add", "-q", "--detach", str(WT_B)], cwd=REPO_A, check=True
+)
+PLAIN_C = TMP / "plainC"
+PLAIN_C.mkdir()
+LINK = TMP / "link-to-repoA"
+subprocess.run(
+    ["cmd", "/c", "mklink", "/J", str(LINK), str(REPO_A)],
+    capture_output=True,
+    check=True,
+)
+
+
+def classes_run(root: Path, sixth: str) -> tuple[str | None, str | None]:
+    """(6th unapproved code file, first-edit assertion removal) for a fresh session in `root`."""
+    s = uuid.uuid4().hex
+    call("prompt", s, prompt_id="c1", prompt="small change", cwd=str(root))
+    for i in range(5):
+        call(
+            "post",
+            s,
+            prompt_id="c1",
+            cwd=str(root),
+            tool_name="Edit",
+            tool_input={"file_path": str(root / "src" / f"f{i}.py")},
+        )
+    six = decision(
+        call(
+            "pre",
+            s,
+            prompt_id="c1",
+            cwd=str(root),
+            tool_name="Edit",
+            tool_input={"file_path": sixth, "old_string": "a", "new_string": "b"},
+        )
+    )
+    w = uuid.uuid4().hex
+    call("prompt", w, prompt_id="c2", prompt="small change", cwd=str(root))
+    weak = decision(
+        call(
+            "pre",
+            w,
+            prompt_id="c2",
+            cwd=str(root),
+            tool_name="Edit",
+            tool_input={
+                "file_path": str(root / "tests" / "test_x.py"),
+                "old_string": "    assert f() == 1\n",
+                "new_string": "    pass\n",
+            },
+        )
+    )
+    return six, weak
+
+
+check(
+    "R10 normal git repo: 6th unapproved file denied, assertion removal asks",
+    classes_run(REPO_A, str(REPO_A / "src" / "f5.py")),
+    ("deny", "ask"),
+)
+check(
+    "R11 git worktree under %TEMP%: same policy as R10",
+    classes_run(WT_B, str(WT_B / "src" / "f5.py")),
+    ("deny", "ask"),
+)
+check(
+    "R12 non-git temp folder: still out of scope (scratch)",
+    classes_run(PLAIN_C, str(PLAIN_C / "src" / "f5.py")),
+    (None, None),
+)
+check(
+    "R14 junction under %TEMP% into a repository: not a way out",
+    classes_run(LINK, str(LINK / "src" / "f5.py")),
+    ("deny", "ask"),
+)
+check(
+    "R14 worktree: upper-case path, a relative path and a file in a new folder are still protected",
+    (
+        classes_run(WT_B, str(WT_B / "src" / "f5.py").upper())[0],
+        classes_run(WT_B, "src/rel.py")[0],
+        classes_run(WT_B, str(WT_B / "new" / "deeper" / "n.py"))[0],
+    ),
+    ("deny", "deny", "deny"),
+)
+
+# ---- P0-04b: a tracked repository that disappeared (deleted worktree) is reported once as
+# unverifiable; its baseline is kept (compared again if it comes back), never counted verified.
+WT_D = TMP / "wtD"
+subprocess.run(
+    ["git", "worktree", "add", "-q", "--detach", str(WT_D)], cwd=REPO_A, check=True
+)
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="d1", prompt="work", cwd=str(WT_D))
+(WT_D / "src").mkdir()
+call(
+    "post",
+    s,
+    prompt_id="d1",
+    cwd=str(WT_D),
+    tool_name="Edit",
+    tool_input={"file_path": str(WT_D / "src" / "a.py")},
+)
+(WT_D / "src" / "a.py").write_text("x = 1\n", encoding="utf-8")
+subprocess.run(
+    ["git", "worktree", "remove", "--force", str(WT_D)], cwd=REPO_A, check=True
+)
+first = call("stop", s, prompt_id="d1", cwd=str(TMP))
+check(
+    "R17 deleted worktree: Stop reports it as removed and unverified",
+    (
+        "삭제" in str((first or {}).get("reason")),
+        "미확인" in str((first or {}).get("reason")),
+    ),
+    (True, True),
+)
+call("prompt", s, prompt_id="d2", prompt="next", cwd=str(TMP))
+again = call("stop", s, prompt_id="d2", cwd=str(TMP))
+check(
+    "R17/T11 ... while its edit is unverified, the missing repository is reported every turn",
+    "사라졌습니다" in str((again or {}).get("reason")),
+    True,
+)
+
+
+def state_file(session: str) -> dict:
+    return json.loads(
+        (
+            Path(tempfile.gettempdir()) / "claude-discipline" / f"{session}.json"
+        ).read_text(encoding="utf-8")
+    )
+
+
+check(
+    "R17 the deleted repository's baseline is kept, not dropped (it may come back)",
+    any(
+        os.path.normcase(str(WT_D)) == os.path.normcase(k)
+        for k in state_file(s).get("repos_removed", {})
+    ),
+    True,
+)
+
+# ---- P0-04b review: rename away and back must not reset the baseline (hiding unverified edits)
+REPO_R = PB / "repoR"
+REPO_R.mkdir()
+for args in (
+    ["init", "-q"],
+    ["config", "user.email", "t@t"],
+    ["config", "user.name", "t"],
+):
+    subprocess.run(["git", *args], cwd=REPO_R, check=True)
+(REPO_R / "a.py").write_text("x = 1\n", encoding="utf-8")
+subprocess.run(["git", "add", "-A"], cwd=REPO_R, check=True)
+subprocess.run(["git", "commit", "-qm", "init"], cwd=REPO_R, check=True)
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="m1", prompt="work", cwd=str(REPO_R))
+edit_in = {
+    "file_path": str(REPO_R / "a.py"),
+    "old_string": "x = 1",
+    "new_string": "x = 2",
+}
+call("pre", s, prompt_id="m1", cwd=str(REPO_R), tool_name="Edit", tool_input=edit_in)
+(REPO_R / "a.py").write_text("x = 2\n", encoding="utf-8")
+call("post", s, prompt_id="m1", cwd=str(REPO_R), tool_name="Edit", tool_input=edit_in)
+check(
+    "R18 edited, nothing verified -> Stop blocks",
+    decision(call("stop", s, prompt_id="m1", cwd=str(REPO_R))),
+    "block",
+)
+os.rename(REPO_R, PB / "repoR-moved")
+moved = call("stop", s, prompt_id="m1", cwd=str(PB))
+check(
+    "R18 repository moved away -> missing-repository notice",
+    "사라졌습니다" in str((moved or {}).get("reason")),
+    True,
+)
+os.rename(PB / "repoR-moved", REPO_R)
+call("prompt", s, prompt_id="m2", prompt="continue", cwd=str(REPO_R))
+check(
+    "R18 moved back: the original baseline is restored and the unverified edit still blocks",
+    decision(call("stop", s, prompt_id="m2", cwd=str(REPO_R))),
+    "block",
+)
+back = call("stop", s, prompt_id="m2", cwd=str(REPO_R))
+check(
+    "R18 ... and the block is about missing verification (not some other reason)",
+    "검증(테스트/타입체크/린트/실행)을 실행하지 않았습니다"
+    in str((back or {}).get("reason")),
+    True,
+)
+
+# ---- P0-04b review: a repository moved to a NEW path keeps its baseline (worktree move);
+# shell-only changes made before the move must still demand verification there.
+REPO_M = PB / "repoM"
+REPO_M.mkdir()
+for args in (
+    ["init", "-q"],
+    ["config", "user.email", "t@t"],
+    ["config", "user.name", "t"],
+):
+    subprocess.run(["git", *args], cwd=REPO_M, check=True)
+(REPO_M / "m.py").write_text("x = 1\n", encoding="utf-8")
+subprocess.run(["git", "add", "-A"], cwd=REPO_M, check=True)
+subprocess.run(["git", "commit", "-qm", "init"], cwd=REPO_M, check=True)
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="v1", prompt="work", cwd=str(REPO_M))
+sh = {"command": "python gen.py"}
+call(
+    "pre",
+    s,
+    prompt_id="v1",
+    cwd=str(REPO_M),
+    tool_name="Bash",
+    tool_input=sh,
+    tool_use_id="sh1",
+)
+(REPO_M / "m.py").write_text("x = 2\n", encoding="utf-8")  # a shell-only change
+call(
+    "post",
+    s,
+    prompt_id="v1",
+    cwd=str(REPO_M),
+    tool_name="Bash",
+    tool_input=sh,
+    tool_use_id="sh1",
+    tool_response={},
+)
+MOVED = PB / "repoM-new"
+os.rename(REPO_M, MOVED)
+call("stop", s, prompt_id="v1", cwd=str(PB))  # removal notice
+for i in (2, 3):
+    call("prompt", s, prompt_id=f"v{i}", prompt="continue there", cwd=str(MOVED))
+    call(
+        "pre",
+        s,
+        prompt_id=f"v{i}",
+        cwd=str(MOVED),
+        tool_name="Bash",
+        tool_input=sh,
+        tool_use_id=f"sh{i}",
+    )
+    call(
+        "post",
+        s,
+        prompt_id=f"v{i}",
+        cwd=str(MOVED),
+        tool_name="Bash",
+        tool_input=sh,
+        tool_use_id=f"sh{i}",
+        tool_response={},
+    )
+    check(
+        f"moved repository, turn {i}: the old path's unverified shell change still blocks Stop",
+        "사라졌습니다" in reason(call("stop", s, prompt_id=f"v{i}", cwd=str(MOVED))),
+        True,
+    )
+
+# ---- R19: a sibling worktree at the same HEAD must not take the moved one's baseline away;
+# when the original path comes back, its unverified edit is still not taken as verified.
+SIB_A, SIB_B = PB / "sibA", PB / "sibB"
+for w in (SIB_A, SIB_B):
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "--detach", str(w)], cwd=REPO_A, check=True
+    )
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="w1", prompt="work", cwd=str(SIB_A))
+sib_edit = {"file_path": str(SIB_A / "r.py"), "content": "x = 2\n"}  # a code file
+call("pre", s, prompt_id="w1", cwd=str(SIB_A), tool_name="Write", tool_input=sib_edit)
+(SIB_A / "r.py").write_text("x = 2\n", encoding="utf-8")
+call("post", s, prompt_id="w1", cwd=str(SIB_A), tool_name="Write", tool_input=sib_edit)
+check(
+    "R19 control: the unverified code edit blocks before anything moves",
+    decision(call("stop", s, prompt_id="w1", cwd=str(SIB_A))),
+    "block",
+)
+os.rename(SIB_A, PB / "sibA.bak")
+call("stop", s, prompt_id="w1", cwd=str(PB))  # removal notice for sibA
+call("prompt", s, prompt_id="w2", prompt="other worktree", cwd=str(SIB_B))
+call("stop", s, prompt_id="w2", cwd=str(SIB_B))
+os.rename(PB / "sibA.bak", SIB_A)
+sib_stops = []
+for i in (3, 4):
+    call("prompt", s, prompt_id=f"w{i}", prompt="back", cwd=str(SIB_A))
+    sib_stops.append(
+        "검증(테스트/타입체크/린트/실행)을 실행하지 않았습니다"
+        in reason(call("stop", s, prompt_id=f"w{i}", cwd=str(SIB_A)))
+    )
+check(
+    "R19 original worktree back after a sibling took a baseline: blocked as unverified",
+    sib_stops,
+    [True, True],
+)
+
+# ---- review #2: a removed repository that never comes back must not make unrelated new
+# repositories "late" (blocked with a wrong reason)
+REPO_U = PB / "repoU"
+REPO_U.mkdir()
+for args in (
+    ["init", "-q"],
+    ["config", "user.email", "t@t"],
+    ["config", "user.name", "t"],
+):
+    subprocess.run(["git", *args], cwd=REPO_U, check=True)
+(REPO_U / "u.txt").write_text("u\n", encoding="utf-8")
+subprocess.run(["git", "add", "-A"], cwd=REPO_U, check=True)
+subprocess.run(["git", "commit", "-qm", "u"], cwd=REPO_U, check=True)
+WT_GONE = PB / "gone"
+subprocess.run(
+    ["git", "worktree", "add", "-q", "--detach", str(WT_GONE)], cwd=REPO_A, check=True
+)
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="u1", prompt="look", cwd=str(WT_GONE))
+subprocess.run(
+    ["git", "worktree", "remove", "--force", str(WT_GONE)], cwd=REPO_A, check=True
+)
+check(
+    "review #2 control: a repository only used as cwd and removed outside any tool is a normal deletion",
+    reason(call("stop", s, prompt_id="u1", cwd=str(PB))),
+    "",
+)
+call("prompt", s, prompt_id="u2", prompt="unrelated repository", cwd=str(REPO_U))
+check(
+    "review #2: an unrelated, unchanged repository is not blocked as late",
+    decision(call("stop", s, prompt_id="u2", cwd=str(REPO_U))),
+    None,
+)
+
+# ---- D3 (final): no identity guessing. A missing repository keeps its baseline (by path);
+# it is cleared only when proven clean (clean at the last Stop and untouched since), otherwise
+# reported every turn; a repository at a returned path is compared with that path's baseline.
+GONE = "사라졌습니다"
+UNVERIFIED = "검증(테스트/타입체크/린트/실행)을 실행하지 않았습니다"
+POLICY = "## Verification\n- gate: `uv run pytest -q --cov`\n- ci: none\n"
+
+
+def d3_repo(name: str, policy: bool = False) -> Path:
+    r = PB / name
+    r.mkdir()
+    for args in (
+        ["init", "-q"],
+        ["config", "user.email", "t@t"],
+        ["config", "user.name", "t"],
+    ):
+        subprocess.run(["git", *args], cwd=r, check=True)
+    (r / "a.py").write_text("x = 1\n", encoding="utf-8")
+    if policy:
+        (r / "CLAUDE.md").write_text(POLICY, encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=r, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=r, check=True)
+    return r
+
+
+def d3_edit(s: str, p: str, repo: Path) -> None:
+    w = {"file_path": str(repo / "a.py"), "content": "x = 2\n"}
+    call("pre", s, prompt_id=p, cwd=str(repo), tool_name="Write", tool_input=w)
+    (repo / "a.py").write_text("x = 2\n", encoding="utf-8")
+    call("post", s, prompt_id=p, cwd=str(repo), tool_name="Write", tool_input=w)
+
+
+def d3_stop(s: str, p: str, cwd: Path) -> str:
+    return reason(call("stop", s, prompt_id=p, cwd=str(cwd)))
+
+
+# T4: two renames, then back to the original path
+A4 = d3_repo("t4")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="a1", prompt="work", cwd=str(A4))
+d3_edit(s, "a1", A4)
+os.rename(A4, PB / "t4-x")
+r1 = d3_stop(s, "a1", PB)
+call("prompt", s, prompt_id="a2", prompt="go on", cwd=str(PB))
+os.rename(PB / "t4-x", PB / "t4-y")
+r2 = d3_stop(s, "a2", PB)
+os.rename(PB / "t4-y", A4)
+call("prompt", s, prompt_id="a3", prompt="back", cwd=str(A4))
+r3 = d3_stop(s, "a3", A4)
+check(
+    "T4 renamed twice: reported missing each turn, then unverified at the original path",
+    (GONE in r1, GONE in r2, UNVERIFIED in r3),
+    (True, True, True),
+)
+
+# T5: edit, rename away and back within one turn
+A5 = d3_repo("t5")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="b1", prompt="work", cwd=str(A5))
+d3_edit(s, "b1", A5)
+os.rename(A5, PB / "t5-x")
+os.rename(PB / "t5-x", A5)
+check(
+    "T5 same-turn rename and restore: the edit is still unverified",
+    UNVERIFIED in d3_stop(s, "b1", A5),
+    True,
+)
+
+# T7: an unverified repository is deleted and a different repository appears at its path
+A7 = d3_repo("t7")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="c1", prompt="work", cwd=str(A7))
+d3_edit(s, "c1", A7)
+rm_tree(A7)
+r1 = d3_stop(s, "c1", PB)
+A7.mkdir()
+subprocess.run(["git", "init", "-q"], cwd=A7, check=True)
+(A7 / "other.py").write_text("y = 1\n", encoding="utf-8")
+call("prompt", s, prompt_id="c2", prompt="new repo here", cwd=str(A7))
+r2 = d3_stop(s, "c2", A7)
+check(
+    "T7 another repository at the same path inherits nothing verified (blocked as unverified)",
+    (GONE in r1, UNVERIFIED in r2),
+    (True, True),
+)
+check(
+    "T7 ... and no passed evidence exists for it",
+    any(
+        v.get("outcome") == "passed" for v in state_file(s).get("evidence", {}).values()
+    ),
+    False,
+)
+
+# T8: git metadata of a tracked repository is damaged
+A8 = d3_repo("t8")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="e1", prompt="work", cwd=str(A8))
+d3_edit(s, "e1", A8)
+(A8 / ".git" / "HEAD").write_text("garbage\n", encoding="utf-8")
+check(
+    "T8 damaged .git: Stop reports the state as unknown, never verified",
+    "확인할 수 없습니다" in d3_stop(s, "e1", A8),
+    True,
+)
+
+# T9: a verified repository that is deleted is a normal deletion: no block for it
+A9 = d3_repo("t9", policy=True)
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="f1", prompt="work", cwd=str(A9))
+d3_edit(s, "f1", A9)
+call(
+    "post",
+    s,
+    prompt_id="f1",
+    cwd=str(A9),
+    tool_name="Bash",
+    tool_input={"command": "uv run pytest -q --cov"},
+)
+check(
+    "T9 control: edit verified by the declared gate -> Stop passes",
+    d3_stop(s, "f1", A9),
+    "",
+)
+rm_tree(A9)
+call("prompt", s, prompt_id="f2", prompt="next", cwd=str(PB))
+check("T9 the verified repository's deletion does not block", d3_stop(s, "f2", PB), "")
+
+# A-T1 (review #1): a shell command run from ANOTHER cwd edits a tracked repository by absolute
+# path and moves it in the same command. Recorded before the shell runs: every tracked
+# repository may have been changed, so the missing one is not a normal deletion.
+AT1 = d3_repo("at1")
+OTHER_CWD = d3_repo("at1-other")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="h1", prompt="look", cwd=str(AT1))
+check("A-T1 control: tracked and clean at the first Stop", d3_stop(s, "h1", AT1), "")
+call("prompt", s, prompt_id="h2", prompt="elsewhere", cwd=str(OTHER_CWD))
+sh = {
+    "command": f'sed -i s/1/2/ "{AT1.as_posix()}/a.py" && mv "{AT1.as_posix()}" "{AT1.as_posix()}-moved"'
+}
+call(
+    "pre",
+    s,
+    prompt_id="h2",
+    cwd=str(OTHER_CWD),
+    tool_name="Bash",
+    tool_input=sh,
+    tool_use_id="h2b",
+)
+(AT1 / "a.py").write_text("x = 2\n", encoding="utf-8")
+os.rename(AT1, PB / "at1-moved")
+call(
+    "post",
+    s,
+    prompt_id="h2",
+    cwd=str(OTHER_CWD),
+    tool_name="Bash",
+    tool_input=sh,
+    tool_use_id="h2b",
+    tool_response={},
+)
+check(
+    "A-T1 edited by absolute path and moved by one shell command: reported missing",
+    GONE in d3_stop(s, "h2", OTHER_CWD),
+    True,
+)
+call("prompt", s, prompt_id="h3", prompt="next", cwd=str(PB / "at1-moved"))
+check(
+    "A-T1 ... still reported on the next turn (never passes)",
+    GONE in d3_stop(s, "h3", PB / "at1-moved"),
+    True,
+)
+
+# A-T9: a clean worktree removed by a shell command is a KNOWN conservative false positive until
+# P0-07 can tell which paths a command writes: the shell may have changed it, so it is reported.
+AT9 = d3_repo("at9")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="i1", prompt="look", cwd=str(AT9))
+check("A-T9 control: clean at the first Stop", d3_stop(s, "i1", AT9), "")
+call("prompt", s, prompt_id="i2", prompt="remove it", cwd=str(PB))
+rm_cmd = {"command": f'rm -rf "{AT9.as_posix()}"'}
+call(
+    "pre",
+    s,
+    prompt_id="i2",
+    cwd=str(PB),
+    tool_name="Bash",
+    tool_input=rm_cmd,
+    tool_use_id="i2b",
+)
+rm_tree(AT9)
+call(
+    "post",
+    s,
+    prompt_id="i2",
+    cwd=str(PB),
+    tool_name="Bash",
+    tool_input=rm_cmd,
+    tool_use_id="i2b",
+    tool_response={},
+)
+check(
+    "A-T9 known false positive (P0-07): a shell-removed clean repository is reported missing",
+    GONE in d3_stop(s, "i2", PB),
+    True,
+)
+
+# A-T11: a repository proven clean and deleted without any tool leaves no baseline behind,
+# so a new repository created at the same path starts fresh (nothing stale applied to it).
+AT11 = d3_repo("at11")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="j1", prompt="look", cwd=str(AT11))
+check("A-T11 control: clean at the first Stop", d3_stop(s, "j1", AT11), "")
+rm_tree(AT11)
+call("prompt", s, prompt_id="j2", prompt="next", cwd=str(PB))
+check("A-T11 clean deletion: no block", d3_stop(s, "j2", PB), "")
+d3_repo(
+    "at11"
+)  # a different repository at the same path (different content, new commit)
+(AT11 / "b.py").write_text("y = 1\n", encoding="utf-8")
+subprocess.run(["git", "add", "-A"], cwd=AT11, check=True)
+subprocess.run(["git", "commit", "-qm", "other"], cwd=AT11, check=True)
+call("prompt", s, prompt_id="j3", prompt="new repository", cwd=str(AT11))
+check(
+    "A-T11 new repository at a cleanly deleted path starts fresh (no stale baseline)",
+    d3_stop(s, "j3", AT11),
+    "",
+)
+check(
+    "A-T11 ... and the deleted one left nothing in the session state",
+    os.path.normcase(str(AT11))
+    in {os.path.normcase(k) for k in state_file(s).get("repos_removed", {})},
+    False,
+)
+
+# T10 / T11 / T12: unverified repository deleted; reported every turn, also after a resume
+A10 = d3_repo("t10")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="g1", prompt="work", cwd=str(A10))
+d3_edit(s, "g1", A10)
+rm_tree(A10)
+seen = [GONE in d3_stop(s, "g1", PB)]
+for i in (2, 3):
+    call("prompt", s, prompt_id=f"g{i}", prompt="next", cwd=str(PB))
+    seen.append(GONE in d3_stop(s, f"g{i}", PB))
+check("T10/T11 unverified deletion: reported on every turn", seen, [True, True, True])
+call(
+    "prompt", s, prompt_id="g4", prompt="resumed later", cwd=str(PB)
+)  # a resumed session: same id
+check(
+    "T12 after a resume (same session state) it is still reported",
+    GONE in d3_stop(s, "g4", PB),
+    True,
+)
+
+# ---- P0-04b review: git failures and caches must not make a %TEMP% repository look like scratch
+sys.path.insert(0, str(Path(HOOK).parent))
+import discipline as _d
+
+check(
+    "D2 a UNC path under %TEMP% is never scratch (git cannot judge it)",
+    _d.ignored_path(
+        {}, "\\\\localhost\\C$\\Users\\u\\AppData\\Local\\Temp\\nothere\\a.py", "C:\\"
+    ),
+    False,
+)
+_real = _d.os.path.realpath
+
+
+def _no_io(p: str) -> str:  # a stalled share: realpath must not even be reached
+    raise AssertionError(f"realpath called for {p}")
+
+
+_d.os.path.realpath = _no_io
+try:
+    check(
+        "D2 UNC and non-ignorable paths are decided before any link resolution (no share I/O)",
+        (
+            _d.ignored_path(
+                {}, "\\\\deadhost\\share\\AppData\\Local\\Temp\\a.py", "C:\\"
+            ),
+            _d.ignored_path({}, "C:/dev/project/src/a.py", "C:\\"),
+        ),
+        (False, False),
+    )
+finally:
+    _d.os.path.realpath = _real
+check(
+    "D2 a %TEMP% path that cannot be inspected (embedded NUL) is not taken as scratch",
+    _d.ignored_path({}, str(TMP / "plainC" / "a\0b" / "x.py"), "C:\\"),
+    False,
+)
+WT_X = TMP / "wtX"
+subprocess.run(
+    ["git", "worktree", "add", "-q", "--detach", str(WT_X)], cwd=REPO_A, check=True
+)
+with open(WT_X / ".git", "r+", encoding="utf-8") as f:  # git hides it: "w" is refused
+    f.write("gitdir: nowhere\n")  # corrupt worktree metadata
+    f.truncate()
+check(
+    "D2 corrupt .git in a %TEMP% worktree: still protected",
+    classes_run(WT_X, str(WT_X / "src" / "f5.py")),
+    ("deny", "ask"),
+)
+LATE = TMP / "late-init"
+LATE.mkdir()
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="g1", prompt="small change", cwd=str(LATE))
+weak = {
+    "file_path": str(LATE / "tests" / "test_x.py"),
+    "old_string": "    assert f() == 1\n",
+    "new_string": "    pass\n",
+}
+check(
+    "D2 before git init: a plain %TEMP% folder is scratch",
+    decision(
+        call("pre", s, prompt_id="g1", cwd=str(LATE), tool_name="Edit", tool_input=weak)
+    ),
+    None,
+)
+subprocess.run(["git", "init", "-q"], cwd=LATE, check=True)
+check(
+    "D2 after git init in the same session: protected (no stale cache)",
+    decision(
+        call("pre", s, prompt_id="g1", cwd=str(LATE), tool_name="Edit", tool_input=weak)
+    ),
+    "ask",
+)
+shutil.rmtree(WT_X, ignore_errors=True)
+subprocess.run(["git", "worktree", "prune"], cwd=REPO_A, check=False)
+subprocess.run(
+    ["cmd", "/c", "rmdir", str(LINK)], capture_output=True, check=False
+)  # junction only
+subprocess.run(
+    ["git", "worktree", "remove", "--force", str(WT_B)], cwd=REPO_A, check=False
+)
+rm_tree(PB)
 
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

@@ -72,11 +72,72 @@ CODE_EXT = {
     ".cpp",
     ".h",
 }
-# Files that never count toward the per-turn limit or the verification requirement.
+# Files that never count toward the per-turn limit or the verification requirement: Claude's
+# own transcripts/plans/todos/memory, and scratch files under %TEMP% (see ignored_path: a git
+# working tree under %TEMP%, such as a scratch worktree, is code like any other repository).
 IGNORED_PATH = re.compile(
     r"([\\/]AppData[\\/]Local[\\/]Temp[\\/])|([\\/]\.claude[\\/](projects|plans|todos)[\\/])|([\\/]memory[\\/][^\\/]+\.md$)",
     re.IGNORECASE,
 )
+CLAUDE_OWN_PATH = re.compile(
+    r"([\\/]\.claude[\\/](projects|plans|todos)[\\/])|([\\/]memory[\\/][^\\/]+\.md$)",
+    re.IGNORECASE,
+)
+
+
+def absolute(path: str, cwd: str) -> str:
+    """A tool path as the tool resolves it (relative to the session's cwd)."""
+    return os.path.abspath(path if os.path.isabs(path) else os.path.join(cwd, path))
+
+
+def is_unc(path: str) -> bool:
+    return os.path.splitdrive(path)[0].startswith(("\\\\", "//"))
+
+
+def may_be_repository(path: str) -> bool:
+    """True unless it is certain that no git working tree contains `path`: any `.git` entry
+    (directory, worktree file, even corrupt) in it or an ancestor, a UNC path (git refuses or
+    misjudges those), or a folder that cannot be inspected. Never asks git, so a git error is
+    never read as "not a repository", and nothing is cached (a later `git init` counts)."""
+    if is_unc(path):
+        return True
+    d = path
+    while True:
+        try:
+            os.lstat(os.path.join(d, ".git"))
+            return True  # any entry named .git: possibly a repository
+        except (FileNotFoundError, NotADirectoryError):
+            pass  # certainly no .git here
+        except (
+            OSError,
+            ValueError,
+        ):  # cannot be inspected (access, NUL, ...): not certain
+            return True
+        parent = os.path.dirname(d)
+        if parent == d:
+            return False
+        d = parent
+
+
+def ignored_path(state: dict[str, Any], path: str, cwd: str) -> bool:
+    """Out of scope only when both the path as given and its real (link-resolved) path are
+    ignorable, and a %TEMP% path is certainly not inside a git working tree (a scratch
+    worktree is code like any repository)."""
+    given = absolute(path, cwd)
+    if is_unc(given) or not (
+        CLAUDE_OWN_PATH.search(given) or IGNORED_PATH.search(given)
+    ):
+        return False  # decided without any I/O (a stalled share must not time the hook out)
+    for p in (given, os.path.realpath(given)):
+        if CLAUDE_OWN_PATH.search(p):
+            continue
+        if not IGNORED_PATH.search(p):
+            return False  # a link must not move a protected file out of scope
+        if may_be_repository(p):
+            return False
+    return True
+
+
 TEST_PATH = re.compile(
     r"(^|[\\/])(tests?|__tests__|spec)([\\/])|(_test|\.test|\.spec|Tests?)\.[a-z0-9]+$|(^|[\\/])test_[^\\/]+$",
     re.IGNORECASE,
@@ -242,6 +303,14 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
                 shell_tops.append(
                     top
                 )  # Bash edits there are visible only via content maps
+            if top and top not in state.setdefault("touched_tops", []):
+                state["touched_tops"].append(top)  # may change it before the next Stop
+        # Recorded before the command runs: a shell can write any path (absolute paths, git -C,
+        # scripts), so every tracked repository may change — never a "normal deletion" later.
+        # Conservative until P0-07 can tell which paths a command writes.
+        for top in state.get("repos", {}):
+            if top not in state.setdefault("touched_tops", []):
+                state["touched_tops"].append(top)
         # A check is evidence only for the content it ran on: remember the content before it
         # runs, so `gate && sed ...` (content changed during the command) is not bound to the
         # post-edit content.
@@ -251,8 +320,10 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
             pre[str(data["tool_use_id"])] = repo_snapshots(state, tops)
             for stale in list(pre)[:-MAX_PRE_CHECKS]:
                 pre.pop(stale, None)
-    elif ti.get("file_path") and not IGNORED_PATH.search(str(ti.get("file_path"))):
-        track_repo(state, str(ti.get("file_path")))
+    elif ti.get("file_path") and not ignored_path(state, str(ti["file_path"]), cwd):
+        top = track_repo(state, absolute(str(ti["file_path"]), cwd))
+        if top and top not in state.setdefault("touched_tops", []):
+            state["touched_tops"].append(top)  # may change it before the next Stop
 
     if tool in ("Bash", "PowerShell"):
         tests = deleted_test_files(ti.get("command", ""))
@@ -264,8 +335,9 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
         return
 
     path = ti.get("file_path", "")
-    if not path or IGNORED_PATH.search(path):
+    if not path or ignored_path(state, path, cwd):
         return
+    path = absolute(path, cwd)
 
     # 0) v2: the approval (and the store itself) is verified now, before this write.
     if v2_active():
@@ -315,9 +387,14 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
     now = time.time()
     if tool in ("Edit", "Write", "MultiEdit"):
         path = ti.get("file_path", "")
-        if path and not IGNORED_PATH.search(path):
+        cwd = str(data.get("cwd") or os.getcwd())
+        if path and not ignored_path(state, path, cwd):
+            path = absolute(path, cwd)
             if path not in state["turn_files"]:
                 state["turn_files"].append(path)
+            top = track_repo(state, path)
+            if top and top not in state.setdefault("touched_tops", []):
+                state["touched_tops"].append(top)  # also when no PreToolUse was seen
             if Path(path).suffix.lower() in CODE_EXT:
                 state["last_code_edit"] = now
                 mark_dirty(state, path, now, changed_lines(tool, ti))
@@ -1222,18 +1299,39 @@ def on_fail(data: dict[str, Any], state: dict[str, Any]) -> None:
         record_evidence(data, state, failed=True)
 
 
+def relay_shaped(prompt: str) -> bool:
+    """A prompt that looks like a relayed agent message or task notification. UserPromptSubmit
+    also runs for those (documented) and no hook field tells them from typed text, so this may
+    only make the hook stricter: such a prompt keeps the turn's counted files and baselines,
+    and never keeps or grants an approval."""
+    first = next((ln for ln in prompt.splitlines() if ln.strip()), "").strip().lower()
+    return first.startswith(RELAY_HEADERS) or first.startswith("<task-notification>")
+
+
+RELAY_NOTE = (
+    f"{NOTE} 중계 메시지(subagent 결과·알림)로는 승인이 유지되지 않습니다 — "
+    "작업을 이어가려면 사용자가 프롬프트 첫 줄에 task:<id>를 적어 재개해야 합니다"
+)
+
+
 def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
     state["turn"] = int(state.get("turn", 0)) + 1
-    state["turn_files"] = []
-    state["turn_shell_tops"] = []
-    # A new prompt never inherits the previous approval; only a prompt that names the same
-    # in-progress plan's task (or plan file) re-arms it.
     prompt = data.get("prompt")
     prompt = prompt if isinstance(prompt, str) else ""
     cwd = str(data.get("cwd") or os.getcwd())
+    relay = relay_shaped(prompt)
+    if not relay:  # a relay continues the user's turn: its counts and baselines stay
+        state["turn_files"] = []
+        state["turn_shell_tops"] = []
+    # A new prompt never inherits the previous approval; only a prompt that names the same
+    # in-progress plan's task (or plan file) re-arms it.
     state["approval_invalid"] = None
     state["v2_block"] = None
-    if v2_active():
+    if relay:
+        had = bool(state.get("approval"))
+        state["approval"] = None
+        state["approval_warning"] = RELAY_NOTE if had else None
+    elif v2_active():
         try:
             state["approval"], state["approval_warning"] = v2_rearm(cwd, prompt, state)
         except Exception as e:  # hook boundary: nothing re-armed rather than a crash
@@ -1247,7 +1345,8 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
         # stale approval does not carry over to it.
         state["approval"]["prompt_id"] = data.get("prompt_id")
     track_repo(state, str(data.get("cwd") or os.getcwd()))
-    refresh_turn_baselines(state)
+    if not relay:
+        refresh_turn_baselines(state)
 
 
 # ---------------------------------------------------------------- D-5 content tracking
@@ -1270,6 +1369,15 @@ def _watch_globs(top: str) -> list[str]:
     if prefix is None:
         return []
     return [f"{prefix}/{g}" if prefix else g for g in policy.get("watch", [])]
+
+
+def restore_repo(state: dict[str, Any], top: str) -> None:
+    """A path whose repository had gone missing has a repository again: it is compared with that
+    path's original baselines (no identity guessing), so nothing unverified is forgotten and
+    nothing there is taken as already verified."""
+    state.setdefault("repos", {})[top] = state["repos_removed"].pop(top)
+    if top in state.get("content_removed", []):
+        state["content_removed"].remove(top)
 
 
 def track_repo(state: dict[str, Any], path: str) -> str | None:
@@ -1296,6 +1404,10 @@ def track_repo(state: dict[str, Any], path: str) -> str | None:
             dir_tops[probe] = top
     if not top:
         return None
+    if top not in repos and top in state.get("repos_removed", {}):
+        restore_repo(
+            state, top
+        )  # a repository that was missing: never a fresh baseline
     if top not in repos or repos[top].get("session") is None:
         # New repository, or its first snapshot failed (timeout/budget): (re)take the baseline.
         # A baseline taken after a failed attempt may already contain unverified edits, so it
@@ -1426,6 +1538,25 @@ def refresh_content(state: dict[str, Any]) -> None:
     late: list[str] = []
     turn_changes: set[str] = set()
     visible: set[str] = set()
+    kept = state.setdefault("repos_removed", {})
+    for top in [t for t in kept if os.path.isdir(t)]:
+        restore_repo(state, top)  # it came back: compare with the original baseline
+    touched = set(state.get("touched_tops", []))
+    status = state.setdefault("repo_state", {})
+    for top in [t for t in state.get("repos", {}) if not os.path.isdir(t)]:
+        # A missing repository (deleted, moved, renamed) cannot be compared now. Its baseline
+        # is kept by path (a repository appearing there again is compared with it, never taken
+        # as verified). Without guessing where it went: proven clean (clean at the last Stop
+        # and untouched since) is a normal deletion; anything else is reported every turn.
+        base = state["repos"].pop(top)
+        if status.get(top, "clean") == "clean" and top not in touched:
+            status.pop(
+                top, None
+            )  # proven clean: nothing kept for a new repository there
+            continue
+        kept[top] = base
+        if top not in state.setdefault("content_removed", []):
+            state["content_removed"].append(top)
     for top, base in state.get("repos", {}).items():
         now = worktree.content_map(top, _watch_globs(top))
         if now is None or base.get("session") is None:
@@ -1493,6 +1624,22 @@ def refresh_content(state: dict[str, Any]) -> None:
     state["content_unknown"] = unknown
     state["content_too_large"] = too_large
     state["content_late"] = late
+    # What each present repository is at this Stop (used if it goes missing later): clean =
+    # no change since the session baseline, or every change covered by passed evidence.
+    for top in state.get("repos", {}):
+        if top in unknown or top in too_large or top in late:
+            status[top] = "unverified"
+            continue
+        verified = True
+        for root, entry in content.items():
+            if top in entry.get("digests", {}):
+                ev = state.get("evidence", {}).get(root) or {}
+                verified &= ev.get("outcome") == "passed" and all(
+                    ev.get("digests", {}).get(t) == d
+                    for t, d in entry["digests"].items()
+                )
+        status[top] = "clean" if verified else "unverified"
+    state["touched_tops"] = []
     state["turn_changes"] = sorted(turn_changes)
     # Edit-tracked roots whose files are all visible to git: content decides, not timestamps.
     state["content_tracked_roots"] = [
@@ -1547,6 +1694,12 @@ REASON_APPROVAL_INVALID = (
 REASON_APPROVAL_AMBIGUOUS = (
     "[discipline] 프롬프트가 승인된 진행 중 계획 여러 개를 가리켜 어느 것도 재무장하지 않았습니다({why}). "
     "승인 기록은 유효합니다. 프롬프트 첫 줄에 task:<id> 하나만 적어 다시 요청해 달라고 사용자에게 알리세요."
+)
+REASON_RELAY_DROPPED = "[discipline] {why}. 지금은 승인된 작업이 없습니다. 이 사실과 재개 방법을 사용자에게 알리세요."
+REASON_REMOVED = (
+    "[discipline] 추적하던 저장소 {top}가 사라졌습니다(삭제·이동·이름 변경). 그 안에 검증되지 않은 "
+    "변경이 있었거나 확인할 수 없어 '미확인'입니다. 그 경로로 되돌려 게이트를 통과시키기 전까지 매 턴 "
+    "보고됩니다(다른 경로의 저장소로 이어 받지 않습니다). 보고에 '미확인'으로 적으세요."
 )
 REASON_APPROVAL_NOTE = (
     "[discipline] {why}. 지정한 승인 작업은 계속할 수 있습니다. "
@@ -1606,6 +1759,8 @@ def _stop_decision(state: dict[str, Any]) -> tuple[str, str | None] | None:
             template = (
                 REASON_APPROVAL_AMBIGUOUS
                 if str(warning).startswith(AMBIGUOUS)
+                else REASON_RELAY_DROPPED
+                if warning == RELAY_NOTE  # nothing approved continues after a relay
                 else REASON_APPROVAL_NOTE
                 if str(warning).startswith(NOTE)
                 else REASON_APPROVAL_INVALID
@@ -1622,6 +1777,11 @@ def _stop_decision(state: dict[str, Any]) -> tuple[str, str | None] | None:
             key += f"|{state.get('turn')}"
         if _not_yet_notified(state, key):
             return REASON_CONTENT_UNKNOWN.format(top=top) + REASON_TOO_LARGE_NOTE, key
+    for top in state.get("content_removed", []):
+        # Every turn while it is missing and not proven clean: its changes were never verified.
+        key = f"content-removed|{top}|{state.get('turn')}"
+        if _not_yet_notified(state, key):
+            return REASON_REMOVED.format(top=top), key
     for top in state.get("content_late", []):
         key = f"content-late|{top}"
         if _not_yet_notified(state, key):
