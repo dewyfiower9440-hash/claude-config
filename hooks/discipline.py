@@ -348,7 +348,7 @@ def state_shape_problem(saved: dict[str, Any]) -> str | None:
             ok = isinstance(value, type(default))
         if not ok:
             return key
-    for key in ("seen_events", "touched_tops"):
+    for key in ("seen_events", "touched_tops", "background_tops"):
         value = saved.get(key, [])
         if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
             return key
@@ -474,7 +474,9 @@ def note_shell_touch(
     command = str(ti.get("command", ""))
     shell_tops = state.setdefault("turn_shell_tops", [])
     touched = state.setdefault("touched_tops", [])
-    known = set(state.get("repos", {}))
+    # A repository that comes back here is compared with its original baseline (taken before
+    # the command), so it counts as known too.
+    known = set(state.get("repos", {})) | set(state.get("repos_removed", {}))
     for d in shell_targets(command, data.get("tool_name") == "PowerShell", cwd):
         top = track_repo(state, d)
         if top and top not in shell_tops:
@@ -1630,6 +1632,10 @@ def restore_repo(state: dict[str, Any], top: str) -> None:
     if top in state.get("content_removed", []):
         state["content_removed"].remove(top)
     forget_dir_tops(state, top)
+    late_writers = state.get("background_tops")
+    if isinstance(late_writers, list) and late_writers and top not in late_writers:
+        # A background shell started while it was away may write here too.
+        late_writers.append(top)
 
 
 def track_repo(state: dict[str, Any], path: str) -> str | None:
@@ -1661,11 +1667,13 @@ def track_repo(state: dict[str, Any], path: str) -> str | None:
     if not top:
         return None
     if top not in repos and top in state.get("repos_removed", {}):
-        # `top` was answered by git just now: the cache entries of a missing repository are
-        # dropped when it goes missing (forget_dir_tops), so none can lead here.
-        restore_repo(
-            state, top
-        )  # a repository that was missing: never a fresh baseline
+        # A repository that was missing: never a fresh baseline. An answer git gave just now is
+        # a toplevel; a cached one (a state saved before missing repositories' cache entries
+        # were dropped) is asked again, and a path that is no toplevel stays missing.
+        if cached and not is_repo_root(top):
+            dir_tops.pop(probe, None)
+            return None
+        restore_repo(state, top)
     if top not in repos or repos[top].get("session") is None:
         # New repository, or its first snapshot failed (timeout/budget): (re)take the baseline.
         # A baseline taken after a failed attempt may already contain unverified edits, so it
@@ -2607,19 +2615,21 @@ def ack_missing(data: dict[str, Any], state: dict[str, Any]) -> str | None:
         marker["roots"] = [r for r in roots or [] if not same_place(r, target)]
     # Edits recorded for files that went with it can never be verified: they are part of what
     # the user acknowledged. Files that still exist keep demanding verification.
-    # Only entries that listed such a file change; an entry whose list was cut at the limit may
-    # hold edits it does not list, so it is never dropped.
+    # Only entries that listed such a file change. An entry whose list was cut at the limit may
+    # hold edits it does not list: it is left whole (shrinking it would hide that it was cut,
+    # and a later release could then drop it), so only its gate clears it.
     for root in list(state.get("dirty", {})):
         entry = state["dirty"][root]
         files = entry.get("files") if isinstance(entry, dict) else None
         if not isinstance(files, list) or not any(f in gone_files for f in files):
             continue
-        capped = len(files) >= MAX_DIRTY_FILES
+        if len(files) >= MAX_DIRTY_FILES:
+            continue
         entry["files"] = [f for f in files if f not in gone_files]
         if isinstance(entry.get("lines"), dict):
             for f in gone_files:
                 entry["lines"].pop(f, None)
-        if not entry["files"] and not capped:
+        if not entry["files"]:
             state["dirty"].pop(root)
     acked = state.setdefault("acked_missing", [])
     acked.append(
@@ -2687,6 +2697,20 @@ def recovery_roots(saved: object, cwd: str) -> tuple[set[str], list[str]]:
     return roots | set(scope), problems + scope_problems
 
 
+def finite_time(value: object) -> float | None:
+    """A JSON number usable as a time, or None (also for NaN, infinities and integers too
+    large for a float)."""
+    import math
+
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
 def recovery_carry(saved: object) -> dict[str, Any]:
     """The flat session-only safety records, each taken only when fully well-formed:
     revocations the store could not record yet and the approval-store rollback witness."""
@@ -2709,16 +2733,25 @@ def recovery_carry(saved: object) -> dict[str, Any]:
     # late baseline. Rebuilt from well-formed rows only (path and time, nothing else).
     acked = saved.get("acked_missing")
     rows = [
-        {"path": row["path"], "at": float(row["at"])}
+        {"path": row["path"], "at": at}
         for row in (acked if isinstance(acked, list) else [])
         if isinstance(row, dict)
         and isinstance(row.get("path"), str)
         and row["path"]
-        and isinstance(row.get("at"), int | float)
-        and not isinstance(row.get("at"), bool)
+        and (at := finite_time(row.get("at"))) is not None
     ]
     if rows:
         carry["acked_missing"] = rows[-MAX_ACKED:]
+    # Repositories a background shell may still write to: no hook says when it ends, so the
+    # record outlives a recovery (path strings only).
+    late_writers = saved.get("background_tops")
+    places = [
+        t
+        for t in (late_writers if isinstance(late_writers, list) else [])
+        if isinstance(t, str) and t
+    ]
+    if places:
+        carry["background_tops"] = places
     return carry
 
 

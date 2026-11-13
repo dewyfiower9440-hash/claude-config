@@ -1911,6 +1911,153 @@ check(
     (True, [str(BT24_ACK)]),
 )
 
+# ---- P0-04b revision, second review (2026-11-13)
+# L1: a capped edit list may hold edits it does not show; two releases must not empty it away.
+BT25A = PB / "bt25-gone-a"  # never existed
+BT25B = PB / "bt25-gone-b"
+bt25_root = str(PB / "bt25-capped-project")
+s = uuid.uuid4().hex
+craft_state(
+    s,
+    content_removed=[str(BT25A), str(BT25B)],
+    repos_removed={str(BT25A): {}, str(BT25B): {}},
+    dirty={
+        bt25_root: {
+            "at": 6.0,
+            "gate": None,
+            "files": [str(BT25A / f"f{i}.py") for i in range(100)]
+            + [str(BT25B / f"f{i}.py") for i in range(100)],
+        }
+    },
+)
+ack(s, "c1", f"ack-missing {BT25A}")
+ack(s, "c2", f"ack-missing {BT25B}")
+check(
+    "B-T25 two ack-missing over a capped edit list: both released, the capped record stays",
+    (
+        reported_missing(s, BT25A),
+        reported_missing(s, BT25B),
+        state_file(s).get("dirty", {}).get(bt25_root, {}).get("at"),
+    ),
+    (False, False, 6.0),
+)
+
+# L4: a repository that comes back while a background shell runs is never "untouched" either.
+BT26X = d3_repo("bt26x")
+BT26Y = d3_repo("bt26y")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="e1", prompt="build", cwd=str(BT26Y))
+call(
+    "post",
+    s,
+    prompt_id="e1",
+    cwd=str(BT26Y),
+    tool_name="Bash",
+    tool_input={"command": "python build.py"},
+    tool_response={},
+)
+os.rename(BT26Y, PB / "bt26y-away")
+bt26_gone = GONE in d3_stop(s, "e1", PB)
+call("prompt", s, prompt_id="e2", prompt="start a watcher", cwd=str(BT26X))
+call(
+    "post",
+    s,
+    prompt_id="e2",
+    cwd=str(BT26X),
+    tool_name="Bash",
+    tool_input={"command": "python watch.py", "run_in_background": True},
+    tool_response={"backgroundTaskId": "bg3"},
+)
+os.rename(PB / "bt26y-away", BT26Y)
+bt26_back = d3_stop(s, "e2", BT26X)
+call("prompt", s, prompt_id="e3", prompt="next", cwd=str(PB))
+rm_tree(BT26Y)
+check(
+    "B-T26 a repository restored after a background shell started, then missing: reported",
+    (bt26_gone, bt26_back, GONE in d3_stop(s, "e3", PB)),
+    (True, "", True),
+)
+
+# L3: a repository that comes back in a shell post is compared with its ORIGINAL baseline,
+# which was taken before the command: not late.
+BT27 = d3_repo("bt27")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="h1", prompt="work", cwd=str(BT27))
+d3_edit(s, "h1", BT27)
+os.rename(BT27, PB / "bt27-away")
+bt27_gone = GONE in d3_stop(s, "h1", PB)
+os.rename(PB / "bt27-away", BT27)
+call("prompt", s, prompt_id="h2", prompt="next", cwd=str(PB))
+call(
+    "post",
+    s,
+    prompt_id="h2",
+    cwd=str(BT27),
+    tool_name="Bash",
+    tool_input={"command": "python build.py"},
+    tool_use_id="bt27-only",
+    tool_response={},
+)
+check(
+    "B-T27 a missing repository restored by a shell post keeps its baseline: not marked late",
+    (
+        bt27_gone,
+        tracked(s, "repos", BT27),
+        bool(repo_base(s, BT27).get("late")),
+        UNVERIFIED in d3_stop(s, "h2", BT27),
+    ),
+    (True, True, False, True),
+)
+
+# L2/L4: recover-state survives unusable ack times and keeps the background record itself.
+BT28_BG = PB / "bt28-background"
+BT28_ACK = PB / "bt28-acked"
+s = uuid.uuid4().hex
+craft_state(
+    s,
+    background_tops=[str(BT28_BG), 7],
+    acked_missing=[
+        {"path": str(PB / "bt28-huge"), "at": 10**400},
+        {"path": str(PB / "bt28-nan"), "at": float("nan")},
+        {"path": str(BT28_ACK), "at": 2.0},
+    ],
+)
+call("prompt", s, prompt_id="j1", prompt="recover-state", cwd=str(PB))
+check(
+    "B-T28 recover-state: unusable ack times dropped (no failure), background record carried",
+    (
+        state_file(s).get("recovered") is not None,
+        [row.get("path") for row in state_file(s).get("acked_missing", [])],
+        state_file(s).get("background_tops"),
+    ),
+    (True, [str(BT28_ACK)], [str(BT28_BG)]),
+)
+
+# L6: a state written before the directory cache was cleaned can still point at a missing
+# repository's path: restored only if git says a toplevel is there now.
+BT29 = PB / "bt29"
+(BT29 / ".git").mkdir(
+    parents=True
+)  # passes the cheap presence test, is not a repository
+s = uuid.uuid4().hex
+craft_state(
+    s,
+    dir_tops={str(BT29): str(BT29)},
+    content_removed=[str(BT29)],
+    repos_removed={str(BT29): {}},
+)
+bt29_w = {"file_path": str(BT29 / "a.py"), "content": "x = 2\n"}
+call("pre", s, prompt_id="m1", cwd=str(BT29), tool_name="Write", tool_input=bt29_w)
+check(
+    "B-T29 a cached top that is no git toplevel: not restored, still reported missing",
+    (
+        tracked(s, "repos", BT29),
+        tracked(s, "repos_removed", BT29),
+        reported_missing(s, BT29),
+    ),
+    (False, True, True),
+)
+
 # ---- P0-04b review: git failures and caches must not make a %TEMP% repository look like scratch
 sys.path.insert(0, str(Path(HOOK).parent))
 import discipline as _d

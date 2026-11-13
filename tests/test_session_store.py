@@ -560,6 +560,7 @@ shapes = {
     "seen_events": json.dumps({"seen_events": "x"}),
     "state_reset.at": json.dumps({"state_reset": {"at": "abc", "why": "w"}}),
     "evidence": json.dumps({"evidence": []}),
+    "background_tops": json.dumps({"background_tops": "C:/x"}),
 }
 result = {}
 for label, text in shapes.items():
