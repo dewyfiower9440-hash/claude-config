@@ -599,7 +599,163 @@ check(
 bash(s, GATE, "g17")
 check("S-T17 ... gate passed after the fix: cleared", blocked_for_reset(s), False)
 
-for p in (ROOT, PROJ, PROJ3, NOGATE):
+BAD = Path("C:/dev/_sstore_badutf")  # its CLAUDE.md is not UTF-8
+shutil.rmtree(BAD, ignore_errors=True)
+(BAD / "src").mkdir(parents=True)
+(BAD / "CLAUDE.md").write_bytes(b"## Verification\n- gate: `\xff\xfe broken`\n")
+
+WRAP = r"""
+import io, os, sys
+mode, hook = sys.argv[2], sys.argv[1]
+sys.argv = [hook, mode]
+sys.path.insert(0, os.path.dirname(hook))
+sys.stdin = io.TextIOWrapper(io.BytesIO(os.environ["PAYLOAD"].encode()), encoding="utf-8")
+def boom(*a, **k):
+    raise RuntimeError("injected " + os.environ["BREAK"])
+import verification, worktree
+if os.environ["BREAK"] == "find_policy":
+    verification.find_policy = boom
+else:
+    worktree.toplevel = boom
+import runpy
+runpy.run_path(hook, run_name="__main__")
+"""
+
+
+def broken_hook(
+    mode: str, s: str, what: str, **payload: object
+) -> tuple[int, dict | None]:
+    """Run one hook with `what` (find_policy | toplevel) raising inside the hook process."""
+    r = subprocess.run(
+        [sys.executable, "-I", "-c", WRAP, str(HOOK), mode],
+        env=dict(
+            ENV,
+            BREAK=what,
+            PAYLOAD=json.dumps({"session_id": s, "cwd": str(PROJ), **payload}),
+        ),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    return r.returncode, (json.loads(r.stdout) if r.stdout.strip() else None)
+
+
+def write_payload(name: str, sub: str) -> dict[str, object]:
+    return {
+        "prompt_id": "p",
+        "tool_name": "Write",
+        "tool_input": {"file_path": str(PROJ / "src" / sub / name), "content": "x\n"},
+    }
+
+
+# ---- S-T18 a non-UTF-8 CLAUDE.md where the reset scope is computed: nothing is lost
+s = uuid.uuid4().hex
+hook("prompt", s, prompt_id="p", prompt="work")
+edit_post(s, "keep18.py")
+session_store.note_missed(STATE / f"{s}.json", "post: t18-note")
+hook("prompt", s, prompt_id="p", prompt="next", cwd=str(BAD))  # hook() asserts exit 0
+st = state(s)
+reset = st.get("state_reset") or {}
+check(
+    "S-T18 bad UTF-8 CLAUDE.md: exit 0, note kept in the marker, the place is in scope",
+    (
+        "t18-note" in str(reset.get("why")),
+        os.path.normcase(str(BAD))
+        in [os.path.normcase(r) for r in reset.get("roots") or []],
+        # a prompt starts a new turn (turn_files empties); the unverified edit stays dirty
+        find_policy(str(PROJ / "_"))["root"] in st.get("dirty", {}),
+    ),
+    (True, True, True),
+)
+check("S-T18 ... Stop blocks", blocked_for_reset(s), True)
+
+# ---- S-T19 an exception while the reset scope is computed: state and marker survive
+s = uuid.uuid4().hex
+hook("prompt", s, prompt_id="p", prompt="work")
+edit_post(s, "keep19.py")
+session_store.note_missed(STATE / f"{s}.json", "post: t19-note")
+rc, _out = broken_hook("post", s, "find_policy", **write_payload("x.py", "n19"))
+st = state(s)
+check(
+    "S-T19 find_policy raises during the reset: exit 0, earlier state kept",
+    (rc, "keep19.py" in {Path(f).name for f in st.get("turn_files", [])}),
+    (0, True),
+)
+check("S-T19 ... the next Stop blocks for the reset", blocked_for_reset(s), True)
+
+# ---- S-T20 a handler exception: post keeps the state and leaves a note, pre denies,
+# Stop blocks
+s = uuid.uuid4().hex
+hook("prompt", s, prompt_id="p", prompt="work")
+edit_post(s, "keep20.py")
+rc_post, _out = broken_hook("post", s, "toplevel", **write_payload("x.py", "n20a"))
+kept = "keep20.py" in {Path(f).name for f in state(s).get("turn_files", [])}
+rc_pre, out_pre = broken_hook("pre", s, "toplevel", **write_payload("x.py", "n20b"))
+rc_stop, out_stop = broken_hook("stop", s, "toplevel", prompt_id="p")
+check(
+    "S-T20 handler raises: exit 0 everywhere, state kept, pre deny, Stop block",
+    (rc_post, kept, rc_pre, decision(out_pre), rc_stop, decision(out_stop)),
+    (0, True, 0, "deny", 0, "block"),
+)
+check(
+    "S-T20 ... the reason names the failure",
+    "RuntimeError" in reason(out_pre),
+    True,
+)
+hook("prompt", s, prompt_id="p", prompt="next")
+check(
+    "S-T20 ... the failed post becomes a marker on the next run",
+    "post" in str(state(s).get("state_reset", {}).get("why")),
+    True,
+)
+
+# ---- S-T21 a reset marker does not hide another Stop reason
+s = uuid.uuid4().hex
+hook("prompt", s, prompt_id="p", prompt="work")
+(STATE / f"{s}.json").write_text(
+    json.dumps(
+        {
+            "turn": 1,
+            "approval_warning": "t21-approval-warning",
+            "state_reset": {"at": 1.0, "why": "t21-reset", "roots": ["C:\\nowhere"]},
+        }
+    ),
+    encoding="utf-8",
+)
+out = hook("stop", s, prompt_id="p")
+check(
+    "S-T21 marker + approval warning: one Stop shows both",
+    (decision(out), "t21-reset" in reason(out), "t21-approval-warning" in reason(out)),
+    ("block", True, True),
+)
+
+# ---- S-T22 a new reset after the previous scope already passed: only the new scope
+s = uuid.uuid4().hex
+hook("prompt", s, prompt_id="p", prompt="work", cwd=str(NOGATE))
+old_root = find_policy(str(PROJ / "_"))["root"]
+(STATE / f"{s}.json").write_text(
+    json.dumps(
+        {
+            "turn": 1,
+            "state_reset": {"at": 1.0, "why": "t22-old", "roots": [old_root]},
+            "evidence": {
+                old_root: {"kind": "gate", "outcome": "passed", "at": 2.0, "cmd": GATE}
+            },
+        }
+    ),
+    encoding="utf-8",
+)
+session_store.note_missed(STATE / f"{s}.json", "post: t22-new")
+hook("prompt", s, prompt_id="p", prompt="next", cwd=str(NOGATE))
+reset = state(s).get("state_reset") or {}
+check(
+    "S-T22 previous scope passed: new marker has only the new scope, newest reason first",
+    (reset.get("roots"), str(reset.get("why")).startswith("post: t22-new")),
+    ([], True),
+)
+
+for p in (ROOT, PROJ, PROJ3, NOGATE, BAD):
     shutil.rmtree(p, ignore_errors=True)
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)
