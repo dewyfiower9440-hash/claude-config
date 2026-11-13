@@ -766,9 +766,13 @@ shutil.rmtree(ROOT, ignore_errors=True)
 
 # ---- notify: no toast when discipline will block, toast on the final stop
 sys.path.insert(0, str(Path(HOOK).parent))
-import notify
+# importlib, not import statements: ruff classifies `discipline` as first-party only where a
+# `discipline/` folder exists (the approval home in ~/.claude), so the sorted order differed
+# between ~/.claude and a clean checkout (CI).
+import importlib
 
-import discipline
+notify = importlib.import_module("notify")
+discipline = importlib.import_module("discipline")
 
 blocking = {
     "dirty": {"": {"at": 2.0, "gate": None, "ci": "undeclared"}},

@@ -26,6 +26,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+_T0 = time.monotonic()  # earliest point of this hook run: every budget counts from here
+
 # stderr only (a successful hook's stderr is not shown as a result); never secrets.
 log = logging.getLogger("discipline")
 
@@ -216,7 +218,106 @@ def load_state(session: str) -> dict[str, Any]:
 
 
 def save_state(session: str, state: dict[str, Any]) -> None:
-    (STATE_DIR / f"{session}.json").write_text(json.dumps(state), encoding="utf-8")
+    import session_store
+
+    session_store.save(STATE_DIR / f"{session}.json", state)
+
+
+def _number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def state_reset_active(state: dict[str, Any]) -> str | None:
+    """Why the session's tracking state is untrusted (damaged or missed events), until the
+    declared gate of every root in the marker's scope passed after that moment; None once
+    cleared or if never reset. An empty scope (nothing gated to wait for) stays active
+    until on_stop has reported it once. Never raises on malformed values."""
+    reset = state.get("state_reset")
+    if reset is None:
+        return None
+    if not isinstance(reset, dict):
+        return "세션 추적 상태 표식 손상"
+    since = _number(reset.get("at"))
+    if since is None:
+        return "세션 추적 상태 표식 손상(시각)"
+    roots = reset.get("roots")
+    evidence = state.get("evidence")
+    if not isinstance(evidence, dict):
+        evidence = {}
+
+    def gate_passed_since(root: object) -> bool:
+        ev = evidence.get(root) if isinstance(root, str) else None
+        if not isinstance(ev, dict):
+            return False
+        at = _number(ev.get("at"))
+        return (
+            ev.get("kind") == "gate"
+            and ev.get("outcome") == "passed"
+            and at is not None
+            and at > since
+        )
+
+    if isinstance(roots, list) and roots and all(map(gate_passed_since, roots)):
+        state.pop("state_reset", None)
+        return None
+    return str(reset.get("why") or "원인 미상")
+
+
+def reset_scope(saved: dict[str, Any] | None, cwd: str) -> list[str]:
+    """Roots with a declared gate whose content a reset makes unverified: those the readable
+    previous state knew (dirty, touched repositories) and the policy root of this event."""
+    from verification import find_policy
+
+    roots: set[str] = set()
+    if saved:
+        dirty = saved.get("dirty")
+        for root, entry in (dirty if isinstance(dirty, dict) else {}).items():
+            if root and isinstance(entry, dict) and entry.get("gate"):
+                roots.add(str(root))
+        tops = saved.get("touched_tops")
+        places = [
+            t for t in (tops if isinstance(tops, list) else []) if isinstance(t, str)
+        ]
+    else:
+        places = []
+    for place in [*places, cwd]:
+        policy = find_policy(os.path.join(place, "_"))
+        if policy["root"] and policy["gate"]:
+            roots.add(policy["root"])
+    return sorted(roots)
+
+
+def state_shape_problem(saved: dict[str, Any]) -> str | None:
+    """The first key whose value has the wrong type for the code that reads it, or None."""
+    for key, default in default_state().items():
+        if key not in saved:
+            continue
+        value = saved[key]
+        if default is None:
+            ok = value is None or isinstance(value, dict)
+        elif isinstance(default, int | float):
+            ok = isinstance(value, int | float) and not isinstance(value, bool)
+        else:
+            ok = isinstance(value, type(default))
+        if not ok:
+            return key
+    for key in ("seen_events", "touched_tops"):
+        value = saved.get(key, [])
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            return key
+    reset = saved.get("state_reset")
+    if reset is not None and (
+        not isinstance(reset, dict)
+        or _number(reset.get("at")) is None
+        or not isinstance(reset.get("roots", []), list)
+    ):
+        return "state_reset"
+    return None
 
 
 # ---------------------------------------------------------------- helpers
@@ -338,6 +439,8 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
     if not path or ignored_path(state, path, cwd):
         return
     path = absolute(path, cwd)
+    # A reset marker does not deny writes: edits after it are tracked by the new state, and
+    # Stop stays blocked until the gates in its scope pass, so a red gate remains fixable.
 
     # 0) v2: the approval (and the store itself) is verified now, before this write.
     if v2_active():
@@ -1358,6 +1461,24 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
 MAX_DIR_CACHE = 200
 MAX_PRE_CHECKS = 20
 GIT_BUDGET_S = {"pre": 20.0, "prompt": 20.0, "post": 45.0, "fail": 45.0, "stop": 45.0}
+# Mirrors the discipline hook timeouts in settings.json (a test fails when they drift). The
+# lock wait and the git budget both come out of this one deadline, so the hook decides
+# (closed) before Claude Code kills it.
+HOOK_TIMEOUT_S = {"pre": 30.0, "prompt": 30.0, "post": 60.0, "fail": 60.0, "stop": 60.0}
+HOOK_MARGIN_S = 5.0  # initial prior: interpreter start, handler work, save
+
+
+def hook_time_left(mode: str, elapsed: float) -> float:
+    return HOOK_TIMEOUT_S[mode] - HOOK_MARGIN_S - elapsed
+
+
+def lock_budget_s(mode: str, elapsed: float, configured: float) -> float:
+    """Wait for the session lock at most half of what is left, so git keeps the rest."""
+    return max(0.0, min(configured, hook_time_left(mode, elapsed) / 2))
+
+
+def git_budget_s(mode: str, elapsed: float, configured: float) -> float:
+    return max(0.0, min(configured, hook_time_left(mode, elapsed)))
 
 
 def _watch_globs(top: str) -> list[str]:
@@ -1696,6 +1817,15 @@ REASON_APPROVAL_AMBIGUOUS = (
     "승인 기록은 유효합니다. 프롬프트 첫 줄에 task:<id> 하나만 적어 다시 요청해 달라고 사용자에게 알리세요."
 )
 REASON_RELAY_DROPPED = "[discipline] {why}. 지금은 승인된 작업이 없습니다. 이 사실과 재개 방법을 사용자에게 알리세요."
+REASON_STATE_RESET = (
+    "[discipline] 세션 추적 상태 손상 또는 누락({why}): 그 이전의 변경은 미확인입니다. "
+    "해당 프로젝트들의 품질 게이트가 이 시점 이후 통과할 때까지 완료(Stop)를 턴마다 한 번 막습니다. "
+    "보고에 '미확인'으로 적으세요."
+)
+REASON_STATE_BUSY = (
+    "[discipline] 세션 상태 잠금을 얻지 못했습니다({why}). 이번 판정을 기록할 수 없어 안전하게 막습니다. "
+    "다른 hook(서브에이전트 포함)이 끝난 뒤 다시 시도하세요."
+)
 REASON_REMOVED = (
     "[discipline] 추적하던 저장소 {top}가 사라졌습니다(삭제·이동·이름 변경). 그 안에 검증되지 않은 "
     "변경이 있었거나 확인할 수 없어 '미확인'입니다. 그 경로로 되돌려 게이트를 통과시키기 전까지 매 턴 "
@@ -1752,6 +1882,9 @@ REASON_GATE_NOT_RUN = (
 
 def _stop_decision(state: dict[str, Any]) -> tuple[str, str | None] | None:
     """(reason, notify key) for the first problem: scope, unreadable state, content, then timestamps."""
+    damaged = state_reset_active(state)
+    if damaged:  # once per turn (stop_hook_active) until the scope's gates pass
+        return REASON_STATE_RESET.format(why=damaged), None
     warning = state.get("approval_warning")
     if warning:
         key = f"approval-warning|{state.get('turn')}|{warning}"
@@ -2019,12 +2152,23 @@ def on_stop(data: dict[str, Any], state: dict[str, Any]) -> None:
         marker = str(data.get("cwd") or os.getcwd())
         if marker not in state["content_unknown"]:
             state["content_unknown"].append(marker)
+    damaged = state_reset_active(state)
     decision = _stop_decision(state)
     if decision is None:
         return
     reason, notify_key = decision
     if notify_key:
         state.setdefault("notified", {})[notify_key] = state.get("turn")
+    reset = state.get("state_reset")
+    if (
+        damaged is not None
+        and reason == REASON_STATE_RESET.format(why=damaged)
+        and isinstance(reset, dict)
+        and not reset.get("roots")
+    ):
+        state.pop(
+            "state_reset", None
+        )  # no gate to wait for: reported once, as '미확인'
     print(json.dumps({"decision": "block", "reason": reason}))
 
 
@@ -2038,7 +2182,6 @@ def main() -> None:
     ):  # malformed/empty payload: never block on hook input problems
         sys.exit(0)
     session = session_key(data)
-    state = load_state(session)
     handler = {
         "pre": on_pre,
         "post": on_post,
@@ -2048,20 +2191,96 @@ def main() -> None:
     }.get(mode)
     if handler is None:
         sys.exit(0)
+    import session_store
+
+    path = STATE_DIR / f"{session}.json"
+    try:
+        configured = float(
+            os.environ.get("CLAUDE_DISCIPLINE_LOCK_BUDGET_S")
+            or session_store.LOCK_BUDGET_S
+        )
+    except ValueError:  # malformed override: use the default
+        configured = session_store.LOCK_BUDGET_S
+    lock_budget = lock_budget_s(mode, time.monotonic() - _T0, configured)
+    try:
+        # One exclusive lock per session for the whole run: main and subagent hooks of the
+        # session are serialized, so no update is lost (S).
+        with session_store.locked(path, lock_budget):
+            run_locked(mode, data, handler, path)
+    except session_store.StateBusy as e:
+        # Nothing can be recorded: refuse what needs the state, remember that it was missed.
+        session_store.note_missed(path, f"{mode}: {e}")
+        if mode == "pre":
+            emit_pre("deny", REASON_STATE_BUSY.format(why=e))
+        elif mode == "stop" and not data.get("stop_hook_active"):
+            print(
+                json.dumps(
+                    {"decision": "block", "reason": REASON_STATE_BUSY.format(why=e)}
+                )
+            )
+
+
+SEEN_EVENTS = 200
+
+
+def run_locked(mode: str, data: dict[str, Any], handler: Any, path: Path) -> None:
+    """Load (damage is preserved and turns into a reset marker), handle once per event, save
+    atomically (a failed save is remembered as a missed event)."""
+    import session_store
     import worktree
 
-    # Every git call of this run shares one budget well inside the hook timeout in settings.json
-    # (pre/prompt 30 s, post/fail/stop 60 s), so the hook decides (closed) instead of being killed.
+    state = default_state()
+    why: list[str] = []
+    try:
+        saved = session_store.load(path)
+    except session_store.StateCorrupt as e:
+        saved = None
+        why.append(f"{e}, 보존: {e.preserved.name if e.preserved else '이동 실패'}")
+    problem = state_shape_problem(saved) if saved else None
+    if problem:  # well-formed JSON the code cannot use: as damaged as unreadable JSON
+        kept = session_store.preserve(path)
+        saved = None
+        why.append(
+            f"세션 추적 상태 손상(형식: {problem}), 보존: {kept.name if kept else '이동 실패'}"
+        )
+    if saved:
+        state.update(saved)
+    why += session_store.take_missed(path)
+    if why:
+        roots = set(reset_scope(saved, str(data.get("cwd") or os.getcwd())))
+        previous = state.get("state_reset")
+        if isinstance(
+            previous, dict
+        ):  # still active: the earlier scope stays unverified
+            roots |= {r for r in previous.get("roots") or [] if isinstance(r, str)}
+            why.insert(0, str(previous.get("why") or ""))
+        state["state_reset"] = {
+            "at": time.time(),
+            "why": "; ".join(w for w in why if w)[:300],
+            "roots": sorted(roots),
+        }
+    # Every git call of this run shares one budget, cut to what is left before the hook's
+    # deadline after the lock wait, so the hook decides (closed) instead of being killed.
     budget = os.environ.get("CLAUDE_DISCIPLINE_GIT_BUDGET_S")
     try:
         seconds = float(budget) if budget else GIT_BUDGET_S[mode]
     except ValueError:  # malformed override: use the default
         seconds = GIT_BUDGET_S[mode]
-    worktree.set_budget(seconds)
+    worktree.set_budget(git_budget_s(mode, time.monotonic() - _T0, seconds))
+    event = f"{mode}|{data.get('tool_use_id')}" if data.get("tool_use_id") else None
+    seen: list[str] = state.setdefault("seen_events", [])
     try:
+        if event and mode in ("post", "fail") and event in seen:
+            return  # the same tool event delivered again: already applied
+        if event:
+            seen.append(event)
+            del seen[:-SEEN_EVENTS]
         handler(data, state)
     finally:
-        save_state(session, state)
+        try:
+            session_store.save(path, state)
+        except session_store.StateWriteFailed as e:
+            session_store.note_missed(path, f"{mode}: {e}")
 
 
 if __name__ == "__main__":

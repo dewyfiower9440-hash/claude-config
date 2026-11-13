@@ -35,6 +35,7 @@ TESTS = [
     "test_approvals_store",
     "test_guard",
     "test_discipline",
+    "test_session_store",
     "test_session_context",
     "test_format_lint",
     "test_guard_corpus",  # prints a notice and passes when no local transcripts exist
