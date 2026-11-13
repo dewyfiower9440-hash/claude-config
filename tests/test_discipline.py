@@ -1421,6 +1421,496 @@ check(
     True,
 )
 
+
+# ---- P0-04b revision (D3a, F1): a missing repository's path is taken back only when a git
+# toplevel is there again; a plain folder or another repository's subfolder is not it.
+def tracked(session: str, key: str, path: Path) -> bool:
+    return os.path.normcase(str(path)) in {
+        os.path.normcase(k) for k in state_file(session).get(key, {})
+    }
+
+
+BT1 = d3_repo("bt1")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="k1", prompt="work", cwd=str(BT1))
+d3_edit(s, "k1", BT1)
+rm_tree(BT1)
+BT1.mkdir()  # same path, no repository
+check(
+    "B-T1 a plain folder at a missing repository's path: still reported missing",
+    GONE in d3_stop(s, "k1", PB),
+    True,
+)
+check(
+    "B-T1 ... and it is not tracked as a repository again",
+    (tracked(s, "repos", BT1), tracked(s, "repos_removed", BT1)),
+    (False, True),
+)
+
+BT2_OUT = d3_repo("bt2")
+BT2 = BT2_OUT / "inner"
+BT2.mkdir()
+for args in (
+    ["init", "-q"],
+    ["config", "user.email", "t@t"],
+    ["config", "user.name", "t"],
+):
+    subprocess.run(["git", *args], cwd=BT2, check=True)
+(BT2 / "a.py").write_text("x = 1\n", encoding="utf-8")
+subprocess.run(["git", "add", "-A"], cwd=BT2, check=True)
+subprocess.run(["git", "commit", "-qm", "init"], cwd=BT2, check=True)
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="k2", prompt="work", cwd=str(BT2))
+d3_edit(s, "k2", BT2)
+rm_tree(BT2)
+BT2.mkdir()  # now only a subfolder of the outer repository
+check(
+    "B-T2 the path became another repository's subfolder: still reported missing",
+    GONE in d3_stop(s, "k2", PB),
+    True,
+)
+check(
+    "B-T2 ... and it is not tracked as a repository again",
+    (tracked(s, "repos", BT2), tracked(s, "repos_removed", BT2)),
+    (False, True),
+)
+
+BT3 = d3_repo("bt3")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="k3", prompt="work", cwd=str(BT3))
+d3_edit(s, "k3", BT3)
+os.rename(BT3, PB / "bt3-x")
+gone3 = GONE in d3_stop(s, "k3", PB)
+os.rename(PB / "bt3-x", BT3)
+call("prompt", s, prompt_id="k4", prompt="back", cwd=str(BT3))
+check(
+    "B-T3 the repository itself back at its path: original baseline, edit still unverified",
+    (gone3, UNVERIFIED in d3_stop(s, "k4", BT3), tracked(s, "repos", BT3)),
+    (True, True, True),
+)
+
+BT4 = d3_repo("bt4")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="k5", prompt="look", cwd=str(BT4))
+check("B-T4 control: clean at the first Stop", d3_stop(s, "k5", BT4), "")
+rm_tree(BT4)
+call("prompt", s, prompt_id="k6", prompt="next", cwd=str(PB))
+check("B-T4 control: clean deletion, no block", d3_stop(s, "k6", PB), "")
+BT4.mkdir()  # a plain folder where the repository was
+bt4_write = {"file_path": str(BT4 / "a.py"), "content": "x = 3\n"}
+call("pre", s, prompt_id="k6", cwd=str(BT4), tool_name="Write", tool_input=bt4_write)
+check(
+    "B-T4 an edit under the old path does not revive the repository from a stale cache",
+    tracked(s, "repos", BT4),
+    False,
+)
+
+# ---- P0-04b revision (D3b, F2/F3): a background shell may write after the Stop, and a shell
+# event seen without its PreToolUse touched the repository all the same.
+BT5 = d3_repo("bt5")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="l1", prompt="start a watcher", cwd=str(BT5))
+call(
+    "post",
+    s,
+    prompt_id="l1",
+    cwd=str(BT5),
+    tool_name="Bash",
+    tool_input={"command": "python watch.py", "run_in_background": True},
+    tool_response={"backgroundTaskId": "bg1"},
+)
+check("B-T5 control: clean at the Stop of that turn", d3_stop(s, "l1", BT5), "")
+call("prompt", s, prompt_id="l2", prompt="next", cwd=str(PB))
+rm_tree(BT5)
+check(
+    "B-T5 a repository a background shell ran in, missing a turn later: reported, not forgotten",
+    GONE in d3_stop(s, "l2", PB),
+    True,
+)
+
+BT6 = d3_repo("bt6")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="l3", prompt="look", cwd=str(BT6))
+check("B-T6 control: clean at the first Stop", d3_stop(s, "l3", BT6), "")
+call("prompt", s, prompt_id="l4", prompt="next", cwd=str(PB))
+rm_tree(BT6)
+check(
+    "B-T6 used only as cwd and removed outside any tool: a normal deletion",
+    d3_stop(s, "l4", PB),
+    "",
+)
+
+for bt_name, bt_mode in (("bt7", "fail"), ("bt8", "post")):
+    BTX = d3_repo(bt_name)
+    s = uuid.uuid4().hex
+    call("prompt", s, prompt_id="n1", prompt="look", cwd=str(BTX))
+    first_stop = d3_stop(s, "n1", BTX)
+    call("prompt", s, prompt_id="n2", prompt="next", cwd=str(PB))
+    call(  # its PreToolUse never arrived (tool_use_id given: `call` does not send one)
+        bt_mode,
+        s,
+        prompt_id="n2",
+        cwd=str(BTX),
+        tool_name="Bash",
+        tool_input={"command": "python build.py"},
+        tool_use_id=f"{bt_name}-only",
+        tool_response={},
+    )
+    rm_tree(BTX)
+    check(
+        f"B-T{bt_name[2:]} a shell {bt_mode} event without its pre, repository then missing: reported",
+        (first_stop, GONE in d3_stop(s, "n2", PB)),
+        ("", True),
+    )
+
+
+# ---- P0-04b revision (D3c): the user's first line `ack-missing <path>` releases what no gate
+# can ever clear (a missing repository, a reset root that is gone). Never counted as verified.
+def ack(session: str, pid: str, text: str, cwd: Path = PB) -> str:
+    out = call("prompt", session, prompt_id=pid, prompt=text, cwd=str(cwd))
+    return str(((out or {}).get("hookSpecificOutput") or {}).get("additionalContext"))
+
+
+def audit_rows() -> list[dict]:
+    log_file = Path(os.environ["CLAUDE_DISCIPLINE_HOME"]) / "state-recovery.jsonl"
+    if not log_file.is_file():
+        return []
+    rows = [json.loads(ln) for ln in log_file.read_text(encoding="utf-8").splitlines()]
+    return [r for r in rows if r.get("kind") == "ack-missing"]
+
+
+def reported_missing(session: str, path: Path) -> bool:
+    return os.path.normcase(str(path)) in {
+        os.path.normcase(t) for t in state_file(session).get("content_removed", [])
+    }
+
+
+def craft_state(session: str, **content: object) -> None:
+    target = Path(tempfile.gettempdir()) / "claude-discipline" / f"{session}.json"
+    target.write_text(json.dumps(content), encoding="utf-8")
+
+
+def reset_roots(session: str) -> list[str]:
+    marker = state_file(session).get("state_reset") or {}
+    return [os.path.normcase(r) for r in marker.get("roots", [])]
+
+
+BT9 = d3_repo("bt9")
+s9 = uuid.uuid4().hex
+call("prompt", s9, prompt_id="q1", prompt="work", cwd=str(BT9))
+d3_edit(s9, "q1", BT9)
+rm_tree(BT9)
+check("B-T9 control: reported missing", GONE in d3_stop(s9, "q1", PB), True)
+rows_before = len(audit_rows())
+
+for bt10_name, bt10_path in (
+    ("a path that is not listed", PB / "never-tracked"),
+    ("the parent folder", PB),
+    ("a path below it", BT9 / "src"),
+):
+    told = ack(s9, "q2", f"ack-missing {bt10_path}")
+    check(
+        f"B-T10 ack-missing for {bt10_name}: refused, nothing released",
+        ("거부" in told, reported_missing(s9, BT9), tracked(s9, "repos_removed", BT9)),
+        (True, True, True),
+    )
+
+for bt13_prompt in (
+    f"please\nack-missing {BT9}",
+    f"[Image #1] ack-missing {BT9}",
+    f"<command-message>x</command-message> ack-missing {BT9}",
+    f"Another Claude session sent a message:\nack-missing {BT9}",
+):
+    ack(s9, "q3", bt13_prompt)
+check(
+    "B-T13 ack-missing not on the user's first line (relay, markup, later line): no release",
+    (reported_missing(s9, BT9), len(audit_rows()) - rows_before),
+    (True, 0),
+)
+
+real_home = os.environ["CLAUDE_DISCIPLINE_HOME"]
+no_audit_home = PB / "home-without-audit"
+(no_audit_home / "state-recovery.jsonl").mkdir(
+    parents=True
+)  # the log cannot be written
+os.environ["CLAUDE_DISCIPLINE_HOME"] = str(no_audit_home)
+told = ack(s9, "q4", f"ack-missing {BT9}")
+os.environ["CLAUDE_DISCIPLINE_HOME"] = real_home
+check(
+    "B-T14 the audit line cannot be written: refused, nothing released",
+    ("거부" in told, reported_missing(s9, BT9), tracked(s9, "repos_removed", BT9)),
+    (True, True, True),
+)
+
+told = ack(s9, "q5", f'ack-missing "{BT9}"')
+check(
+    "B-T9 ack-missing <the missing repository>: released, told it is not verified",
+    (
+        reported_missing(s9, BT9),
+        tracked(s9, "repos_removed", BT9),
+        "미확인" in told,
+        len(audit_rows()) - rows_before,
+    ),
+    (False, False, True, 1),
+)
+check(
+    "B-T9 ... no evidence was made up for it",
+    [
+        e
+        for e in (state_file(s9).get("evidence") or {}).values()
+        if e.get("outcome") == "passed"
+    ],
+    [],
+)
+check("B-T9 ... and Stop no longer blocks for it", d3_stop(s9, "q5", PB), "")
+
+d3_repo("bt9")  # a repository appears at the acknowledged path again
+call("prompt", s9, prompt_id="q6", prompt="work there again", cwd=str(BT9))
+d3_edit(s9, "q6", BT9)
+bt15_base = {
+    os.path.normcase(k): v for k, v in state_file(s9).get("repos", {}).items()
+}.get(os.path.normcase(str(BT9)), {})
+check(
+    "B-T15 a repository at an acknowledged path: late baseline, its edit blocks (not verified)",
+    (bt15_base.get("late"), decision(call("stop", s9, prompt_id="q6", cwd=str(BT9)))),
+    (True, "block"),
+)
+
+BT11 = d3_repo("bt11", policy=True)
+BT12 = PB / "bt12-gone"  # a reset root that no longer exists
+s = uuid.uuid4().hex
+craft_state(
+    s,
+    state_reset={
+        "at": 1.0,
+        "why": "crafted for the test",
+        "roots": [str(BT11), str(BT12)],
+    },
+)
+told = ack(s, "r1", f"ack-missing {BT11}", cwd=BT11)
+check(
+    "B-T11 ack-missing for an existing root with a declared gate: refused (its gate decides)",
+    ("거부" in told, sorted(reset_roots(s))),
+    (True, sorted(os.path.normcase(str(p)) for p in (BT11, BT12))),
+)
+told = ack(s, "r2", f"ack-missing {BT12}", cwd=BT11)
+check(
+    "B-T12 ack-missing for a reset root that is gone: only that root is released",
+    ("미확인" in told, reset_roots(s)),
+    (True, [os.path.normcase(str(BT11))]),
+)
+
+BT16 = d3_repo("bt16")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="t1", prompt="look", cwd=str(BT16))
+check("B-T16 control: clean at the first Stop", d3_stop(s, "t1", BT16), "")
+call("prompt", s, prompt_id="t2", prompt="remove it", cwd=str(PB))
+call(
+    "post",
+    s,
+    prompt_id="t2",
+    cwd=str(PB),
+    tool_name="Bash",
+    tool_input={"command": f'rm -rf "{BT16.as_posix()}"'},
+    tool_response={},
+)
+rm_tree(BT16)
+bt16_reported = GONE in d3_stop(s, "t2", PB)
+ack(s, "t3", f"ack-missing {BT16}")
+check(
+    "B-T16 the known false positive (shell-removed clean repository) is released by ack-missing",
+    (bt16_reported, d3_stop(s, "t3", PB)),
+    (True, ""),
+)
+
+
+# ---- P0-04b revision, review findings (2026-11-13)
+def repo_base(session: str, path: Path) -> dict:
+    return {
+        os.path.normcase(k): v for k, v in state_file(session).get("repos", {}).items()
+    }.get(os.path.normcase(str(path)), {})
+
+
+# #1: a repository first seen by a shell post/fail was snapshotted AFTER the command ran.
+BT17 = d3_repo("bt17")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="v1", prompt="build", cwd=str(PB))
+(BT17 / "a.py").write_text("x = 9\n", encoding="utf-8")  # what the command did
+call(
+    "post",
+    s,
+    prompt_id="v1",
+    cwd=str(BT17),
+    tool_name="Bash",
+    tool_input={"command": "python build.py"},
+    tool_use_id="bt17-only",
+    tool_response={},
+)
+check(
+    "B-T17 a baseline first taken after a shell command ran: late, reported as unknown",
+    (repo_base(s, BT17).get("late"), "미확인" in d3_stop(s, "v1", PB)),
+    (True, True),
+)
+
+# #4: once a background shell runs, a repository tracked later may be written by it too.
+BT18X = d3_repo("bt18x")
+BT18C = d3_repo("bt18c")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="w1", prompt="start a watcher", cwd=str(BT18X))
+call(
+    "post",
+    s,
+    prompt_id="w1",
+    cwd=str(BT18X),
+    tool_name="Bash",
+    tool_input={"command": "python watch.py", "run_in_background": True},
+    tool_response={"backgroundTaskId": "bg2"},
+)
+bt18_stops = [d3_stop(s, "w1", BT18X)]
+call("prompt", s, prompt_id="w2", prompt="look elsewhere", cwd=str(BT18C))
+bt18_stops.append(d3_stop(s, "w2", BT18C))
+call("prompt", s, prompt_id="w3", prompt="next", cwd=str(PB))
+rm_tree(BT18C)
+check(
+    "B-T18 a repository tracked after a background shell started, then missing: reported",
+    (bt18_stops, GONE in d3_stop(s, "w3", PB)),
+    (["", ""], True),
+)
+
+# #2/#3: ack-missing drops only the edit records of files that went with the path.
+BT19 = d3_repo("bt19")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="x1", prompt="work", cwd=str(BT19))
+d3_edit(s, "x1", BT19)
+bt19_b = {"file_path": str(BT19 / "b.py"), "content": "y = 1\n"}
+call("post", s, prompt_id="x1", cwd=str(BT19), tool_name="Write", tool_input=bt19_b)
+rm_tree(BT19)
+BT19.mkdir()
+(BT19 / "b.py").write_text("y = 1\n", encoding="utf-8")  # this edited file still exists
+bt19_reported = GONE in d3_stop(s, "x1", PB)
+ack(s, "x2", f"ack-missing {BT19}")
+check(
+    "B-T19 after ack-missing an edited file that still exists keeps demanding verification",
+    (bt19_reported, reported_missing(s, BT19), UNVERIFIED in d3_stop(s, "x2", PB)),
+    (True, False, True),
+)
+
+BT19X = PB / "bt19-crafted"  # never existed
+other_root = str(PB / "bt19-other-project")
+capped_root = str(PB / "bt19-capped-project")
+s = uuid.uuid4().hex
+craft_state(
+    s,
+    content_removed=[str(BT19X)],
+    repos_removed={str(BT19X): {}},
+    dirty={
+        other_root: {"at": 5.0, "files": [], "gate": None},
+        capped_root: {
+            "at": 6.0,
+            "gate": None,
+            "files": [str(BT19X / f"f{i}.py") for i in range(200)],
+        },
+    },
+)
+ack(s, "x3", f"ack-missing {BT19X}")
+bt19_dirty = state_file(s).get("dirty", {})
+check(
+    "B-T19 ack-missing leaves unrelated edit records and a capped (maybe incomplete) list alone",
+    (
+        reported_missing(s, BT19X),
+        other_root in bt19_dirty,
+        bt19_dirty.get(capped_root, {}).get("at"),
+    ),
+    (False, True, 6.0),
+)
+
+# #3: a missing-repository entry that is also a gated, existing reset root.
+BT20 = PB / "bt20"
+BT20.mkdir()
+(BT20 / "CLAUDE.md").write_text(POLICY, encoding="utf-8")
+s = uuid.uuid4().hex
+craft_state(
+    s,
+    content_removed=[str(BT20)],
+    repos_removed={str(BT20): {}},
+    state_reset={"at": 1.0, "why": "crafted for the test", "roots": [str(BT20)]},
+)
+ack(s, "y1", f"ack-missing {BT20}")
+check(
+    "B-T20 missing entry released, the same path's gated reset root stays (its gate decides)",
+    (reported_missing(s, BT20), reset_roots(s)),
+    (False, [os.path.normcase(str(BT20))]),
+)
+
+# #3: a slash command's args block is the user's own line too (as for recover-state).
+BT21 = PB / "bt21-gone"
+s = uuid.uuid4().hex
+craft_state(s, content_removed=[str(BT21)], repos_removed={str(BT21): {}})
+ack(
+    s,
+    "y2",
+    f"<command-name>/ack</command-name>\n<command-args>ack-missing {BT21}</command-args>",
+)
+check(
+    "B-T21 ack-missing given as a slash command's args: accepted",
+    reported_missing(s, BT21),
+    False,
+)
+
+# #5: a repository that is back at its path is cleared by verification, not by ack-missing.
+BT22 = d3_repo("bt22")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="z1", prompt="work", cwd=str(BT22))
+d3_edit(s, "z1", BT22)
+os.rename(BT22, PB / "bt22-x")
+bt22_reported = GONE in d3_stop(s, "z1", PB)
+os.rename(PB / "bt22-x", BT22)
+told = ack(s, "z2", f"ack-missing {BT22}")
+check(
+    "B-T22 ack-missing for a repository that came back: refused, its unverified edit still blocks",
+    (bt22_reported, "거부" in told, UNVERIFIED in d3_stop(s, "z2", BT22)),
+    (True, True, True),
+)
+
+# #6: malformed lists are refused before the audit line, never half applied.
+BT23 = PB / "bt23-gone"
+s = uuid.uuid4().hex
+craft_state(s, content_removed={str(BT23): 1}, repos_removed={str(BT23): {}})
+rows_before = len(audit_rows())
+told = ack(s, "z3", f"ack-missing {BT23}")
+check(
+    "B-T23 ack-missing on a malformed state: refused, no audit line, nothing released",
+    (
+        "거부" in told,
+        len(audit_rows()) - rows_before,
+        tracked(s, "repos_removed", BT23),
+    ),
+    (True, 0, True),
+)
+
+# #7: recover-state keeps what the two new records protect.
+BT24_BG = PB / "bt24-background"
+BT24_ACK = PB / "bt24-acked"
+s = uuid.uuid4().hex
+craft_state(
+    s,
+    background_tops=[str(BT24_BG)],
+    acked_missing=[
+        {"path": str(BT24_ACK), "at": 1.0, "prompt_id": "old"},
+        {"path": 7, "at": "x"},
+        "junk",
+    ],
+)
+call("prompt", s, prompt_id="z4", prompt="recover-state", cwd=str(PB))
+check(
+    "B-T24 recover-state: background places become marker roots, well-formed acks are kept",
+    (
+        os.path.normcase(str(BT24_BG)) in reset_roots(s),
+        [row.get("path") for row in state_file(s).get("acked_missing", [])],
+    ),
+    (True, [str(BT24_ACK)]),
+)
+
 # ---- P0-04b review: git failures and caches must not make a %TEMP% repository look like scratch
 sys.path.insert(0, str(Path(HOOK).parent))
 import discipline as _d

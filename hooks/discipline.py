@@ -454,6 +454,52 @@ def emit_stop_block(reason: str) -> None:
 
 
 # ---------------------------------------------------------------- events
+def shell_in_background(data: dict[str, Any]) -> bool:
+    """The shell command was sent to the background (asked for, or reported by the tool)."""
+    ti = data.get("tool_input", {}) or {}
+    response = data.get("tool_response")
+    return bool(ti.get("run_in_background")) or (
+        isinstance(response, dict) and bool(response.get("backgroundTaskId"))
+    )
+
+
+def note_shell_touch(
+    data: dict[str, Any], state: dict[str, Any], *, after: bool = False
+) -> None:
+    """Record which repositories a shell command may change. Called for its PreToolUse and
+    again (`after`) for its PostToolUse(Failure), so a command whose PreToolUse was never
+    recorded is not taken as having touched nothing. Repeating it changes nothing."""
+    ti = data.get("tool_input", {}) or {}
+    cwd = str(data.get("cwd") or os.getcwd())
+    command = str(ti.get("command", ""))
+    shell_tops = state.setdefault("turn_shell_tops", [])
+    touched = state.setdefault("touched_tops", [])
+    known = set(state.get("repos", {}))
+    for d in shell_targets(command, data.get("tool_name") == "PowerShell", cwd):
+        top = track_repo(state, d)
+        if top and top not in shell_tops:
+            shell_tops.append(top)  # Bash edits there are visible only via content maps
+        if top and top not in touched:
+            touched.append(top)  # may change it before the next Stop
+        if after and top and top not in known and top in state.get("repos", {}):
+            # First seen only now, so its baseline already holds whatever the command wrote:
+            # late, never "unchanged".
+            state["repos"][top]["late"] = True
+    # A shell can write any path (absolute paths, git -C, scripts), so every tracked repository
+    # may change — never a "normal deletion" later. Conservative until P0-07 can tell which
+    # paths a command writes.
+    for top in state.get("repos", {}):
+        if top not in touched:
+            touched.append(top)
+    if shell_in_background(data):
+        # It may keep writing after this turn's Stop, and no hook says when it ends: these
+        # repositories are never "untouched" again in this session.
+        late_writers = state.setdefault("background_tops", [])
+        for top in touched:
+            if top not in late_writers:
+                late_writers.append(top)
+
+
 def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
     tool = data.get("tool_name", "")
     ti = data.get("tool_input", {}) or {}
@@ -462,21 +508,7 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
     # D-5: snapshot any repository this tool is about to touch, before it runs.
     if tool in ("Bash", "PowerShell"):
         command = str(ti.get("command", ""))
-        shell_tops = state.setdefault("turn_shell_tops", [])
-        for d in shell_targets(command, tool == "PowerShell", cwd):
-            top = track_repo(state, d)
-            if top and top not in shell_tops:
-                shell_tops.append(
-                    top
-                )  # Bash edits there are visible only via content maps
-            if top and top not in state.setdefault("touched_tops", []):
-                state["touched_tops"].append(top)  # may change it before the next Stop
-        # Recorded before the command runs: a shell can write any path (absolute paths, git -C,
-        # scripts), so every tracked repository may change — never a "normal deletion" later.
-        # Conservative until P0-07 can tell which paths a command writes.
-        for top in state.get("repos", {}):
-            if top not in state.setdefault("touched_tops", []):
-                state["touched_tops"].append(top)
+        note_shell_touch(data, state)
         # A check is evidence only for the content it ran on: remember the content before it
         # runs, so `gate && sed ...` (content changed during the command) is not bound to the
         # post-edit content.
@@ -567,6 +599,7 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
                 state["last_code_edit"] = now
                 mark_dirty(state, path, now, changed_lines(tool, ti))
     elif tool in ("Bash", "PowerShell"):
+        note_shell_touch(data, state, after=True)  # also when no PreToolUse was seen
         record_evidence(data, state, failed=False)
         if v2_active():  # a shell may have changed a plan: record what is seen now
             try:
@@ -1359,10 +1392,7 @@ def record_evidence(
     reresolve_dirty(state)
 
     ti = data.get("tool_input", {}) or {}
-    response = data.get("tool_response")
-    background = bool(ti.get("run_in_background")) or (
-        isinstance(response, dict) and bool(response.get("backgroundTaskId"))
-    )
+    background = shell_in_background(data)
     is_ps = data.get("tool_name") == "PowerShell"
     cwd = str(data.get("cwd") or os.getcwd())
     now = time.time()
@@ -1465,6 +1495,7 @@ def record_ci_activity(
 def on_fail(data: dict[str, Any], state: dict[str, Any]) -> None:
     """PostToolUseFailure: a failed check is still evidence (of failure)."""
     if data.get("tool_name") in ("Bash", "PowerShell"):
+        note_shell_touch(data, state, after=True)  # also when no PreToolUse was seen
         record_evidence(data, state, failed=True)
 
 
@@ -1513,6 +1544,9 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
         # Bound to this prompt: if a later prompt's hook never runs (killed, timed out), the
         # stale approval does not carry over to it.
         state["approval"]["prompt_id"] = data.get("prompt_id")
+    told = ack_missing(data, state)  # the user's `ack-missing <path>`, if this is one
+    if told:
+        emit_prompt_context(told)
     track_repo(state, str(data.get("cwd") or os.getcwd()))
     if not relay:
         refresh_turn_baselines(state)
@@ -1558,6 +1592,36 @@ def _watch_globs(top: str) -> list[str]:
     return [f"{prefix}/{g}" if prefix else g for g in policy.get("watch", [])]
 
 
+def is_repo_root(top: str) -> bool:
+    """A git toplevel is at `top` right now. Asked from git, never from the directory cache: a
+    plain folder or another repository's subfolder at a missing repository's path is not it.
+    No answer in time counts as no."""
+    import worktree
+
+    if not os.path.isdir(top):
+        return False
+    found = worktree.toplevel(top)
+    return bool(found) and os.path.normcase(os.path.abspath(found)) == os.path.normcase(
+        os.path.abspath(top)
+    )
+
+
+def repo_present(top: str) -> bool:
+    """Cheap presence test (no git call): the folder is there and still carries its `.git`
+    entry. A folder left or re-created without one is not the repository that was tracked."""
+    return os.path.isdir(top) and os.path.exists(os.path.join(top, ".git"))
+
+
+def forget_dir_tops(state: dict[str, Any], top: str) -> None:
+    """Drop cached directory -> toplevel answers about `top`: after a repository went missing or
+    came back, the next lookup there asks git again."""
+    cache = state.get("dir_tops")
+    if not isinstance(cache, dict):
+        return
+    for probe in [p for p, t in cache.items() if t == top or _inside(p, top)]:
+        cache.pop(probe, None)
+
+
 def restore_repo(state: dict[str, Any], top: str) -> None:
     """A path whose repository had gone missing has a repository again: it is compared with that
     path's original baselines (no identity guessing), so nothing unverified is forgotten and
@@ -1565,6 +1629,7 @@ def restore_repo(state: dict[str, Any], top: str) -> None:
     state.setdefault("repos", {})[top] = state["repos_removed"].pop(top)
     if top in state.get("content_removed", []):
         state["content_removed"].remove(top)
+    forget_dir_tops(state, top)
 
 
 def track_repo(state: dict[str, Any], path: str) -> str | None:
@@ -1577,7 +1642,11 @@ def track_repo(state: dict[str, Any], path: str) -> str | None:
     # another repository's folder (ignored subrepo, submodule) has its own toplevel.
     probe = p if os.path.isdir(p) else os.path.dirname(p)
     dir_tops = state.setdefault("dir_tops", {})
-    if probe in dir_tops:
+    cached = probe in dir_tops
+    if cached and dir_tops[probe] and not repo_present(dir_tops[probe]):
+        dir_tops.pop(probe)  # that repository is gone: ask git what is here now
+        cached = False
+    if cached:
         top = dir_tops[probe]
     else:
         top = worktree.toplevel(p)
@@ -1592,6 +1661,8 @@ def track_repo(state: dict[str, Any], path: str) -> str | None:
     if not top:
         return None
     if top not in repos and top in state.get("repos_removed", {}):
+        # `top` was answered by git just now: the cache entries of a missing repository are
+        # dropped when it goes missing (forget_dir_tops), so none can lead here.
         restore_repo(
             state, top
         )  # a repository that was missing: never a fresh baseline
@@ -1599,8 +1670,12 @@ def track_repo(state: dict[str, Any], path: str) -> str | None:
         # New repository, or its first snapshot failed (timeout/budget): (re)take the baseline.
         # A baseline taken after a failed attempt may already contain unverified edits, so it
         # is marked late: its changes are reported unknown, never taken as "unchanged".
-        late = top in repos or any(
-            _inside(d, top) for d in state.get("missed_dirs", [])
+        # So is a repository at a path the user acknowledged as missing: what was there was
+        # never verified, and nothing says this one is another.
+        late = (
+            top in repos
+            or any(_inside(d, top) for d in state.get("missed_dirs", []))
+            or acked_before(state, top)
         )
         snap = worktree.content_map(top, _watch_globs(top))
         repos[top] = {
@@ -1610,6 +1685,11 @@ def track_repo(state: dict[str, Any], path: str) -> str | None:
             "turn_at": time.time(),
             "late": late,
         }
+        late_writers = state.get("background_tops")
+        if isinstance(late_writers, list) and late_writers and top not in late_writers:
+            # A background shell started earlier may write here too (absolute paths): this
+            # repository is never "untouched" for the rest of the session either.
+            late_writers.append(top)
     return top
 
 
@@ -1726,11 +1806,12 @@ def refresh_content(state: dict[str, Any]) -> None:
     turn_changes: set[str] = set()
     visible: set[str] = set()
     kept = state.setdefault("repos_removed", {})
-    for top in [t for t in kept if os.path.isdir(t)]:
+    for top in [t for t in kept if is_repo_root(t)]:
         restore_repo(state, top)  # it came back: compare with the original baseline
-    touched = set(state.get("touched_tops", []))
+    touched = set(state.get("touched_tops", [])) | set(state.get("background_tops", []))
     status = state.setdefault("repo_state", {})
-    for top in [t for t in state.get("repos", {}) if not os.path.isdir(t)]:
+    for top in [t for t in state.get("repos", {}) if not repo_present(t)]:
+        forget_dir_tops(state, top)
         # A missing repository (deleted, moved, renamed) cannot be compared now. Its baseline
         # is kept by path (a repository appearing there again is compared with it, never taken
         # as verified). Without guessing where it went: proven clean (clean at the last Stop
@@ -1886,7 +1967,8 @@ REASON_RELAY_DROPPED = "[discipline] {why}. 지금은 승인된 작업이 없습
 REASON_STATE_RESET = (
     "[discipline] 세션 추적 상태 손상 또는 누락({why}): 그 이전의 변경은 미확인입니다. "
     "해당 프로젝트들의 품질 게이트가 이 시점 이후 통과할 때까지 완료(Stop)를 턴마다 한 번 막습니다. "
-    "보고에 '미확인'으로 적으세요."
+    "보고에 '미확인'으로 적으세요. 범위 안의 경로가 사라졌거나 게이트가 없어 통과시킬 수 없다면, 사용자가 프롬프트 "
+    "첫 줄에 ack-missing <경로> 를 입력해 그 경로만 확인으로 해제할 수 있습니다(검증으로 치지 않습니다)."
 )
 REASON_HOOK_ERROR = (
     "[discipline] 추적 hook 처리 중 오류({why}). 이번 이벤트를 신뢰할 수 있게 기록하지 못해 안전하게 막습니다. "
@@ -1901,7 +1983,9 @@ REASON_STATE_BUSY = (
 REASON_REMOVED = (
     "[discipline] 추적하던 저장소 {top}가 사라졌습니다(삭제·이동·이름 변경). 그 안에 검증되지 않은 "
     "변경이 있었거나 확인할 수 없어 '미확인'입니다. 그 경로로 되돌려 게이트를 통과시키기 전까지 매 턴 "
-    "보고됩니다(다른 경로의 저장소로 이어 받지 않습니다). 보고에 '미확인'으로 적으세요."
+    "보고됩니다(다른 경로의 저장소로 이어 받지 않습니다). 보고에 '미확인'으로 적으세요. "
+    "되돌릴 수 없다면 사용자가 프롬프트 첫 줄에 ack-missing {top} 을 입력해 확인으로 해제할 수 있습니다"
+    "(검증으로 치지 않습니다). 이 방법을 사용자에게 알리세요."
 )
 REASON_APPROVAL_NOTE = (
     "[discipline] {why}. 지정한 승인 작업은 계속할 수 있습니다. "
@@ -2394,7 +2478,161 @@ def audit_recovery(row: dict[str, Any]) -> bool:
     return True
 
 
+# ---------------------------------------------------------------- user acknowledgement
+# `ack-missing <path>` on the user's own first line releases what no gate can ever clear: a
+# tracked repository that is gone, or a reset-marker root that is gone or has no gate. It
+# grants nothing and verifies nothing (no evidence is written); a repository that appears at
+# that path later starts with a late baseline.
+ACK_CMD = re.compile(r"^ack-missing\s+(\S.*)$", re.IGNORECASE)
+MAX_ACKED = 50
+REASON_ACKED = (
+    "[discipline] 사용자 확인(ack-missing)으로 {path}의 미확인 표식을 해제했습니다({what}). 검증된 것이 아닙니다: "
+    "그 안의 변경은 보고에 '미확인'으로 남기세요. 감사 기록은 {audit}에 있습니다."
+)
+REASON_ACK_REFUSED = "[discipline] ack-missing 거부: {why}. 상태는 바뀌지 않았습니다. 이 사실을 사용자에게 알리세요."
+
+
+def ack_requested(data: dict[str, Any]) -> str | None:
+    """The path named by `ack-missing <path>`: only on the user's own first line (never a
+    relay, markup or a later line)."""
+    prompt = data.get("prompt")
+    if not isinstance(prompt, str) or relay_shaped(prompt):
+        return None
+    asked = ACK_CMD.match(naming_text(prompt).strip())
+    if not asked:
+        return None
+    return asked.group(1).strip().strip("\"'").strip() or None
+
+
+def same_place(a: object, b: str) -> bool:
+    return isinstance(a, str) and os.path.normcase(
+        os.path.abspath(a)
+    ) == os.path.normcase(os.path.abspath(b))
+
+
+def gate_can_clear(root: str) -> bool:
+    """The root exists and declares a gate, so passing that gate is how it is cleared."""
+    from verification import find_policy
+
+    if not os.path.isdir(root):
+        return False
+    try:
+        policy = find_policy(os.path.join(root, "_"))
+    except (OSError, ValueError):  # unreadable policy: no gate will ever be recorded
+        return False
+    return bool(policy["gate"]) and same_place(policy["root"], root)
+
+
+def acked_before(state: dict[str, Any], top: str) -> bool:
+    acked = state.get("acked_missing")
+    return any(
+        isinstance(row, dict) and same_place(row.get("path"), top)
+        for row in (acked if isinstance(acked, list) else [])
+    )
+
+
+def ack_missing(data: dict[str, Any], state: dict[str, Any]) -> str | None:
+    """Apply the user's `ack-missing <path>`; the text to tell Claude, or None if not asked."""
+    asked = ack_requested(data)
+    if asked is None:
+        return None
+    target = absolute(asked, str(data.get("cwd") or os.getcwd()))
+    # Everything below edits these records in place: a malformed one is refused here, before
+    # the audit line, so a release is never half applied.
+    for key, kind in (
+        ("content_removed", list),
+        ("repos_removed", dict),
+        ("repo_state", dict),
+        ("dirty", dict),
+        ("acked_missing", list),
+    ):
+        if key in state and not isinstance(state[key], kind):
+            return REASON_ACK_REFUSED.format(
+                why=f"세션 추적 상태의 {key} 형식이 올바르지 않습니다(recover-state로 먼저 복구)"
+            )
+    removed = [t for t in state.get("content_removed", []) if same_place(t, target)]
+    kept = [t for t in state.get("repos_removed", {}) if same_place(t, target)]
+    marker = state.get("state_reset") if state_reset_active(state) else None
+    roots = marker.get("roots") if isinstance(marker, dict) else None
+    in_marker = [r for r in (roots or []) if same_place(r, target)]
+    if not (removed or kept or in_marker):
+        return REASON_ACK_REFUSED.format(
+            why=f"{target}는 사라진 저장소나 미확인 표식 범위로 기록된 경로가 아닙니다(정확한 경로만 받습니다)"
+        )
+    if in_marker and gate_can_clear(target):
+        if not (removed or kept):
+            return REASON_ACK_REFUSED.format(
+                why=f"{target}는 존재하고 게이트가 선언돼 있어 게이트 통과로만 해제됩니다"
+            )
+        in_marker = []  # the missing-repository entry goes, the gated root stays
+    if (removed or kept) and is_repo_root(target):
+        return REASON_ACK_REFUSED.format(
+            why=f"{target}에 저장소가 다시 있습니다. 원래 기준선과 비교해 검증(게이트)으로 해제됩니다"
+        )
+    what = [
+        name
+        for name, found in (
+            ("content_removed", removed),
+            ("repos_removed", kept),
+            ("state_reset.roots", in_marker),
+        )
+        if found
+    ]
+    gone_files = [
+        f
+        for entry in state.get("dirty", {}).values()
+        for f in (entry.get("files") or [] if isinstance(entry, dict) else [])
+        if isinstance(f, str) and _inside(f, target) and not os.path.exists(f)
+    ]
+    if not audit_recovery(
+        {
+            "kind": "ack-missing",
+            "session": data.get("session_id"),
+            "prompt_id": data.get("prompt_id"),
+            "path": target,
+            "released": what,
+            "edited_files_gone": len(gone_files),
+        }
+    ):
+        return REASON_ACK_REFUSED.format(
+            why="감사 기록을 남기지 못했습니다(감사 없는 해제 금지)"
+        )
+    for t in removed:
+        state["content_removed"].remove(t)
+    for t in kept:
+        state["repos_removed"].pop(t, None)
+        state.get("repo_state", {}).pop(t, None)
+        forget_dir_tops(state, t)
+    if in_marker and isinstance(marker, dict):
+        marker["roots"] = [r for r in roots or [] if not same_place(r, target)]
+    # Edits recorded for files that went with it can never be verified: they are part of what
+    # the user acknowledged. Files that still exist keep demanding verification.
+    # Only entries that listed such a file change; an entry whose list was cut at the limit may
+    # hold edits it does not list, so it is never dropped.
+    for root in list(state.get("dirty", {})):
+        entry = state["dirty"][root]
+        files = entry.get("files") if isinstance(entry, dict) else None
+        if not isinstance(files, list) or not any(f in gone_files for f in files):
+            continue
+        capped = len(files) >= MAX_DIRTY_FILES
+        entry["files"] = [f for f in files if f not in gone_files]
+        if isinstance(entry.get("lines"), dict):
+            for f in gone_files:
+                entry["lines"].pop(f, None)
+        if not entry["files"] and not capped:
+            state["dirty"].pop(root)
+    acked = state.setdefault("acked_missing", [])
+    acked.append(
+        {"path": target, "at": time.time(), "prompt_id": data.get("prompt_id")}
+    )
+    del acked[:-MAX_ACKED]
+    return REASON_ACKED.format(
+        path=target, what=", ".join(what), audit=RECOVERY_AUDIT_FILE
+    )
+
+
 RECOVERY_PLACE_LISTS = (
+    "background_tops",
     "touched_tops",
     "missed_dirs",
     "turn_shell_tops",
@@ -2467,6 +2705,20 @@ def recovery_carry(saved: object) -> dict[str, Any]:
     gen = saved.get("approvals_seen_gen")
     if isinstance(gen, int) and not isinstance(gen, bool) and gen > 0:
         carry["approvals_seen_gen"] = gen
+    # Paths the user acknowledged as missing: a repository appearing there later still gets a
+    # late baseline. Rebuilt from well-formed rows only (path and time, nothing else).
+    acked = saved.get("acked_missing")
+    rows = [
+        {"path": row["path"], "at": float(row["at"])}
+        for row in (acked if isinstance(acked, list) else [])
+        if isinstance(row, dict)
+        and isinstance(row.get("path"), str)
+        and row["path"]
+        and isinstance(row.get("at"), int | float)
+        and not isinstance(row.get("at"), bool)
+    ]
+    if rows:
+        carry["acked_missing"] = rows[-MAX_ACKED:]
     return carry
 
 
