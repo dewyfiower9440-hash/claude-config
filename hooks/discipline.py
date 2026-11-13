@@ -247,11 +247,15 @@ def state_reset_active(state: dict[str, Any]) -> str | None:
         return "세션 추적 상태 표식 손상(시각)"
     roots = reset.get("roots")
     evidence = state.get("evidence")
-    if not isinstance(evidence, dict):
-        evidence = {}
+    # Compared case-insensitively on Windows: an unresolvable place is recorded normcased,
+    # and once its CLAUDE.md is repaired its gate evidence is keyed by the policy root.
+    by_root = {
+        os.path.normcase(str(k)): v
+        for k, v in (evidence if isinstance(evidence, dict) else {}).items()
+    }
 
     def gate_passed_since(root: object) -> bool:
-        ev = evidence.get(root) if isinstance(root, str) else None
+        ev = by_root.get(os.path.normcase(root)) if isinstance(root, str) else None
         if not isinstance(ev, dict):
             return False
         at = _number(ev.get("at"))
@@ -412,18 +416,41 @@ def deleted_test_files(cmd: str) -> list[str]:
 
 
 def emit_pre(decision: str, reason: str) -> None:
-    print(
-        json.dumps(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": decision,
-                    "permissionDecisionReason": reason,
+    """Write the decision and flush it now: a piped stdout is block-buffered, and a flush
+    failing at interpreter exit would end with status 120 (non-blocking). A refusal that
+    cannot be delivered becomes exit 2 (blocking) with the reason on stderr."""
+    try:
+        print(
+            json.dumps(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": decision,
+                        "permissionDecisionReason": reason,
+                    }
                 }
-            }
+            )
         )
-    )
+        sys.stdout.flush()
+    except (OSError, ValueError) as e:
+        if decision != "allow":
+            # Raised, not exited: the locked run still saves its state (finally), and the
+            # hook boundary then ends with exit 2 (fail_closed -> hard_block).
+            raise OutputFailed(f"PreToolUse 판정 출력 실패: {e}") from e
+        log.exception("discipline.pre_output_failed")
     sys.exit(0)
+
+
+class OutputFailed(Exception):
+    """A blocking decision could not be delivered on stdout."""
+
+
+def emit_stop_block(reason: str) -> None:
+    try:
+        print(json.dumps({"decision": "block", "reason": reason}))
+        sys.stdout.flush()  # now, not at interpreter exit (a failure there is status 120)
+    except (OSError, ValueError) as e:
+        raise OutputFailed(f"Stop 판정 출력 실패: {e}") from e
 
 
 # ---------------------------------------------------------------- events
@@ -565,6 +592,7 @@ APPROVALS_HOME = Path(
 )
 APPROVALS_FILE = APPROVALS_HOME / "approvals.json"
 KEY_FILE = APPROVALS_HOME / "key"
+RECOVERY_AUDIT_FILE = APPROVALS_HOME / "state-recovery.jsonl"
 SIGNED_FIELDS = (
     "task_id",
     "plan_hash",
@@ -1862,7 +1890,9 @@ REASON_STATE_RESET = (
 )
 REASON_HOOK_ERROR = (
     "[discipline] 추적 hook 처리 중 오류({why}). 이번 이벤트를 신뢰할 수 있게 기록하지 못해 안전하게 막습니다. "
-    "다음 실행에서 '세션 추적 상태 누락'으로 표시되며, 그 전의 변경은 미확인입니다. 이 사실을 사용자에게 알리세요."
+    "다음 실행에서 '세션 추적 상태 누락'으로 표시되며, 그 전의 변경은 미확인입니다. 이 사실을 사용자에게 알리세요. "
+    "같은 오류가 반복되면 사용자가 프롬프트 첫 줄에 recover-state 를 입력해 복구할 수 있습니다(원본 보존, 미검증 표식 유지, "
+    "승인은 task:<id>로 다시 재무장). 상태 파일을 직접 지우거나 고치지 마세요."
 )
 REASON_STATE_BUSY = (
     "[discipline] 세션 상태 잠금을 얻지 못했습니다({why}). 이번 판정을 기록할 수 없어 안전하게 막습니다. "
@@ -2221,7 +2251,7 @@ def on_stop(data: dict[str, Any], state: dict[str, Any]) -> None:
         state.pop(
             "state_reset", None
         )  # no gate to wait for: reported once, as '미확인'
-    print(json.dumps({"decision": "block", "reason": reason}))
+    emit_stop_block(reason)
 
 
 def main() -> None:
@@ -2243,9 +2273,16 @@ def main() -> None:
     }.get(mode)
     if handler is None:
         sys.exit(0)
+    try:
+        run_hook(mode, data, handler, STATE_DIR / f"{session}.json")
+    except Exception:  # outermost boundary: even the failure handling failed
+        log.exception("discipline.hook_boundary_failure")
+        hard_block(mode, data, REASON_HOOK_ERROR.format(why="오류 처리 중 오류"))
+
+
+def run_hook(mode: str, data: dict[str, Any], handler: Any, path: Path) -> None:
     import session_store
 
-    path = STATE_DIR / f"{session}.json"
     try:
         configured = float(
             os.environ.get("CLAUDE_DISCIPLINE_LOCK_BUDGET_S")
@@ -2258,10 +2295,13 @@ def main() -> None:
         # One exclusive lock per session for the whole run: main and subagent hooks of the
         # session are serialized, so no update is lost (S).
         with session_store.locked(path, lock_budget):
-            run_locked(mode, data, handler, path)
+            if recovery_requested(mode, data):
+                recover_locked(data, path)
+            else:
+                run_locked(mode, data, handler, path)
     except session_store.StateBusy as e:
         # Nothing can be recorded: refuse what needs the state, remember that it was missed.
-        session_store.note_missed(path, f"{mode}: {e}")
+        note_safely(path, f"{mode}: {e}")
         fail_closed(mode, data, REASON_STATE_BUSY.format(why=e))
     except (
         Exception
@@ -2269,16 +2309,264 @@ def main() -> None:
         log.exception("discipline.hook_failure")
         why = f"{type(e).__name__}: {e}"[:200]
         # What was known is saved (run_locked's finally); this event may be half applied.
-        session_store.note_missed(path, f"{mode}: 처리 중 오류({why})")
+        note_safely(path, f"{mode}: 처리 중 오류({why})")
         fail_closed(mode, data, REASON_HOOK_ERROR.format(why=why))
 
 
+def note_safely(path: Path, why: str) -> None:
+    """Remember a missed event; never raises (it runs on the failure path)."""
+    try:
+        import session_store
+
+        session_store.note_missed(path, why)
+    except Exception:  # the refusal that follows must still happen
+        log.exception("discipline.note_missed_failed")
+
+
+def blocks(mode: str, data: dict[str, Any]) -> bool:
+    return mode == "pre" or (mode == "stop" and not data.get("stop_hook_active"))
+
+
 def fail_closed(mode: str, data: dict[str, Any], reason: str) -> None:
-    """Refuse what needs a trustworthy state: the write (pre) and the end of the turn (stop)."""
-    if mode == "pre":
-        emit_pre("deny", reason)
-    elif mode == "stop" and not data.get("stop_hook_active"):
-        print(json.dumps({"decision": "block", "reason": reason}))
+    """Refuse what needs a trustworthy state: the write (pre) and the end of the turn (stop).
+    If the refusal cannot be written, exit 2 (blocking for both events per the hook docs)."""
+    if not blocks(mode, data):
+        return
+    try:
+        if mode == "pre":
+            emit_pre("deny", reason)
+        emit_stop_block(reason)
+    except Exception:  # SystemExit from emit_pre passes through untouched
+        log.exception("discipline.refusal_output_failed")
+        hard_block(mode, data, reason)
+
+
+def hard_block(mode: str, data: dict[str, Any], reason: str) -> None:
+    """Last resort: exit 2 with the reason on stderr for pre/stop, without flushing stdout
+    (a failing flush at interpreter exit would turn the status into 120: non-blocking)."""
+    if not blocks(mode, data):
+        sys.exit(0)
+    try:
+        sys.stderr.write(reason + "\n")
+        sys.stderr.flush()
+    except (
+        OSError,
+        ValueError,
+    ):  # nothing can be reported; the exit status still blocks
+        log.warning("discipline.hard_block_stderr_failed")
+    os._exit(2)
+
+
+# ---------------------------------------------------------------- user state recovery
+RECOVER_CMD = "recover-state"
+REASON_RECOVERED = (
+    "[discipline] 사용자 요청(recover-state)으로 세션 추적 상태를 복구했습니다. 원본은 {kept}로 보존했고 "
+    "감사 기록은 {audit}에 있습니다. 미검증 범위 {roots}는 '세션 추적 상태 손상 또는 누락' 표식으로 남아, 그 게이트가 "
+    "통과할 때까지 완료(Stop)를 막습니다. 승인은 0입니다. 작업을 이어가려면 사용자가 프롬프트 첫 줄에 task:<id>를 적어 "
+    "재무장해야 합니다. 이 사실을 사용자에게 알리세요."
+)
+REASON_RECOVERY_FAILED = (
+    "[discipline] 세션 추적 상태 복구(recover-state) 실패: {why}. 상태는 바뀌지 않았고 보호 대상 쓰기 차단도 그대로입니다. "
+    "상태 파일을 직접 지우거나 고치지 말고 이 사실을 사용자에게 알리세요."
+)
+
+
+def recovery_requested(mode: str, data: dict[str, Any]) -> bool:
+    """Only the user's own first line (never a relay, markup or a later line) asks for it."""
+    prompt = data.get("prompt")
+    if mode != "prompt" or not isinstance(prompt, str) or relay_shaped(prompt):
+        return False
+    return naming_text(prompt).strip().lower() == RECOVER_CMD
+
+
+def audit_recovery(row: dict[str, Any]) -> bool:
+    """Append one line to the recovery audit log (outside %TEMP%); False if it failed."""
+    try:
+        APPROVALS_HOME.mkdir(parents=True, exist_ok=True)
+        line = json.dumps({"at": time.time(), **row}, ensure_ascii=False) + "\n"
+        with open(RECOVERY_AUDIT_FILE, "a", encoding="utf-8") as f:
+            f.write(line)
+            f.flush()
+            os.fsync(f.fileno())
+    except (OSError, ValueError, TypeError):
+        log.exception("discipline.recovery_audit_failed")
+        return False
+    return True
+
+
+RECOVERY_PLACE_LISTS = (
+    "touched_tops",
+    "missed_dirs",
+    "turn_shell_tops",
+    "content_removed",
+    "content_unknown",
+    "content_too_large",
+    "content_late",
+)
+RECOVERY_PLACE_MAPS = ("dirty", "content", "repos", "repo_state", "repos_removed")
+
+
+def recovery_roots(saved: object, cwd: str) -> tuple[set[str], list[str]]:
+    """Every place the old state knew, as a root of the new marker. Only path strings are
+    read (list items and dict keys); no structured value is trusted or carried, so nothing
+    malformed can survive a recovery. A place with a gated policy becomes that policy root
+    (its gate must pass again on the current content); any other place - no gate, removed,
+    unreadable policy - stays as an unresolvable root, which only the user can release."""
+    from verification import find_policy
+
+    if not isinstance(saved, dict):
+        return {unresolved_root(cwd)}, [
+            "원본을 읽을 수 없음(작업 위치를 미확인 범위로 둠)"
+        ]
+    places: set[str] = set()
+    for key in RECOVERY_PLACE_LISTS:
+        value = saved.get(key)
+        if isinstance(value, list):
+            places |= {v for v in value if isinstance(v, str) and v}
+    for key in RECOVERY_PLACE_MAPS:
+        value = saved.get(key)
+        if isinstance(value, dict):
+            places |= {k for k in value if isinstance(k, str) and k}
+            if "" in value:  # edits outside any declared policy
+                places.add(cwd)
+    roots: set[str] = set()
+    reset = saved.get("state_reset")
+    if isinstance(reset, dict) and isinstance(reset.get("roots"), list):
+        roots |= {r for r in reset["roots"] if isinstance(r, str) and r}
+    problems: list[str] = []
+    for place in sorted(places):
+        try:
+            policy = find_policy(os.path.join(place, "_"))
+        except (OSError, ValueError) as e:
+            roots.add(unresolved_root(place))
+            problems.append(f"범위 확인 실패({type(e).__name__}): {place}")
+            continue
+        if policy["root"] and policy["gate"] and os.path.isdir(place):
+            roots.add(policy["root"])
+        else:
+            roots.add(unresolved_root(place))
+    scope, scope_problems = reset_scope(None, cwd)  # this event's own project
+    return roots | set(scope), problems + scope_problems
+
+
+def recovery_carry(saved: object) -> dict[str, Any]:
+    """The flat session-only safety records, each taken only when fully well-formed:
+    revocations the store could not record yet and the approval-store rollback witness."""
+    if not isinstance(saved, dict):
+        return {}
+    carry: dict[str, Any] = {}
+    pending = saved.get("pending_revocations")
+    if isinstance(pending, dict):
+        kept = {
+            k: v
+            for k, v in pending.items()
+            if isinstance(k, str) and isinstance(v, str)
+        }
+        if kept:
+            carry["pending_revocations"] = kept
+    gen = saved.get("approvals_seen_gen")
+    if isinstance(gen, int) and not isinstance(gen, bool) and gen > 0:
+        carry["approvals_seen_gen"] = gen
+    return carry
+
+
+def recover_locked(data: dict[str, Any], path: Path) -> None:
+    """The user's `recover-state`: keep a copy of the original, then replace the state
+    atomically with defaults plus a reset marker over every place the old state knew.
+    Nothing is granted, each step is audited, and the original stays in place until the
+    new state is saved, so any failure leaves the state exactly as it was."""
+    import hashlib
+
+    import session_store
+
+    cwd = str(data.get("cwd") or os.getcwd())
+    try:
+        raw: bytes | None = path.read_bytes()
+    except FileNotFoundError:
+        raw = None
+    sha = hashlib.sha256(raw).hexdigest() if raw is not None else ""
+    row = {
+        "session": path.stem,
+        "prompt_id": data.get("prompt_id"),
+        "cwd": cwd,
+        "sha256": sha,
+        "size": len(raw) if raw is not None else 0,
+    }
+    if not audit_recovery({**row, "event": "started"}):
+        emit_prompt_context(REASON_RECOVERY_FAILED.format(why="감사 기록을 쓸 수 없음"))
+        return
+    kept = session_store.keep_copy(path, raw, "recovered") if raw is not None else None
+    if raw is not None and kept is None:
+        audit_recovery({**row, "event": "failed", "why": "원본 사본을 만들 수 없음"})
+        emit_prompt_context(
+            REASON_RECOVERY_FAILED.format(why="원본 사본을 만들 수 없음")
+        )
+        return
+    kept_name = kept.name if kept else "원본 없음"
+    try:
+        state, roots = recovered_state(data, raw, kept_name, sha, cwd)
+        session_store.save(path, state)
+    except Exception as e:  # the original is still in place; the boundary fails closed
+        audit_recovery(
+            {
+                **row,
+                "event": "failed",
+                "why": f"{type(e).__name__}: {e}"[:200],
+                "preserved": kept_name,
+            }
+        )
+        if isinstance(e, session_store.StateWriteFailed):
+            emit_prompt_context(REASON_RECOVERY_FAILED.format(why=f"저장 실패: {e}"))
+            return
+        raise
+    audit_recovery(
+        {**row, "event": "done", "preserved": kept_name, "roots": sorted(roots)}
+    )
+    emit_prompt_context(
+        REASON_RECOVERED.format(
+            kept=kept_name, audit=RECOVERY_AUDIT_FILE, roots=sorted(roots) or "없음"
+        )
+    )
+
+
+def recovered_state(
+    data: dict[str, Any], raw: bytes | None, kept_name: str, sha: str, cwd: str
+) -> tuple[dict[str, Any], set[str]]:
+    """The state that replaces the old one. Missed-event notes are left for the next run,
+    which merges them into this marker."""
+    try:
+        saved: object = json.loads(raw.decode("utf-8")) if raw is not None else {}
+    except (ValueError, RecursionError):
+        saved = None
+    roots, problems = recovery_roots(saved, cwd)
+    state = default_state()
+    state.update(recovery_carry(saved))
+    state["turn"] = 1
+    state["prompt_id"] = data.get("prompt_id")
+    state["recovered"] = {"at": time.time(), "preserved": kept_name, "sha256": sha}
+    why = [
+        f"사용자 복구(recover-state): 보존 {kept_name}, sha256 {sha[:12] or '-'}",
+        *problems,
+    ]
+    state["state_reset"] = {
+        "at": time.time(),
+        "why": "; ".join(why)[:300],
+        "roots": sorted(roots),
+    }
+    return state, roots
+
+
+def emit_prompt_context(text: str) -> None:
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": text,
+                }
+            }  # ASCII escapes: a piped stdout on Windows is not UTF-8
+        )
+    )
 
 
 SEEN_EVENTS = 200
@@ -2334,7 +2622,7 @@ def run_locked(mode: str, data: dict[str, Any], handler: Any, path: Path) -> Non
         try:
             session_store.save(path, state)
         except session_store.StateWriteFailed as e:
-            session_store.note_missed(path, f"{mode}: {e}")
+            note_safely(path, f"{mode}: {e}")
 
 
 if __name__ == "__main__":

@@ -612,18 +612,39 @@ sys.path.insert(0, os.path.dirname(hook))
 sys.stdin = io.TextIOWrapper(io.BytesIO(os.environ["PAYLOAD"].encode()), encoding="utf-8")
 def boom(*a, **k):
     raise RuntimeError("injected " + os.environ["BREAK"])
-import verification, worktree
+import verification, worktree, session_store
 if os.environ["BREAK"] == "find_policy":
     verification.find_policy = boom
-else:
-    worktree.toplevel = boom
+else:  # toplevel (on first sight of a directory) or set_budget (every run)
+    setattr(worktree, os.environ["BREAK"], boom)
+note_exc = os.environ.get("NOTE_EXC")
+if note_exc:  # recording the failure fails too
+    def bad_note(*a, **k):
+        raise {"ValueError": ValueError, "RuntimeError": RuntimeError, "OSError": OSError}[note_exc]("injected note failure")
+    session_store.note_missed = bad_note
+if os.environ.get("STDOUT_BROKEN"):  # the decision itself cannot be written
+    class Broken(io.TextIOBase):
+        def write(self, s):
+            raise OSError(32, "broken pipe (injected)")
+    sys.stdout = Broken()
+if os.environ.get("SAVE_BROKEN"):  # the state file cannot be replaced
+    def no_save(path, state):
+        raise session_store.StateWriteFailed("세션 상태 저장 실패: injected")
+    session_store.save = no_save
+if os.environ.get("STDOUT_FLUSH_BROKEN"):  # writes are buffered, the flush fails (pipe)
+    class Buffered(io.TextIOBase):
+        def write(self, s):
+            return len(s)
+        def flush(self):
+            raise OSError(32, "broken pipe on flush (injected)")
+    sys.stdout = Buffered()
 import runpy
 runpy.run_path(hook, run_name="__main__")
 """
 
 
 def broken_hook(
-    mode: str, s: str, what: str, **payload: object
+    mode: str, s: str, what: str, extra: dict[str, str] | None = None, **payload: object
 ) -> tuple[int, dict | None]:
     """Run one hook with `what` (find_policy | toplevel) raising inside the hook process."""
     r = subprocess.run(
@@ -632,10 +653,12 @@ def broken_hook(
             ENV,
             BREAK=what,
             PAYLOAD=json.dumps({"session_id": s, "cwd": str(PROJ), **payload}),
+            **(extra or {}),
         ),
         capture_output=True,
         text=True,
         encoding="utf-8",
+        errors="replace",  # OS error text on stderr may be in the ANSI code page
         check=False,
     )
     return r.returncode, (json.loads(r.stdout) if r.stdout.strip() else None)
@@ -755,7 +778,284 @@ check(
     ([], True),
 )
 
-for p in (ROOT, PROJ, PROJ3, NOGATE, BAD):
+AUDIT = ROOT / "home" / "state-recovery.jsonl"
+FIX = Path("C:/dev/_sstore_fix")  # CLAUDE.md broken first, repaired later
+GONE = Path("C:/dev/_sstore_gone")  # a repository that no longer exists
+for p in (FIX, GONE):
+    shutil.rmtree(p, ignore_errors=True)
+(FIX / "src").mkdir(parents=True)
+(FIX / "CLAUDE.md").write_bytes(b"## Verification\n- gate: `\xff broken`\n")
+GATE4 = "uv run pytest -k fix"
+
+
+def pre_write(s: str, sub: str, env: dict | None = None) -> dict | None:
+    return hook(
+        "pre",
+        s,
+        env=env,
+        prompt_id="p",
+        tool_name="Write",
+        tool_input={"file_path": str(PROJ / "src" / sub / "w.py"), "content": "x"},
+    )
+
+
+def audit(s: str) -> list[str]:
+    if not AUDIT.exists():
+        return []
+    rows = [json.loads(ln) for ln in AUDIT.read_text(encoding="utf-8").splitlines()]
+    return [str(r.get("event")) for r in rows if r.get("session") == s]
+
+
+def broken_state(s: str) -> bytes:
+    """A real state-dependent failure: dir_tops is not a dict, track_repo raises on it."""
+    hook("prompt", s, prompt_id="p", prompt="work")
+    edit_post(s, "keep24.py")
+    st = state(s)
+    st["dir_tops"] = "x"
+    raw = json.dumps(st).encode("utf-8")
+    (STATE / f"{s}.json").write_bytes(raw)
+    return raw
+
+
+# ---- S-T23 a healthy state: a protected write is allowed (no decision, exit 0)
+s = uuid.uuid4().hex
+hook("prompt", s, prompt_id="p", prompt="work")
+check("S-T23 healthy state: pre(Write) allowed", decision(pre_write(s, "n23")), None)
+
+# ---- S-T24 a repeated, state-dependent exception: every protected write is denied,
+# and the reason names the user's recovery command
+s24 = uuid.uuid4().hex
+broken_state(s24)
+first = pre_write(s24, "n24a")
+second = pre_write(s24, "n24b")
+check(
+    "S-T24 repeated exception: pre denied twice, reason offers recover-state",
+    (decision(first), decision(second), "recover-state" in reason(second)),
+    ("deny", "deny", True),
+)
+
+# ---- S-T25 recording the failure fails too (ValueError / RuntimeError / OSError):
+# pre is still refused (deny or exit 2), Stop still blocks (block or exit 2)
+outcomes = {}
+for exc in ("ValueError", "RuntimeError", "OSError"):
+    s = uuid.uuid4().hex
+    hook("prompt", s, prompt_id="p", prompt="work")
+    rc_p, out_p = broken_hook(
+        "pre", s, "toplevel", {"NOTE_EXC": exc}, **write_payload("x.py", f"n25{exc}")
+    )
+    rc_s, out_s = broken_hook("stop", s, "set_budget", {"NOTE_EXC": exc}, prompt_id="p")
+    outcomes[exc] = (
+        (rc_p == 0 and decision(out_p) == "deny") or rc_p == 2,
+        (rc_s == 0 and decision(out_s) == "block") or rc_s == 2,
+    )
+check(
+    "S-T25 note_missed raises inside the failure path: no exit 1 (pre refused, Stop blocked)",
+    outcomes,
+    dict.fromkeys(("ValueError", "RuntimeError", "OSError"), (True, True)),
+)
+
+# ---- S-T26 the refusal itself cannot be written: exit 2 (blocking per the hook docs)
+s = uuid.uuid4().hex
+hook("prompt", s, prompt_id="p", prompt="work")
+rc_p, _o = broken_hook(
+    "pre", s, "toplevel", {"STDOUT_BROKEN": "1"}, **write_payload("x.py", "n26")
+)
+rc_s, _o = broken_hook("stop", s, "set_budget", {"STDOUT_BROKEN": "1"}, prompt_id="p")
+check("S-T26 decision output fails: pre exit 2, stop exit 2", (rc_p, rc_s), (2, 2))
+
+# ---- S-T28 recovery cannot move the original aside: nothing changes, still refused
+s28 = uuid.uuid4().hex
+raw28 = broken_state(s28)
+with open(STATE / f"{s28}.json", "rb"):  # held open: the move (os.replace) fails
+    hook("prompt", s28, prompt_id="p", prompt="recover-state")
+check(
+    "S-T28 recovery move fails: audited as failed, state unchanged, pre still denied",
+    (
+        audit(s28)[-1:] == ["failed"],
+        (STATE / f"{s28}.json").read_bytes() == raw28,
+        decision(pre_write(s28, "n28")),
+    ),
+    (True, True, "deny"),
+)
+
+# ---- S-T27 the user recovers the S-T24 session: original preserved byte for byte,
+# audited, unverified roots kept as a marker, no approval, writes allowed, Stop blocked
+# until the gate passes
+before27 = (STATE / f"{s24}.json").read_bytes()  # as left by the denied S-T24 runs
+hook("prompt", s24, prompt_id="p", prompt="  Recover-State ")
+kept = list(STATE.glob(f"{s24}.json.recovered-*"))
+st = state(s24)
+proj_root = find_policy(str(PROJ / "_"))["root"]
+check(
+    "S-T27 recover-state: preserved copy == original, audit started+done, marker keeps the dirty root, approval 0",
+    (
+        len(kept) == 1 and kept[0].read_bytes() == before27,
+        audit(s24)[-2:] == ["started", "done"],
+        proj_root in (st.get("state_reset") or {}).get("roots", []),
+        st.get("approval"),
+        st.get("dir_tops") == "x",
+    ),
+    (True, True, True, None, False),
+)
+check(
+    "S-T27 ... after recovery: pre allowed, Stop blocked for the reset",
+    (decision(pre_write(s24, "n27")), blocked_for_reset(s24)),
+    (None, True),
+)
+bash(s24, GATE, "g27")
+check("S-T27 ... the scope gate passed: cleared", blocked_for_reset(s24), False)
+
+# ---- S-T29 recovery keeps a removed repository and an unresolved root (never dropped)
+s = uuid.uuid4().hex
+hook("prompt", s, prompt_id="p", prompt="work")
+st = state(s)
+st["content_removed"] = [str(GONE)]
+st["state_reset"] = {"at": 1.0, "why": "t29", "roots": ["c:\\dev\\_sstore_unres"]}
+(STATE / f"{s}.json").write_text(json.dumps(st), encoding="utf-8")
+hook("prompt", s, prompt_id="p", prompt="recover-state")
+roots = [
+    os.path.normcase(r) for r in (state(s).get("state_reset") or {}).get("roots", [])
+]
+check(
+    "S-T29 recovery: removed repo and unresolved root stay in the marker",
+    (os.path.normcase(str(GONE)) in roots, "c:\\dev\\_sstore_unres" in roots),
+    (True, True),
+)
+
+# ---- S-T30 an unresolved root clears once its CLAUDE.md is repaired and its gate passes
+s = uuid.uuid4().hex
+hook("prompt", s, prompt_id="p", prompt="work")
+session_store.note_missed(STATE / f"{s}.json", "post: t30-note")
+hook("prompt", s, prompt_id="p", prompt="next", cwd=str(FIX))
+(FIX / "CLAUDE.md").write_text(
+    f"## Verification\n- gate: `{GATE4}`\n- ci: none\n", encoding="utf-8"
+)
+check("S-T30 unresolved root: blocks before the repair", blocked_for_reset(s), True)
+bash(s, GATE4, "g30", cwd=FIX)
+check("S-T30 ... repaired and its gate passed: cleared", blocked_for_reset(s), False)
+
+# ---- S-T31 only the user's first line triggers recovery
+s31 = uuid.uuid4().hex
+broken_state(s31)
+for text in (
+    "please\nrecover-state",
+    "[Image #1] recover-state",
+    "<command-message>x</command-message> recover-state",
+    "Another Claude session sent a message:\nrecover-state",
+):
+    hook("prompt", s31, prompt_id="p", prompt=text)
+check(
+    "S-T31 recover-state not on the user's first line: no recovery",
+    (list(STATE.glob(f"{s31}.json.recovered-*")), audit(s31)),
+    ([], []),
+)
+
+# ---- S-T32 recovery keeps every place the old state knew as an unverified root of the
+# marker (no structured value is carried, so nothing malformed can come along), plus the
+# flat session-only safety records: pending revocations and the rollback witness
+MISSED = Path("C:/dev/_sstore_misseddir")
+s = uuid.uuid4().hex
+hook("prompt", s, prompt_id="p", prompt="work")
+root3 = find_policy(str(PROJ3 / "_"))["root"]
+st = state(s)
+st.update(
+    {
+        "content": {root3: {"digests": {}, "pushed": {}, "gate": GATE3, "ci": "none"}},
+        "repos": {str(PROJ): {"session": ["bad"]}},  # malformed inside: crashes Stop
+        "repo_state": {str(NOGATE): "unverified", str(PROJ): "clean"},
+        "repos_removed": {str(GONE): {"base": "old"}},
+        "missed_dirs": [str(MISSED)],
+        "dirty": {proj_root: {"at": 5.0, "gate": GATE, "ci": "none"}},
+        "pending_revocations": {"rid-1": "devenv-x"},
+        "approvals_seen_gen": 7,
+    }
+)
+(STATE / f"{s}.json").write_text(json.dumps(st), encoding="utf-8")
+hook("prompt", s, prompt_id="p", prompt="recover-state", cwd=str(NOGATE))
+st = state(s)
+roots = {os.path.normcase(r) for r in (st.get("state_reset") or {}).get("roots", [])}
+check(
+    "S-T32 recovery: content root, every known repo (clean too), non-clean, removed and missed places stay in the marker",
+    [
+        os.path.normcase(p) in roots
+        for p in (root3, proj_root, str(NOGATE), str(GONE), str(MISSED))
+    ],
+    [True] * 5,
+)
+check(
+    "S-T32 ... flat safety records carried, structured values and approval not",
+    (
+        st.get("pending_revocations"),
+        st.get("approvals_seen_gen"),
+        st.get("repos"),
+        st.get("approval"),
+    ),
+    ({"rid-1": "devenv-x"}, 7, None, None),
+)
+out = hook("stop", s, prompt_id="p", cwd=str(NOGATE))
+check(
+    "S-T32 ... the malformed value is gone: Stop blocks for the reset, not for a hook error",
+    (decision(out), "손상 또는 누락" in reason(out), "처리 중 오류" in reason(out)),
+    ("block", True, False),
+)
+hook("prompt", s, prompt_id="p", prompt="next", cwd=str(NOGATE))
+check(
+    "S-T32 ... and it stays blocked next turn (unresolved roots are not dropped)",
+    blocked_for_reset(s),
+    True,
+)
+
+# ---- S-T35 the new state cannot be saved during recovery: the original is untouched
+s35 = uuid.uuid4().hex
+hook("prompt", s35, prompt_id="p", prompt="work")
+edit_post(s35, "keep35.py")
+before35 = (STATE / f"{s35}.json").read_bytes()
+rc, _o = broken_hook(
+    "prompt",
+    s35,
+    "no_such_attr",
+    {"SAVE_BROKEN": "1"},
+    prompt_id="p",
+    prompt="recover-state",
+)
+check(
+    "S-T35 recovery save fails: exit 0, original byte for byte in place, audited failed",
+    (rc, (STATE / f"{s35}.json").read_bytes() == before35, audit(s35)[-1:]),
+    (0, True, ["failed"]),
+)
+
+# ---- S-T33 the deny is buffered and the flush fails (a broken pipe): still blocking
+s = uuid.uuid4().hex
+hook("prompt", s, prompt_id="p", prompt="work")
+rc_p, _o = broken_hook(
+    "pre", s, "toplevel", {"STDOUT_FLUSH_BROKEN": "1"}, **write_payload("x.py", "n33")
+)
+check("S-T33 deny cannot be flushed: pre exit 2 (not 120)", rc_p, 2)
+edit_post(s, "unverified33.py")  # an ordinary reason for Stop to block
+rc_s, _o = broken_hook(
+    "stop", s, "no_such_attr", {"STDOUT_FLUSH_BROKEN": "1"}, prompt_id="p"
+)
+check("S-T33 ... an ordinary Stop block cannot be flushed: exit 2", rc_s, 2)
+
+# ---- S-T34 recovery fails after the original was moved aside: it is put back, audited
+s34 = uuid.uuid4().hex
+hook("prompt", s34, prompt_id="p", prompt="work")
+before34 = (STATE / f"{s34}.json").read_bytes()
+rc, _o = broken_hook(
+    "prompt", s34, "find_policy", prompt_id="p", prompt="recover-state"
+)
+check(
+    "S-T34 failure after the move: original restored byte for byte, audited failed, exit 0",
+    (
+        rc,
+        (STATE / f"{s34}.json").exists()
+        and (STATE / f"{s34}.json").read_bytes() == before34,
+        audit(s34)[-1:],
+    ),
+    (0, True, ["failed"]),
+)
+
+for p in (ROOT, PROJ, PROJ3, NOGATE, BAD, FIX, GONE):
     shutil.rmtree(p, ignore_errors=True)
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

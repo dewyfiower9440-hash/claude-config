@@ -120,14 +120,34 @@ def load(path: Path) -> dict[str, Any] | None:
         ) from e
 
 
-def preserve(path: Path) -> Path | None:
-    """Move a damaged state file aside for inspection; None if it could not be moved."""
+def preserve(path: Path, label: str = "corrupt") -> Path | None:
+    """Move a state file aside for inspection (`<name>.<label>-<ts>-<rand>`); None if it
+    could not be moved."""
     kept = path.with_name(
-        f"{path.name}.corrupt-{time.strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(3)}"
+        f"{path.name}.{label}-{time.strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(3)}"
     )
     try:
         os.replace(path, kept)
     except OSError:  # could not move it: report it in place
+        return None
+    return kept
+
+
+def keep_copy(path: Path, raw: bytes, label: str) -> Path | None:
+    """Write `raw` (the state file's bytes) next to it as `<name>.<label>-<ts>-<rand>`,
+    durably; the original is not touched. None if the copy could not be written."""
+    kept = path.with_name(
+        f"{path.name}.{label}-{time.strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(3)}"
+    )
+    try:
+        fd = os.open(kept, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, raw)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        log.warning("session_store.keep_copy_failed", exc_info=True)
         return None
     return kept
 
@@ -169,13 +189,12 @@ def note_missed(path: Path, why: str) -> None:
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
-            os.write(
-                fd, (json.dumps({"at": time.time(), "why": why}) + "\n").encode("utf-8")
-            )
+            line = json.dumps({"at": time.time(), "why": str(why)}) + "\n"
+            os.write(fd, line.encode("utf-8", errors="replace"))
         finally:
             os.close(fd)
         os.replace(tmp, path.with_name(f"{path.stem}.missed.{name}"))
-    except OSError:  # nothing more can be recorded; the caller already failed closed
+    except (OSError, ValueError):  # nothing more can be recorded; caller fails closed
         log.warning("session_store.note_missed_failed", exc_info=True)
 
 
