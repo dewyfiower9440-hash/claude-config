@@ -18,6 +18,35 @@ approved: 2026-11-11
 - **임시 조치**: quant-research의 stale 계획 3개(phase0-1, phase1-completion, step9)는 `status: blocked` + `blocked_reason`으로 표시합니다(done·cancelled 거짓 표시 금지). **CLAUDE.md, discipline, session_context, 테스트에서 blocked 호환성을 검증하기 전에는 커밋하지 않습니다.** 요구사항은 두 가지입니다. blocked 계획은 승인 권한을 부여하지 않아야 하고, 세션 복원 때는 미완료 항목으로 계속 표시되어야 합니다.
 - **이 임시 조치는 보안 결함을 해결하지 않습니다.** 승인 후보가 phase4 하나로 줄었을 뿐이고, 결함 자체는 아래 P0 근본 해결 목록으로 다룹니다.
 
+## 현황 재기준 (2026-11-13, 근거: P0-04b 3회 fix first 이후 근본 원인 분석)
+- 실제 진행 상태 (아래 체크박스 반영):
+  - P0-01~03: LOCALLY_VERIFIED / CI_PENDING (bc9a326, ceaed89, e4363f5)
+  - P0-04: v2 구현 완료, 휴면 상태 (e8091d6~4f40f56). 운영 미활성화
+  - P0-04b: D1(relay 집계 보존)·D2(TEMP 경로 분류) 구현 완료. D3는 fix first(F1~F3 미해결)이며 `devenv-p0` 브랜치 WIP 8b15d53에 보존
+  - 게이트 러너 병렬화: 3b276ca
+- **잘못된 요구사항 정정**
+  - D3 "어떤 경로로도 미검증 변경이 사라지지 않음"은 hook 경계 밖의 조건이라 달성할 수 없었다. 다음 내용으로 재정의한다.
+    - 기준선이 있는 저장소는 현재 내용의 증거 없이 VERIFIED가 되지 않는다.
+    - 사라진 저장소는 증명이 없으면 UNKNOWN으로 둔다.
+    - UNKNOWN은 명시적 사용자 확인으로만 해제한다.
+    - 셸 내부 쓰기 통제는 P0-07(최선 노력)과 OS 경계 몫이다.
+  - R1은 v2 활성화 없이는 안전하게 풀 수 없다. P0-04b에서 빼서 v2 활성화 이후로 옮긴다(순환 해소).
+  - 세션 상태 원자화는 승인된 어느 계획에도 없었다("P0-04 단계 5 누락"이라는 이전 보고는 오류). **신규 항목 S로 정의한다.**
+- **재정렬 순서**: S(`docs/plans/2026-11-13-devenv-p0-s.md`) → P0-04b 마감(D3a·D3b·D3c) → F4a(agent_id 소유권) → F4b(SubagentStart/Stop 등록) → v2 운영 활성화 → R1 → P0-05 → P0-06 → P0-07 → P0-08 → P0-09~13 → P0-14 → P1 → P3 → P2
+- **P4는 이 마스터플랜에 정의되어 있지 않다.** 범위는 사용자 정의가 필요하다.
+- 별도 승인이 필요한 항목:
+  - D3 계약을 반영한 P0-04b 개정
+  - D3c `ack-missing` 신규 기능
+  - F4b settings 변경
+  - v2 활성화
+  - R1 규칙 변경
+  - push/CI
+  - P0-06 CLAUDE.md 개정
+  - P0-08 ACL
+  - P0-11 메모리 이동
+  - P3 evaluator와 구독 사용량
+  - P4 정의
+
 ## P0 근본 해결 필수 목록 (임시 조치와 무관하게 전부 해결)
 1. 이전 task_id의 승인 재사용 → P0-03, P0-04
 2. 다른 프로젝트의 권한 상속 → P0-03(git_root 바인딩), P0-10
@@ -47,10 +76,10 @@ approved: 2026-11-11
 ## 단계
 
 ### P0 안전·세션 (단계 계획 `devenv-p0`에서 상세화)
-- [ ] 1. P0-01 기준선: 훅별 지연(p50/p95, 20회), 세션 A–G 주입 결과, 공격 코퍼스를 현재 코드에서 실행합니다(`tests/bench_hooks.py`). 설정 태그 `devenv-baseline-2026-11-11`은 만들기 전에 다시 확인합니다.
-- [ ] 2. P0-02 공식 기능 확인: SessionEnd 페이로드, resume·fork의 session_id와 source, `--add-dir` 전달 여부, auto-memory 키, Windows Bash sandbox, `cleanupPeriodDays`, PreToolUse additionalContext. 항목마다 "공식 / 커스텀 필요 / UNKNOWN"으로 판정하고 프로브 결과를 붙입니다.
+- [x] 1. P0-01 기준선: 훅별 지연(p50/p95, 20회), 세션 A–G 주입 결과, 공격 코퍼스를 현재 코드에서 실행합니다(`tests/bench_hooks.py`). 설정 태그 `devenv-baseline-2026-11-11`은 만들기 전에 다시 확인합니다.
+- [x] 2. P0-02 공식 기능 확인: SessionEnd 페이로드, resume·fork의 session_id와 source, `--add-dir` 전달 여부, auto-memory 키, Windows Bash sandbox, `cleanupPeriodDays`, PreToolUse additionalContext. 항목마다 "공식 / 커스텀 필요 / UNKNOWN"으로 판정하고 프로브 결과를 붙입니다.
 - [ ] 3. P0 단계 계획 작성 및 승인 (P0-03~P0-14)
-- [ ] 4. P0-03 `bind_task`: 재무장 수정. 재현 스크립트를 실패 테스트로 먼저 추가합니다.
+- [x] 4. P0-03 `bind_task`: 재무장 수정. 재현 스크립트를 실패 테스트로 먼저 추가합니다.
 - [ ] 5. P0-04 승인 수명: done·cancelled·**blocked**, 미체크 0개, 경로 변경 시 무효화합니다. 상태 목록을 `draft|in-progress|blocked|done`으로 확장합니다(CLAUDE.md §2, quant CLAUDE.md, `/plan`, scaffold 템플릿). `plan_hash`는 frontmatter를 제외하므로 blocked에서 in-progress로 되돌리면 옛 기록이 다시 유효해집니다. 그래서 blocked가 되면 해당 기록을 revoked에 넣습니다. `plan_path`와 `git_root`를 서명하고 revoked 목록을 둡니다. 만료는 마지막 사용 후 7일과 절대 30일을 함께 적용합니다.
 - [ ] 6. P0-05 `docs/plans` 예외를 승인 base 안으로 한정하고 경로 클래스를 도입합니다. data는 `## 데이터 변경 범위` 블록이 있어야 허용합니다.
 - [ ] 7. P0-06 무승인 수정 정책 = B(승인 없는 코드 수정 0건, 승인된 task 범위 안에서는 반복 자유). CLAUDE.md §2를 수정합니다(승인 필요).
