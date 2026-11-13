@@ -23,6 +23,7 @@ approved: 2026-11-11
   - P0-01~03: LOCALLY_VERIFIED / CI_PENDING (bc9a326, ceaed89, e4363f5)
   - P0-04: v2 구현 완료, 휴면 상태 (e8091d6~4f40f56). 운영 미활성화
   - P0-04b: D1(relay 집계 보존)·D2(TEMP 경로 분류) 구현 완료. D3는 fix first(F1~F3 미해결)이며 `devenv-p0` 브랜치 WIP 8b15d53에 보존
+  - P0-04b 마감(2026-11-13 갱신): D3a·D3b·D3c 구현, 리뷰 SHIP 뒤 low 지적 6건 반영(3bd0694와 그 다음 커밋). LOCALLY_VERIFIED / CI_PENDING, push 전. 남은 위험은 `docs/plans/2026-11-12-devenv-p0-04b.md`의 위험·진행 기록 참고
   - 게이트 러너 병렬화: 3b276ca
 - **잘못된 요구사항 정정**
   - D3 "어떤 경로로도 미검증 변경이 사라지지 않음"은 hook 경계 밖의 조건이라 달성할 수 없었다. 다음 내용으로 재정의한다.
