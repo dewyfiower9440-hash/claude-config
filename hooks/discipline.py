@@ -467,6 +467,7 @@ def shell_in_background(data: dict[str, Any]) -> bool:
 
 MAX_ACTOR = 80
 MAX_OWNERS = 8
+_ACTOR_NOISE = re.compile(r"[^A-Za-z0-9_.-]")
 
 
 def actor(data: dict[str, Any]) -> str:
@@ -479,8 +480,10 @@ def actor(data: dict[str, Any]) -> str:
     if not isinstance(agent, str):
         return "agent:?"
     kind = data.get("agent_type")
-    label = f"{kind if isinstance(kind, str) and kind else 'agent'}:{agent}"
-    return "".join(ch for ch in label if ch.isprintable())[:MAX_ACTOR]
+    # Plain name characters only: the label is shown inside block reasons, where anything
+    # else (spaces, prose, markup) could be read as part of the message.
+    kind = _ACTOR_NOISE.sub("", kind) if isinstance(kind, str) else ""
+    return f"{kind or 'agent'}:{_ACTOR_NOISE.sub('', agent) or '?'}"[:MAX_ACTOR]
 
 
 def event_label(mode: str, data: dict[str, Any]) -> str:
@@ -490,18 +493,23 @@ def event_label(mode: str, data: dict[str, Any]) -> str:
 
 
 def add_actors(seen: list[Any], names: object) -> None:
-    """Append the new labels among `names`, keeping the latest MAX_OWNERS."""
+    """Move the labels among `names` to the end of `seen` (most recent last), keeping the
+    latest MAX_OWNERS."""
     for who in names if isinstance(names, list | tuple) else ():
-        if isinstance(who, str) and who and who not in seen:
+        if isinstance(who, str) and who:
+            if who in seen:
+                seen.remove(who)
             seen.append(who)
     del seen[:-MAX_OWNERS]
 
 
 def note_owner(state: dict[str, Any], top: str, who: str) -> None:
-    """Remember that `who` acted on the repository at `top` (edited it, ran a shell in it)."""
+    """Remember that `who` acted on the repository at `top` (edited it, ran a shell in it).
+    A full table drops its oldest entries: the repository being acted on now is the one a
+    reason is most likely to name."""
     owners = state.setdefault("owners", {})
-    if top not in owners and len(owners) >= MAX_DIR_CACHE:
-        return
+    while top not in owners and len(owners) >= MAX_DIR_CACHE:
+        owners.pop(next(iter(owners)))
     seen = owners.get(top)
     if not isinstance(seen, list):
         seen = owners[top] = []
@@ -2693,7 +2701,9 @@ def ack_missing(data: dict[str, Any], state: dict[str, Any]) -> str | None:
         state.get("repo_state", {}).pop(t, None)
         forget_dir_tops(state, t)
     owners = state.get("owners")
-    if isinstance(owners, dict):
+    # Only with the repository's own records: releasing a marker root alone leaves a
+    # repository that may still be tracked, and its owners with it.
+    if isinstance(owners, dict) and (removed or kept):
         for t in [t for t in owners if same_place(t, target)]:
             owners.pop(t)
     if in_marker and isinstance(marker, dict):
