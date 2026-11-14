@@ -391,6 +391,42 @@ check(
     (True, True),
 )
 
+# ---- P0-08: the raw data and backup folders are closed to the editing tools in settings
+DENY = json.loads((HERE.parent / "settings.json").read_text(encoding="utf-8"))[
+    "permissions"
+]["deny"]
+check(
+    "P-T20 settings deny Edit under the data and backup folders",
+    [
+        r
+        for r in ("Edit(//c/dev/qr-data/**)", "Edit(//c/dev/qr-backup/**)")
+        if r in DENY
+    ],
+    ["Edit(//c/dev/qr-data/**)", "Edit(//c/dev/qr-backup/**)"],
+)
+check(
+    "P-T20 ... and the earlier deny rules are all still there",
+    [
+        r
+        for r in (
+            "mcp__github__delete_repository",
+            "Read(**/.env)",
+            "Read(**/.env.*.local)",
+            "Read(**/.env.local)",
+            "Read(//c/Migration_Secrets/**)",
+            "Read(~/.claude/.credentials.json)",
+            "Read(~/.ssh/**)",
+            "Read(**/*.pem)",
+            "Read(**/*.key)",
+            "Edit(**/.env)",
+            "Read(~/.claude/discipline/**)",
+            "Edit(~/.claude/discipline/**)",
+        )
+        if r not in DENY
+    ],
+    [],
+)
+
 rm_tree(ROOT)
 for _p in (HOME, WITNESS):
     shutil.rmtree(_p, ignore_errors=True)

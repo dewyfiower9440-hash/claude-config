@@ -141,7 +141,9 @@
       "Read(**/*.key)",
       "Edit(**/.env)",
       "Read(~/.claude/discipline/**)",
-      "Edit(~/.claude/discipline/**)"
+      "Edit(~/.claude/discipline/**)",
+      "Edit(//c/dev/qr-data/**)",
+      "Edit(//c/dev/qr-backup/**)"
     ],
     "ask": [
       "Bash(git push:*)",
