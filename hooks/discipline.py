@@ -199,6 +199,9 @@ def default_state() -> dict[str, Any]:
         "approval": None,
         # repository top -> who acted on it ("main" or "<agent_type>:<agent_id>"); labels only
         "owners": {},
+        # actor label -> {started, stopped, runs}: subagents seen starting (SubagentStart)
+        # and ending (SubagentStop); shown in reasons only
+        "agents": {},
     }
 
 
@@ -516,14 +519,86 @@ def note_owner(state: dict[str, Any], top: str, who: str) -> None:
     add_actors(seen, [who])
 
 
-def owner_note(names: object) -> str:
-    """Reason suffix naming who left a record; empty unless a subagent is among them."""
+def owner_note(names: object, agents: object = None) -> str:
+    """Reason suffix naming who left a record; empty unless a subagent is among them.
+    A subagent whose end was reported (`agents`, see on_agent_stop) is marked as ended."""
     labels = [
         n for n in (names if isinstance(names, list) else []) if isinstance(n, str)
     ]
     if not any(n != "main" for n in labels):
         return ""
-    return f" (이 기록을 남긴 주체: {', '.join(labels)})"
+    known = agents if isinstance(agents, dict) else {}
+    shown = [
+        f"{n}(종료됨)"
+        if isinstance(known.get(n), dict) and known[n].get("stopped")
+        else n
+        for n in labels
+    ]
+    return f" (이 기록을 남긴 주체: {', '.join(shown)})"
+
+
+MAX_AGENTS = 50
+AGENT_START_NOTE = (
+    "[discipline] This subagent's tool calls are recorded in the main session's "
+    "verification tracking. Create scratch repositories and temporary files under %TEMP% "
+    "only. Do not delete or move a repository that existed before you started."
+)
+
+
+def agent_key(data: dict[str, Any]) -> str | None:
+    """The actor label of a lifecycle event, or None when it names no usable agent. An id the
+    label cannot carry exactly (characters dropped, or cut at the length limit) is not
+    tracked: two such agents would share one label, and the end of one would show the other
+    as ended."""
+    agent = data.get("agent_id")
+    if not isinstance(agent, str) or not agent or _ACTOR_NOISE.search(agent):
+        return None
+    who = actor(data)
+    return who if len(who) < MAX_ACTOR else None
+
+
+def on_agent_start(data: dict[str, Any], state: dict[str, Any]) -> None:
+    """SubagentStart (spawned or resumed): remember it as running and tell it the tracking
+    rules. Recorded for the reasons only; no decision reads it."""
+    who = agent_key(data)
+    if who is None:
+        return
+    agents = state.setdefault("agents", {})
+    entry = agents.get(who)
+    if not isinstance(entry, dict):
+        entry = {"runs": 0}
+    runs = entry.get("runs")
+    agents.pop(who, None)
+    while len(agents) >= MAX_AGENTS:
+        ended = [
+            k for k, v in agents.items() if isinstance(v, dict) and v.get("stopped")
+        ]
+        agents.pop(ended[0] if ended else next(iter(agents)))
+    agents[who] = {
+        "started": time.time(),
+        "stopped": None,
+        "runs": (runs if isinstance(runs, int) else 0) + 1,
+    }
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "SubagentStart",
+                    "additionalContext": AGENT_START_NOTE,
+                }
+            }
+        )
+    )
+
+
+def on_agent_stop(data: dict[str, Any], state: dict[str, Any]) -> None:
+    """SubagentStop: note the end of a subagent that was seen starting. Never prints: an
+    output here could keep the subagent running. Agents never seen starting (internal ones)
+    are ignored."""
+    who = agent_key(data)
+    entry = state.get("agents", {}).get(who) if who else None
+    if isinstance(entry, dict):
+        entry["stopped"] = time.time()
 
 
 def note_shell_touch(
@@ -1640,11 +1715,32 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
 # evidence is bound to the content hash it was produced on.
 MAX_DIR_CACHE = 200
 MAX_PRE_CHECKS = 20
-GIT_BUDGET_S = {"pre": 20.0, "prompt": 20.0, "post": 45.0, "fail": 45.0, "stop": 45.0}
+GIT_BUDGET_S = {
+    "pre": 20.0,
+    "prompt": 20.0,
+    "post": 45.0,
+    "fail": 45.0,
+    "stop": 45.0,
+    "agent-start": 20.0,
+    "agent-stop": 20.0,
+}
 # Mirrors the discipline hook timeouts in settings.json (a test fails when they drift). The
 # lock wait and the git budget both come out of this one deadline, so the hook decides
 # (closed) before Claude Code kills it.
-HOOK_TIMEOUT_S = {"pre": 30.0, "prompt": 30.0, "post": 60.0, "fail": 60.0, "stop": 60.0}
+HOOK_TIMEOUT_S = {
+    "pre": 30.0,
+    "prompt": 30.0,
+    "post": 60.0,
+    "fail": 60.0,
+    "stop": 60.0,
+    "agent-start": 30.0,
+    "agent-stop": 30.0,
+}
+# Subagent lifecycle events carry nothing to verify: one that cannot take the session lock
+# is dropped, not remembered as a missed event (that would mark the session unverified).
+# One that fails after the lock is handled like any other event: it may already have taken
+# other events' missed notes, which must not be lost.
+LIFECYCLE_MODES = ("agent-start", "agent-stop")
 HOOK_MARGIN_S = 5.0  # initial prior: interpreter start, handler work, save
 
 
@@ -2168,7 +2264,7 @@ def _first_stop_problem(state: dict[str, Any]) -> tuple[str, str | None] | None:
         key = f"content-removed|{top}|{state.get('turn')}"
         if _not_yet_notified(state, key):
             return REASON_REMOVED.format(top=top) + owner_note(
-                (state.get("owners") or {}).get(top)
+                (state.get("owners") or {}).get(top), state.get("agents")
             ), key
     for top in state.get("content_late", []):
         key = f"content-late|{top}"
@@ -2191,7 +2287,9 @@ def _first_stop_problem(state: dict[str, Any]) -> tuple[str, str | None] | None:
         ev = state.get("evidence", {}).get(root) or {}
         ev_at = float(ev.get("at", 0))
         if ev_at < edited_at:
-            return REASON_UNVERIFIED + where + owner_note(entry.get("by")), None
+            return REASON_UNVERIFIED + where + owner_note(
+                entry.get("by"), state.get("agents")
+            ), None
         outcome = ev.get("outcome")
         if outcome == "partial":
             return REASON_GATE_NOT_RUN.format(root=root, gate=entry.get("gate")), None
@@ -2253,7 +2351,9 @@ def _content_decision(
 ) -> tuple[str, str | None] | None:
     """A project whose file contents changed this session: evidence must match the current content."""
     where = f" (프로젝트: {root})" if root else ""
-    edited_by = owner_note((state.get("dirty", {}).get(root) or {}).get("by"))
+    edited_by = owner_note(
+        (state.get("dirty", {}).get(root) or {}).get("by"), state.get("agents")
+    )
     ev = state.get("evidence", {}).get(root) or {}
     outcome = ev.get("outcome")
     digests: dict[str, str] = c.get("digests", {})
@@ -2444,6 +2544,8 @@ def main() -> None:
         "fail": on_fail,
         "prompt": on_prompt,
         "stop": on_stop,
+        "agent-start": on_agent_start,
+        "agent-stop": on_agent_stop,
     }.get(mode)
     if handler is None:
         sys.exit(0)
@@ -2474,6 +2576,10 @@ def run_hook(mode: str, data: dict[str, Any], handler: Any, path: Path) -> None:
             else:
                 run_locked(mode, data, handler, path)
     except session_store.StateBusy as e:
+        if mode in LIFECYCLE_MODES:
+            # No message text: it is not ASCII, and stderr here is not UTF-8.
+            log.warning("discipline.lifecycle_event_dropped mode=%s", mode)
+            return
         # Nothing can be recorded: refuse what needs the state, remember that it was missed.
         note_safely(path, f"{event_label(mode, data)}: {e}")
         fail_closed(mode, data, REASON_STATE_BUSY.format(why=e))

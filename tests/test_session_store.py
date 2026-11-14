@@ -7,6 +7,7 @@ contention, duplicate events. Isolated TMPDIR / approval home; nothing real is t
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -581,6 +582,110 @@ check(
     (True, True),
 )
 
+# ---- G-T9 a lifecycle event that cannot take the lock: dropped, the session is not marked
+s = uuid.uuid4().hex
+hook("prompt", s, prompt_id="p", prompt="work")
+fd = hold_lock(s)
+gt9_outs = [
+    hook(mode, s, env=short, agent_id="a7", agent_type="code-reviewer")
+    for mode in ("agent-start", "agent-stop")
+]
+release_lock(fd)
+hook("prompt", s, prompt_id="p", prompt="next")
+check(
+    "G-T9 missed lifecycle events: no output, no marker (they carry nothing to verify)",
+    (gt9_outs, blocked_for_reset(s)),
+    ([None, None], False),
+)
+
+# ---- G-T11 a lifecycle event that fails after taking the missed notes: they are noted again,
+# so the next event widens the marker to every known root (as for any other event)
+gt11 = STATE / f"{uuid.uuid4().hex}.json"
+gt11.write_text(json.dumps({"touched_tops": [str(PROJ)]}), encoding="utf-8")
+session_store.note_missed(gt11, "an earlier missed event")
+gt11_data = {
+    "session_id": gt11.stem,
+    "cwd": str(NOGATE),
+    "agent_id": "a7",
+    "agent_type": "code-reviewer",
+}
+
+
+def _scope_fails(saved: object, cwd: str) -> tuple[list[str], list[str]]:
+    raise RuntimeError("scope failure")
+
+
+_real_scope = discipline.reset_scope
+discipline.reset_scope = _scope_fails
+logging.disable(logging.CRITICAL)  # the injected failure's traceback is not test output
+try:
+    discipline.run_hook("agent-stop", gt11_data, discipline.on_agent_stop, gt11)
+finally:
+    logging.disable(logging.NOTSET)
+    discipline.reset_scope = _real_scope
+discipline.run_hook("agent-stop", gt11_data, discipline.on_agent_stop, gt11)
+check(
+    "G-T11 lifecycle event failing mid-way: the marker still reaches the known gated root",
+    os.path.normcase(str(PROJ))
+    in {
+        os.path.normcase(str(r))
+        for r in json.loads(gt11.read_text(encoding="utf-8"))
+        .get("state_reset", {})
+        .get("roots", [])
+    },
+    True,
+)
+
+# ---- G-T12 agent-stop on an unreadable state: as any event (exit 0, preserved, marker), silent
+s = uuid.uuid4().hex
+hook("prompt", s, prompt_id="p", prompt="work")
+(STATE / f"{s}.json").write_text("{not json", encoding="utf-8")
+gt12_out = hook("agent-stop", s, agent_id="a7", agent_type="code-reviewer")
+check(
+    "G-T12 agent-stop on a damaged state: no output, preserved, marker",
+    (
+        gt12_out,
+        len(list(STATE.glob(f"{s}.json.corrupt-*"))),
+        "손상" in str(state(s).get("state_reset", {}).get("why")),
+    ),
+    (None, 1, True),
+)
+
+# ---- G-T13 the unverified-edit reason marks a subagent whose end was reported
+s = uuid.uuid4().hex
+gt13_who = {"agent_id": "a7", "agent_type": "code-reviewer"}
+hook("prompt", s, prompt_id="p", prompt="work")
+hook("agent-start", s, **gt13_who)
+hook(
+    "post",
+    s,
+    prompt_id="p",
+    tool_name="Write",
+    tool_input={"file_path": str(PROJ / "src" / "g13.py"), "content": "x\n"},
+    **gt13_who,
+)
+hook("agent-stop", s, **gt13_who)
+gt13_out = hook("stop", s, prompt_id="p")
+check(
+    "G-T13 unverified edit by an ended subagent: blocks, the reason says it ended",
+    (decision(gt13_out), "code-reviewer:a7(종료됨)" in reason(gt13_out)),
+    ("block", True),
+)
+
+# ---- G-T14 an agent id that the label cannot carry exactly is not tracked: two such ids
+# would share one label, and one's end would mark the other as ended
+s = uuid.uuid4().hex
+hook("prompt", s, prompt_id="p", prompt="work")
+gt14_outs = [
+    hook("agent-start", s, agent_id=odd, agent_type="w")
+    for odd in ("한글", "a b", "x" * 100)
+]
+check(
+    "G-T14 agent ids changed by the label rules: not recorded, no start note",
+    (gt14_outs, state(s).get("agents", {})),
+    ([None, None, None], {}),
+)
+
 # ---- S-T16 well-formed JSON with wrong value types: no crash, preserved, marker
 shapes = {
     "seen_events": json.dumps({"seen_events": "x"}),
@@ -588,6 +693,7 @@ shapes = {
     "evidence": json.dumps({"evidence": []}),
     "background_tops": json.dumps({"background_tops": "C:/x"}),
     "owners": json.dumps({"owners": ["main"]}),
+    "agents": json.dumps({"agents": ["x"]}),
 }
 result = {}
 for label, text in shapes.items():

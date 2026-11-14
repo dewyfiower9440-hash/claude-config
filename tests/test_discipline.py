@@ -2234,13 +2234,21 @@ def ft10_stop(session: str, pid: str, cwd: Path) -> object:
     return decision(out)
 
 
-def ft10_decisions(tag: str, **who: object) -> list[object]:
-    """One scenario per rule; the decisions must not depend on who acted."""
+def ft10_decisions(tag: str, lifecycle: bool = False, **who: object) -> list[object]:
+    """One scenario per rule; the decisions must not depend on who acted, nor on the
+    subagent's start and stop being reported (`lifecycle`)."""
+
+    def life(mode: str, session: str, cwd: Path) -> None:
+        if lifecycle:
+            call(mode, session, cwd=str(cwd), **who)
+
     got: list[object] = []
     edited = d3_repo(f"ft10-{tag}-edit")
     session = uuid.uuid4().hex
     call("prompt", session, prompt_id="g1", prompt="work", cwd=str(edited))
+    life("agent-start", session, edited)
     agent_write(session, "g1", edited, "a.py", **who)
+    life("agent-stop", session, edited)
     got.append(ft10_stop(session, "g1", edited))
     call(
         "fail",
@@ -2253,16 +2261,21 @@ def ft10_decisions(tag: str, **who: object) -> list[object]:
         **who,
     )
     call("prompt", session, prompt_id="g2", prompt="next", cwd=str(edited))
+    life("agent-start", session, edited)
+    life("agent-stop", session, edited)
     got.append(ft10_stop(session, "g2", edited))
     gone = d3_repo(f"ft10-{tag}-gone")
     session = uuid.uuid4().hex
     call("prompt", session, prompt_id="g3", prompt="work", cwd=str(PB))
+    life("agent-start", session, PB)
     agent_shell(session, "g3", gone, **who)
     rm_tree(gone)
+    life("agent-stop", session, PB)
     got.append(ft10_stop(session, "g3", PB))
     many = d3_repo(f"ft10-{tag}-many")
     session = uuid.uuid4().hex
     call("prompt", session, prompt_id="g4", prompt="work", cwd=str(many))
+    life("agent-start", session, many)
     got += [agent_write(session, "g4", many, f"m{n}.py", **who) for n in range(7)]
     return got
 
@@ -2391,6 +2404,145 @@ check(
     "F-T17 ack-missing that releases only a marker root keeps that path's owner record",
     ("미확인" in told, reset_roots(s), owners_of(s, FT17)),
     (True, [], ["code-reviewer:a7"]),
+)
+
+
+# ---- F4b: SubagentStart/SubagentStop are recorded (and shown in reasons). They never decide
+# anything and never hold a subagent back.
+def agents_of(session: str) -> dict:
+    return state_file(session).get("agents", {})
+
+
+WORKER = {"agent_id": "b2", "agent_type": "general-purpose"}
+WORKER_KEY = "general-purpose:b2"
+ENDED = "종료됨"
+
+GT1 = d3_repo("gt1")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="k1", prompt="work", cwd=str(GT1))
+gt1_hook = (call("agent-start", s, cwd=str(GT1), **WORKER) or {}).get(
+    "hookSpecificOutput"
+) or {}
+gt1 = agents_of(s).get(WORKER_KEY) or {}
+check(
+    "G-T1 agent-start: the subagent is recorded as running and told the tracking rules",
+    (
+        gt1.get("runs"),
+        gt1.get("stopped"),
+        isinstance(gt1.get("started"), float),
+        gt1_hook.get("hookEventName"),
+        "TEMP" in str(gt1_hook.get("additionalContext")),
+    ),
+    (1, None, True, "SubagentStart", True),
+)
+agent_write(s, "k1", GT1, "a.py", **WORKER)
+gt2_out = call("agent-stop", s, cwd=str(GT1), stop_hook_active=False, **WORKER)
+check(
+    "G-T2 agent-stop after an unverified edit: no output (never held back), end recorded, "
+    "the main Stop still blocks",
+    (
+        gt2_out,
+        isinstance((agents_of(s).get(WORKER_KEY) or {}).get("stopped"), float),
+        decision(call("stop", s, prompt_id="k1", cwd=str(GT1))),
+    ),
+    (None, True, "block"),
+)
+gt3_before = agents_of(s)
+gt3_outs = [
+    call("agent-stop", s, cwd=str(GT1), agent_id="zz", agent_type=kind)
+    for kind in ("", "Explore")
+]
+check(
+    "G-T3 agent-stop of an agent never seen starting (internal agents): nothing changes",
+    (gt3_outs, agents_of(s) == gt3_before, list(gt3_before)),
+    ([None, None], True, [WORKER_KEY]),
+)
+call("agent-start", s, cwd=str(GT1), **WORKER)
+gt4 = agents_of(s).get(WORKER_KEY) or {}
+check(
+    "G-T4 agent-start again (resumed): running again, counted twice",
+    (gt4.get("runs"), gt4.get("stopped")),
+    (2, None),
+)
+
+s = uuid.uuid4().hex
+craft_state(
+    s,
+    agents={
+        f"w:n{n}": {
+            "started": float(n + 1),
+            "stopped": 90.0 if n == 5 else None,
+            "runs": 1,
+        }
+        for n in range(50)
+    },
+)
+call("agent-start", s, cwd=str(PB), agent_id="x1", agent_type="w")
+gt5_first = set(agents_of(s))
+call("agent-start", s, cwd=str(PB), agent_id="x2", agent_type="w")
+gt5 = set(agents_of(s))
+check(
+    "G-T5 a full agent table: an ended agent goes first, then the one started longest ago",
+    (
+        len(gt5_first),
+        "w:n5" in gt5_first,
+        "w:n0" in gt5_first,
+        len(gt5),
+        "w:n0" in gt5,
+        {"w:x1", "w:x2"} <= gt5,
+    ),
+    (50, False, True, 50, False, True),
+)
+
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="k6", prompt="work", cwd=str(PB))
+gt6_outs = [
+    call(mode, s, cwd=str(PB), **who)
+    for mode in ("agent-start", "agent-stop")
+    for who in ({}, {"agent_id": 7}, {"agent_id": {"a": 1}}, {"agent_id": ""})
+]
+check(
+    "G-T6 lifecycle events without a usable agent id: no failure, nothing recorded",
+    (gt6_outs, agents_of(s)),
+    ([None] * 8, {}),
+)
+
+GT7 = d3_repo("gt7")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="k7", prompt="review", cwd=str(PB))
+call("agent-start", s, cwd=str(PB), **REVIEWER)
+agent_shell(s, "k7", GT7, **REVIEWER)
+rm_tree(GT7)
+gt7_running = d3_stop(s, "k7", PB)
+call("agent-stop", s, cwd=str(PB), **REVIEWER)
+call("prompt", s, prompt_id="k8", prompt="next", cwd=str(PB))
+gt7_ended = d3_stop(s, "k8", PB)
+check(
+    "G-T7 a missing repository's subagent: named while running, marked ended after its stop",
+    (
+        GONE in gt7_running,
+        "code-reviewer:a7" in gt7_running,
+        ENDED in gt7_running,
+        GONE in gt7_ended,
+        f"code-reviewer:a7({ENDED})" in gt7_ended,
+    ),
+    (True, True, False, True, True),
+)
+check(
+    "G-T8 the same scenarios with and without lifecycle events: identical decisions",
+    ft10_decisions("life", lifecycle=True, **REVIEWER) == ft10_main,
+    True,
+)
+
+s = uuid.uuid4().hex
+craft_state(s, agents={"code-reviewer:a7": "oops", "w:n1": ["x"]})
+gt10_stop = call("agent-stop", s, cwd=str(PB), agent_id="n1", agent_type="w")
+call("agent-start", s, cwd=str(PB), **REVIEWER)
+gt10 = agents_of(s).get("code-reviewer:a7")
+check(
+    "G-T10 a malformed agent record: no failure, rebuilt by the next start",
+    (gt10_stop, gt10.get("runs") if isinstance(gt10, dict) else gt10),
+    (None, 1),
 )
 
 # ---- P0-04b review: git failures and caches must not make a %TEMP% repository look like scratch

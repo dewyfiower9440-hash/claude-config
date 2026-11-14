@@ -128,6 +128,8 @@ try:
         "Stop": ["notify.py stop", "discipline.py stop"],
         "Notification": ["notify.py attn"],
         "PostToolUseFailure": ["discipline.py fail"],
+        "SubagentStart": ["discipline.py agent-start"],
+        "SubagentStop": ["discipline.py agent-stop"],
         "SessionStart": ["session_context.py", "Test-Path"],
     }
     all_cmds = [h["command"] for g in hooks.values() for x in g for h in x["hooks"]]
