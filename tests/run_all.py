@@ -24,7 +24,12 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_WORKERS = (
     3  # initial prior (16 GB RAM, resident collectors); re-tune from timings
 )
-SLOW_FIRST = ["test_approvals", "test_discipline", "test_guard_corpus"]
+SLOW_FIRST = [
+    "test_approvals",
+    "test_discipline",
+    "test_discipline_d3",
+    "test_guard_corpus",
+]
 TESTS = [
     "test_shellparse",
     "test_verification",
@@ -35,6 +40,7 @@ TESTS = [
     "test_approvals_store",
     "test_guard",
     "test_discipline",
+    "test_discipline_d3",
     "test_session_store",
     "test_session_context",
     "test_format_lint",
@@ -64,7 +70,13 @@ def report(name: str, code: int, output: str, seconds: float) -> bool:
         flush=True,
     )
     if code != 0 or name in ALWAYS_SHOW:
-        print(output[-3000:])
+        tail = output[-3000:]
+        if code != 0:
+            # The failing checks themselves, wherever they are: the tail alone can miss them.
+            early = output[: len(output) - len(tail)]
+            for line in [ln for ln in early.splitlines() if ln.startswith("FAIL")][:20]:
+                print(line[:1000])
+        print(tail)
     return code == 0
 
 
