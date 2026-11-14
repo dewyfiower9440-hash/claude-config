@@ -241,6 +241,10 @@ def default_state() -> dict[str, Any]:
         # actor label -> {started, stopped, runs}: subagents seen starting (SubagentStart)
         # and ending (SubagentStop); shown in reasons only
         "agents": {},
+        # repositories already described to this session; seeded (1) by its first user
+        # prompt, which records where the session is without announcing it
+        "context_roots": [],
+        "context_seeded": 0,
     }
 
 
@@ -1944,6 +1948,65 @@ def v2_keep_on_relay(
     return None, f"중계 뒤 승인을 유지하지 못함: {why}"
 
 
+MAX_CONTEXT_ROOTS = 20
+SWITCH_NOTICE_CHARS = 1500
+SWITCH_NOTE_CHARS = 240
+
+
+def switch_notice(
+    root: str, main_path: str | None, notes: list[str], plans_read: bool = True
+) -> str:
+    """What a session is told when its working directory moves into a repository it has
+    not seen (P0-10): where it is now, that earlier approvals do not apply there, and that
+    project's open plans. Information only; no decision reads it."""
+    lines = [
+        f"[discipline] 작업 폴더가 이 세션에서 처음 보는 저장소로 바뀌었습니다: `{root}`",
+        (
+            "이전 프로젝트에서 받은 계획 승인은 이 저장소에 적용되지 않습니다. 이 저장소의 계획을 "
+            "이어가려면 사용자가 프롬프트 첫 줄에 task:<id>를 적거나, 새 계획을 승인받아야 합니다."
+        ),
+    ]
+    if main_path:
+        lines.append(f"진행 중인 계획: `{main_path}` (계속하기 전에 다시 읽으세요)")
+    elif plans_read and not notes:
+        lines.append("이 저장소의 docs/plans에는 진행 중이거나 막힌 계획이 없습니다.")
+    lines += [n[:SWITCH_NOTE_CHARS] for n in notes]
+    return "\n".join(lines)[:SWITCH_NOTICE_CHARS].rstrip()
+
+
+def new_context_root(state: dict[str, Any], top: str | None) -> bool:
+    """True when the repository `top` must be announced now. The first user prompt of a
+    session only records where it is (SessionStart already described that place); after
+    that, each repository is announced the first time a prompt arrives in it."""
+    seen = state.setdefault("context_roots", [])
+    if not state.get("context_seeded"):
+        state["context_seeded"] = 1
+        if top and top not in seen:
+            seen.append(top)
+        return False
+    if not top or top in seen:
+        return False
+    seen.append(top)
+    del seen[:-MAX_CONTEXT_ROOTS]
+    return True
+
+
+def project_switch_context(top: str) -> str:
+    """The notice for `top`, with its plans as the SessionStart hook would summarise them.
+    A failure to read them shortens the notice; it never stops the prompt."""
+    try:
+        import session_context
+
+        main, summaries = session_context.read_plans(Path(top))
+        main_path = main.path if main else None
+        return switch_notice(
+            top, main_path, session_context.plan_notes(summaries, main_path)
+        )
+    except Exception:  # hook boundary: the notice is information, not a gate
+        log.exception("discipline.switch_context_failed")
+        return switch_notice(top, None, [], plans_read=False)
+
+
 def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
     state["turn"] = int(state.get("turn", 0)) + 1
     prompt = data.get("prompt")
@@ -1985,9 +2048,15 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
         # stale approval does not carry over to it.
         state["approval"]["prompt_id"] = data.get("prompt_id")
     told = ack_missing(data, state)  # the user's `ack-missing <path>`, if this is one
-    if told:
-        emit_prompt_context(told)
-    track_repo(state, str(data.get("cwd") or os.getcwd()))
+    try:
+        top = track_repo(state, str(data.get("cwd") or os.getcwd()))
+        if not relay and new_context_root(state, top) and top:
+            told = "\n\n".join(x for x in (told, project_switch_context(top)) if x)
+    finally:
+        # One JSON object per hook run; an ack-missing answer already recorded in the
+        # state is delivered even if tracking the repository fails.
+        if told:
+            emit_prompt_context(told)
     if not relay:
         refresh_turn_baselines(state)
 
