@@ -976,9 +976,14 @@ def state_file(session: str) -> dict:
 check(
     "R17 the deleted repository's baseline is kept, not dropped (it may come back)",
     any(
-        os.path.normcase(str(WT_D)) == os.path.normcase(k)
+        # realpath on both sides: %TEMP% may be an 8.3 short path (RUNNER~1 on CI) while the
+        # hook records the long form git reports
+        os.path.normcase(os.path.realpath(WT_D))
+        == os.path.normcase(os.path.realpath(k))
         for k in state_file(s).get("repos_removed", {})
-    ),
+    )
+    # on a mismatch, show what was recorded instead of a bare False
+    or (str(WT_D), sorted(state_file(s).get("repos_removed", {}))),
     True,
 )
 
