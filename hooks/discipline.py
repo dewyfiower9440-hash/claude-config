@@ -49,6 +49,36 @@ def temp_root() -> Path:
 
 
 MAX_FILES_WITHOUT_PLAN = int(os.environ.get("CLAUDE_MAX_FILES_WITHOUT_PLAN", "5"))
+
+
+def authz_mode(raw: object) -> str:
+    """ "enforce" only when asked for exactly; anything else is the observing "warn"."""
+    return (
+        "enforce"
+        if isinstance(raw, str) and raw.strip().lower() == "enforce"
+        else "warn"
+    )
+
+
+# P0-06: under "enforce" no file outside an approved plan's scope may be edited (not even
+# one). "warn", the default while the rule is being observed, keeps the five-file allowance
+# and records every edit that enforce would have denied.
+AUTHZ_MODE = authz_mode(os.environ.get("CLAUDE_AUTHZ_MODE"))
+
+
+def authz_verdict(
+    covered: bool, counted_before: bool, counted: int, limit: int, mode: str
+) -> str:
+    """ "allow", "deny" or "would_deny" (allowed now, denied once enforced) for one edit.
+    `covered`: inside an approved scope. `counted_before`: the file already counts toward
+    this turn's allowance. `counted`: files outside the scope edited this turn so far."""
+    if covered:
+        return "allow"
+    if mode == "enforce":
+        return "deny"
+    return "deny" if not counted_before and counted >= limit else "would_deny"
+
+
 STATE_DIR = temp_root() / "claude-discipline"
 
 CODE_EXT = {
@@ -90,6 +120,15 @@ CLAUDE_OWN_PATH = re.compile(
 def absolute(path: str, cwd: str) -> str:
     """A tool path as the tool resolves it (relative to the session's cwd)."""
     return os.path.abspath(path if os.path.isabs(path) else os.path.join(cwd, path))
+
+
+def edit_target(tool_input: dict[str, Any]) -> str:
+    """The file an editing tool writes: `file_path`, or `notebook_path` (NotebookEdit)."""
+    for key in ("file_path", "notebook_path"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 def is_unc(path: str) -> bool:
@@ -660,8 +699,8 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
             pre[str(data["tool_use_id"])] = repo_snapshots(state, tops)
             for stale in list(pre)[:-MAX_PRE_CHECKS]:
                 pre.pop(stale, None)
-    elif ti.get("file_path") and not ignored_path(state, str(ti["file_path"]), cwd):
-        top = track_repo(state, absolute(str(ti["file_path"]), cwd))
+    elif edit_target(ti) and not ignored_path(state, edit_target(ti), cwd):
+        top = track_repo(state, absolute(edit_target(ti), cwd))
         if top and top not in state.setdefault("touched_tops", []):
             state["touched_tops"].append(top)  # may change it before the next Stop
         if top:
@@ -676,7 +715,7 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
             )
         return
 
-    path = ti.get("file_path", "")
+    path = edit_target(ti)
     if not path or ignored_path(state, path, cwd):
         return
     path = absolute(path, cwd)
@@ -696,11 +735,28 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
     # 1) Large change without an approved plan covering it.
     approval = active_approval(state, data.get("prompt_id"))
     counted = [f for f in state["turn_files"] if not in_approved_scope(approval, f)]
-    if (
-        path not in state["turn_files"]
-        and not in_approved_scope(approval, path)
-        and len(counted) >= MAX_FILES_WITHOUT_PLAN
-    ):
+    verdict = authz_verdict(
+        in_approved_scope(approval, path),
+        path in state["turn_files"],
+        len(counted),
+        MAX_FILES_WITHOUT_PLAN,
+        AUTHZ_MODE,
+    )
+    why = (
+        f"승인된 계획(task: {approval.get('task_id')})의 변경 범위 밖"
+        if approval
+        else "승인된 계획 없음"
+    )
+    if verdict == "would_deny":
+        observe_authz(
+            "out_of_scope" if approval else "no_approval",
+            path,
+            tool,
+            approval.get("base") if approval else None,
+        )
+    if verdict == "deny" and AUTHZ_MODE == "enforce":
+        emit_pre("deny", REASON_AUTHZ.format(why=why))
+    if verdict == "deny":
         scope_note = (
             f" 승인된 계획(task: {approval.get('task_id')})의 변경 범위 밖 파일입니다."
             if approval
@@ -729,8 +785,8 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
     tool = data.get("tool_name", "")
     ti = data.get("tool_input", {}) or {}
     now = time.time()
-    if tool in ("Edit", "Write", "MultiEdit"):
-        path = ti.get("file_path", "")
+    if tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+        path = edit_target(ti)
         cwd = str(data.get("cwd") or os.getcwd())
         if path and not ignored_path(state, path, cwd):
             path = absolute(path, cwd)
@@ -772,6 +828,42 @@ APPROVALS_HOME = Path(
 APPROVALS_FILE = APPROVALS_HOME / "approvals.json"
 KEY_FILE = APPROVALS_HOME / "key"
 RECOVERY_AUDIT_FILE = APPROVALS_HOME / "state-recovery.jsonl"
+AUTHZ_OBSERVE_FILE = APPROVALS_HOME / "authz-observe.jsonl"
+REASON_AUTHZ = (
+    "[discipline] 승인된 계획의 범위 안에 있지 않은 파일은 수정할 수 없습니다({why}). "
+    "/plan 으로 계획을 세우거나 갱신해 ExitPlanMode 로 사용자 승인을 받으세요. "
+    "이미 승인된 진행 중 계획을 이어가는 것이라면, 사용자가 프롬프트 첫 줄에 task:<id>를 적어야 재개됩니다."
+)
+
+
+def observe_authz(reason: str, path: str, tool: object, base: object = None) -> None:
+    """One line for an edit that enforce mode would have denied (hooks/authz_report.py
+    counts them). No path and no content: only what kind of file it was. Observation must
+    never stop the edit, so a failure is logged and nothing else happens."""
+    try:
+        if is_unc(path):  # never resolved: a stalled share must not time the hook out
+            kind = "data"
+        else:
+            real = os.path.realpath(path)
+            in_repo = may_be_repository(real)
+            if isinstance(base, str) and base:
+                kind = path_class(real, os.path.realpath(base), in_repo)
+            else:  # no approval: there is no approving repository to compare with
+                kind = "code" if in_repo else "data"
+        row = {
+            "at": time.time(),
+            "reason": reason,
+            "class": kind,
+            "ext": Path(path).suffix.lower()[:16],
+            "tool": tool if isinstance(tool, str) else "",
+        }
+        APPROVALS_HOME.mkdir(parents=True, exist_ok=True)
+        with open(AUTHZ_OBSERVE_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=True) + "\n")
+    except (OSError, ValueError, TypeError):
+        log.exception("discipline.authz_observe_failed")
+
+
 SIGNED_FIELDS = (
     "task_id",
     "plan_hash",
@@ -2468,11 +2560,10 @@ def _scope_decision(state: dict[str, Any]) -> tuple[str, str] | None:
             ), key
         return None
     key = f"bulk|{prompt_id}|{len(changes)}"
-    if len(changes) > MAX_FILES_WITHOUT_PLAN and _not_yet_notified(state, key):
+    limit = 0 if AUTHZ_MODE == "enforce" else MAX_FILES_WITHOUT_PLAN
+    if len(changes) > limit and _not_yet_notified(state, key):
         shown = ", ".join(Path(f).name for f in changes[:5])
-        return REASON_BULK.format(
-            n=len(changes), limit=MAX_FILES_WITHOUT_PLAN, files=shown
-        ), key
+        return REASON_BULK.format(n=len(changes), limit=limit, files=shown), key
     return None
 
 
