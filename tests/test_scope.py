@@ -42,9 +42,11 @@ sys.stdout.reconfigure(errors="backslashreplace")
 sys.path.insert(0, str(HOOKS))
 import approvals as ap
 
-import discipline as d
-
+# Kept apart from the import above: isort sorts `discipline` as first-party only where a
+# ~/.claude/discipline folder exists (not on CI), so a shared import block cannot satisfy
+# both places.
 fails = 0
+import discipline as d
 
 
 def check(name: str, got: object, want: object) -> None:
