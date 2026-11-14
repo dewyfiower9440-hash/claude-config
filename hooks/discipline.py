@@ -1667,6 +1667,56 @@ RELAY_NOTE = (
     f"{NOTE} 중계 메시지(subagent 결과·알림)로는 승인이 유지되지 않습니다 — "
     "작업을 이어가려면 사용자가 프롬프트 첫 줄에 task:<id>를 적어 재개해야 합니다"
 )
+AGENT_HANDBACK = re.compile(r'<agent-message from="([A-Za-z0-9_.-]+)">', re.ASCII)
+
+
+def relay_agent_id(prompt: str) -> str | None:
+    """The sender id of a subagent hand-back: the relay header, then `<agent-message
+    from="ID">` alone on the very next line. Any other relay shape gives None."""
+    lines = [ln.strip() for ln in prompt.splitlines() if ln.strip()]
+    if len(lines) < 2 or not lines[0].lower().startswith(RELAY_HEADERS[0]):
+        return None
+    found = AGENT_HANDBACK.fullmatch(lines[1])
+    return found.group(1) if found else None
+
+
+def started_agent(state: dict[str, Any], agent_id: str) -> bool:
+    """True when SubagentStart recorded an agent with exactly this id in this session
+    (labels are `<agent_type>:<agent_id>`, see `agent_key`)."""
+    agents = state.get("agents")
+    if not isinstance(agents, dict):
+        return False
+    return any(
+        isinstance(label, str) and label.rpartition(":")[2] == agent_id
+        for label in agents
+    )
+
+
+def v2_keep_on_relay(
+    state: dict[str, Any], cwd: str, prompt: str
+) -> tuple[dict[str, Any] | None, str | None]:
+    """(pointer, warning) for a relayed prompt under v2 (R1). The pointer survives only the
+    hand-back of a subagent this session started, in the approval's own git root, and only
+    if the approval verifies right now; every later write is verified again. Anything else
+    drops it as before. A relay never creates an approval: no pointer in, no pointer out."""
+    ptr = state.get("approval")
+    dropped = (None, RELAY_NOTE if ptr else None)
+    if not (isinstance(ptr, dict) and ptr.get("v") == 2 and ptr.get("approval_id")):
+        return dropped
+    agent_id = relay_agent_id(prompt)
+    if agent_id is None or not started_agent(state, agent_id):
+        return dropped
+    if _v2_root(cwd) != str(ptr.get("base")):
+        return dropped
+    refused = v2_write_check(state, cwd)
+    if refused is None:
+        # An approval without a scope covers only the prompt it was given in (see
+        # in_approved_scope); a relay must not stretch it over further prompts.
+        return (ptr, None) if ptr.get("scope") else dropped
+    why = state.get("v2_block")
+    if refused == REASON_V2_STORE.format(why=why):
+        return None, f"승인 저장소를 신뢰할 수 없음({why})"
+    return None, f"중계 뒤 승인을 유지하지 못함: {why}"
 
 
 def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
@@ -1682,7 +1732,17 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
     # in-progress plan's task (or plan file) re-arms it.
     state["approval_invalid"] = None
     state["v2_block"] = None
-    if relay:
+    if relay and v2_active():
+        had = bool(state.get("approval"))
+        try:
+            state["approval"], state["approval_warning"] = v2_keep_on_relay(
+                state, cwd, prompt
+            )
+        except Exception as e:  # hook boundary: the approval is dropped, never a crash
+            log.exception("approvals.v2_hook_failure")
+            state["approval"] = None
+            state["approval_warning"] = v2_failure(e) if had else None
+    elif relay:
         had = bool(state.get("approval"))
         state["approval"] = None
         state["approval_warning"] = RELAY_NOTE if had else None
