@@ -131,6 +131,7 @@ try:
         "SubagentStart": ["discipline.py agent-start"],
         "SubagentStop": ["discipline.py agent-stop"],
         "SessionStart": ["session_context.py", "Test-Path"],
+        "SessionEnd": ["handoff.py end"],
     }
     all_cmds = [h["command"] for g in hooks.values() for x in g for h in x["hooks"]]
     py_cmds = [c for c in all_cmds if ".claude/hooks/" in c]

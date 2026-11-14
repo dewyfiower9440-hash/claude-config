@@ -47,6 +47,7 @@ TESTS = [
     "test_session_store",
     "test_session_context",
     "test_project_switch",
+    "test_handoff",
     "test_format_lint",
     "test_guard_corpus",  # prints a notice and passes when no local transcripts exist
     "test_run_all",

@@ -15,6 +15,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -325,6 +326,41 @@ def list_projects(root: Path) -> list[str] | None:
     return names
 
 
+def session_notes(data: dict[str, object], root: Path, info: GitInfo) -> list[str]:
+    """P0-12: what the last session in this repository left behind (its handoff record, or
+    another session's open marker), then this session's own marker is written. Only for a
+    real SessionStart event; any failure means no lines, never a failed start."""
+    session_id = data.get("session_id")
+    if data.get("hook_event_name") != "SessionStart" or not isinstance(session_id, str):
+        return []
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import handoff
+
+        now = time.time()
+        other = handoff.other_open(str(root), session_id, now)
+        # After a compaction the session goes on: it was told at its start.
+        fresh = data.get("source") != "compact"
+        record = handoff.read_handoff(str(root), now) if fresh else None
+        head = info.commits[0].split()[0] if info.commits else ""
+        lines = handoff.restore_lines(
+            record, other if fresh else None, info.branch, head
+        )
+        handoff.mark_open(str(root), session_id, now)
+        return lines
+    except (
+        OSError,
+        ValueError,
+        ImportError,
+        TypeError,
+        KeyError,
+        AttributeError,
+        RecursionError,
+        OverflowError,
+    ):
+        return []  # the start of a session never depends on a handoff file
+
+
 def main() -> None:
     try:
         data = json.loads(sys.stdin.buffer.read().decode("utf-8-sig"))
@@ -337,7 +373,10 @@ def main() -> None:
     if found:
         root, info = found
         plan, summaries = read_plans(root)
-        notes = tuple(plan_notes(summaries, plan.path if plan else None))
+        notes = (
+            *session_notes(data, root, info),
+            *plan_notes(summaries, plan.path if plan else None),
+        )
         context = build_context(str(data.get("source", "")), info, plan, notes)
     elif in_work_tree(cwd):
         return  # a repository git could not read (missing, slow, refused): say nothing
