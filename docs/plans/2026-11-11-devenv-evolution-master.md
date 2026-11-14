@@ -27,7 +27,7 @@ approved: 2026-11-11
   - F4a 완료(2026-11-14): 세션 상태에 주체(main 또는 `<agent_type>:<agent_id>`)를 기록하고 사유·감사 줄에 표시한다. 판정은 바꾸지 않았다. 리뷰 SHIP 뒤 low 지적 반영. LOCALLY_VERIFIED / CI_PENDING, push 전. 기록은 `docs/plans/2026-11-14-devenv-f4a.md`
   - F4b 완료(2026-11-14): SubagentStart/SubagentStop을 settings.json에 등록했다. hook은 subagent의 시작·종료를 세션 상태에 기록하고, 시작할 때 추적 규칙을 안내하며, 사유 문구에 종료 여부를 표시한다. 판정은 바꾸지 않았다. 리뷰 FIX FIRST(medium 1건) 반영. LOCALLY_VERIFIED / CI_PENDING, push 전. 리뷰 결과와 실사용 확인은 `docs/plans/2026-11-14-devenv-f4b.md`의 진행 기록 참고
   - 게이트 분할(2026-11-14): `test_discipline`의 D3 이후 구간을 `test_discipline_d3`로 옮겼다(check 194개 = 107 + 87, 내용 변경 없음). push 뒤 CI run 43569565401 실패(콘솔 인코딩 2건, 테스트의 경로 비교 1건)를 고쳤고 run 43574299831(cdc3282)에서 통과했다. P0-01~F4b와 이 분할까지 CI_VERIFIED. 기록은 `docs/plans/2026-11-14-devenv-gate-split.md`
-  - v2 승인 저장소 운영 활성화(2026-11-14): 사용자가 터미널에서 `python -I hooks/approvals.py activate`를 직접 실행했다(출력 `완료: gen=1`). 이후 승인은 v2 경로로만 발급·검증된다. 다음 항목 R1의 기록은 `docs/plans/2026-11-14-devenv-r1.md`
+  - v2 승인 저장소 운영 활성화(2026-11-14): 사용자가 터미널에서 `python -I hooks/approvals.py activate`를 직접 실행했다(출력 `완료: gen=1`). 이후 승인은 v2 경로로만 발급·검증된다. R1 완료(2026-11-14): 이 세션이 띄운 subagent의 결과 보고 뒤에는 v2 승인 포인터를 유지한다(CI run 43590899088). 기록은 `docs/plans/2026-11-14-devenv-r1.md`
   - 게이트 러너 병렬화: 3b276ca
 - **잘못된 요구사항 정정**
   - D3 "어떤 경로로도 미검증 변경이 사라지지 않음"은 hook 경계 밖의 조건이라 달성할 수 없었다. 다음 내용으로 재정의한다.
