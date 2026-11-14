@@ -23,6 +23,9 @@ REPO = HERE / "_tmp_approval_repo"
 shutil.rmtree(HOME, ignore_errors=True)
 shutil.rmtree(REPO, ignore_errors=True)
 os.environ["CLAUDE_DISCIPLINE_HOME"] = str(HOME)
+# Check names and values hold Korean text; a console that cannot encode it (cp1252 on
+# CI) must not end the run.
+sys.stdout.reconfigure(errors="backslashreplace")
 fails = 0
 
 

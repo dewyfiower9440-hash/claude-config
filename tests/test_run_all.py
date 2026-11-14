@@ -109,6 +109,18 @@ check(
     True,
 )
 check("(e) a failure prints its output tail", "broken thing" in out, True)
+script(
+    "bad_long",
+    'print("FAIL early check -> 1 (want 2)")\n'
+    'for n in range(200):\n    print("OK   filler", n, "x" * 40)\n'
+    'print("FAILURES: 1")\nraise SystemExit(1)\n',
+)
+ok, out = run(["bad_long"], workers=1)
+check(
+    "(e) a failing check far above the output tail is still printed",
+    ("FAIL early check -> 1 (want 2)" in out, "OK   filler 0 " in out),
+    (True, False),
+)
 check("(e) a passing module's output stays hidden", "detail line" in out, False)
 check(
     "each result line carries the module's duration",

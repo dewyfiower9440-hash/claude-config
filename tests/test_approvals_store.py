@@ -25,6 +25,9 @@ import approvals as ap
 TMP = HERE / "_tmp_store"
 shutil.rmtree(TMP, ignore_errors=True)
 TMP.mkdir()
+# Check names and values hold Korean text; a console that cannot encode it (cp1252 on
+# CI) must not end the run.
+sys.stdout.reconfigure(errors="backslashreplace")
 fails = 0
 
 
