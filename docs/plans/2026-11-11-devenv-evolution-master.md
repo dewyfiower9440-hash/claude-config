@@ -29,6 +29,7 @@ approved: 2026-11-11
   - 게이트 분할(2026-11-14): `test_discipline`의 D3 이후 구간을 `test_discipline_d3`로 옮겼다(check 194개 = 107 + 87, 내용 변경 없음). push 뒤 CI run 43569565401 실패(콘솔 인코딩 2건, 테스트의 경로 비교 1건)를 고쳤고 run 43574299831(cdc3282)에서 통과했다. P0-01~F4b와 이 분할까지 CI_VERIFIED. 기록은 `docs/plans/2026-11-14-devenv-gate-split.md`
   - v2 승인 저장소 운영 활성화(2026-11-14): 사용자가 터미널에서 `python -I hooks/approvals.py activate`를 직접 실행했다(출력 `완료: gen=1`). 이후 승인은 v2 경로로만 발급·검증된다. R1 완료(2026-11-14): 이 세션이 띄운 subagent의 결과 보고 뒤에는 v2 승인 포인터를 유지한다(CI run 43590899088). 기록은 `docs/plans/2026-11-14-devenv-r1.md`
   - P0-05 완료(2026-11-15): 계획 폴더 예외를 승인 저장소 안으로 한정하고, git 밖 경로는 `## 데이터 변경 범위` 블록으로만 허용한다. CI run 43616841549. 기록은 `docs/plans/2026-11-14-devenv-p0-05.md`
+  - P0-06 구현 완료, 강제 대기(2026-11-15): 승인 없는 수정 0건 정책을 `CLAUDE_AUTHZ_MODE`로 넣었다. 기본값은 관측(warn)이라 5파일 허용은 그대로이고 C3은 아직 닫히지 않았다. 강제 전환은 관측 1주 뒤 별도 작업이다. CI run 43620094440. 기록은 `docs/plans/2026-11-15-devenv-p0-06.md`
   - 게이트 러너 병렬화: 3b276ca
 - **잘못된 요구사항 정정**
   - D3 "어떤 경로로도 미검증 변경이 사라지지 않음"은 hook 경계 밖의 조건이라 달성할 수 없었다. 다음 내용으로 재정의한다.
@@ -88,7 +89,7 @@ approved: 2026-11-11
 - [x] 4. P0-03 `bind_task`: 재무장 수정. 재현 스크립트를 실패 테스트로 먼저 추가합니다.
 - [ ] 5. P0-04 승인 수명: done·cancelled·**blocked**, 미체크 0개, 경로 변경 시 무효화합니다. 상태 목록을 `draft|in-progress|blocked|done`으로 확장합니다(CLAUDE.md §2, quant CLAUDE.md, `/plan`, scaffold 템플릿). `plan_hash`는 frontmatter를 제외하므로 blocked에서 in-progress로 되돌리면 옛 기록이 다시 유효해집니다. 그래서 blocked가 되면 해당 기록을 revoked에 넣습니다. `plan_path`와 `git_root`를 서명하고 revoked 목록을 둡니다. 만료는 마지막 사용 후 7일과 절대 30일을 함께 적용합니다.
 - [x] 6. P0-05 `docs/plans` 예외를 승인 base 안으로 한정하고 경로 클래스를 도입합니다. data는 `## 데이터 변경 범위` 블록이 있어야 허용합니다.
-- [ ] 7. P0-06 무승인 수정 정책 = B(승인 없는 코드 수정 0건, 승인된 task 범위 안에서는 반복 자유). CLAUDE.md §2를 수정합니다(승인 필요).
+- [x] 7. P0-06 무승인 수정 정책 = B(승인 없는 코드 수정 0건, 승인된 task 범위 안에서는 반복 자유). CLAUDE.md §2를 수정합니다(승인 필요).
 - [ ] 8. P0-07 Bash와 PowerShell의 쓰기 대상을 사전에 authorize합니다(`shellparse` 재사용). 사전 예측이 완전하지 않다는 점을 문서화합니다.
 - [ ] 9. P0-08 데이터 보호: qr-data와 qr-backup에 deny를 추가하고 qr-backup에 쓰기 거부 ACL을 겁니다. 수집기 전용 계정은 Quant 쪽에 제안만 합니다. **설정·ACL은 별도 승인을 받습니다.**
 - [ ] 10. P0-09 resolver: 저장소 밖에서 시작하면 프로젝트 목록을 보여주고, 저장소 안이면 in-progress 계획 전부, **blocked 계획(blocked_reason과 미체크 수)**, 불일치 경고를 함께 보여줍니다. blocked 계획은 보여주기만 하고 권한은 주지 않습니다.
