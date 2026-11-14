@@ -38,6 +38,7 @@ TESTS = [
     "test_worktree",
     "test_approvals",
     "test_approvals_store",
+    "test_scope",
     "test_guard",
     "test_discipline",
     "test_discipline_d3",

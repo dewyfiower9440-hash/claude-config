@@ -316,12 +316,12 @@ def corpus() -> list[dict[str, Any]]:
         False,
         "P0-05",
     )
-    mixed = {"scope": [d._norm(str(REPO / "src/**")), d._norm("C:/dev/qr-data/**")]}
+    mixed = {"scope": [d._norm(str(REPO / "src/**")), d._norm(str(TMP / "rawdata/**"))]}
     row(
         "attack",
         "A6",
         "data path approved through a code scope -> refused",
-        d.in_approved_scope(mixed, "C:/dev/qr-data/raw/x.jsonl"),
+        d.in_approved_scope(mixed, str(TMP / "rawdata" / "raw" / "x.jsonl")),
         False,
         "P0-05",
     )

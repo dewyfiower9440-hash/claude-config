@@ -784,6 +784,14 @@ SIGNED_FIELDS = (
 APPROVAL_MAX_AGE_S = 30 * 86400
 MAX_APPROVALS = 50
 SCOPE_HEADINGS = r"(변경 범위|Scope|Change scope)"
+# P0-05: paths outside every git repository (raw data, backups) are covered only by their
+# own block; its patterns are stored in the same scope list with this prefix.
+DATA_SCOPE_HEADINGS = r"(데이터 변경 범위|Data [Ss]cope|Data [Cc]hange [Ss]cope)"
+DATA_SCOPE = "data:"
+# A list item that is a label, not a path ("- 범위 밖: ..."): a first word that is not
+# plain ASCII and has no path character, further words, then a colon before any
+# parenthesis. `- Makefile (note: x)` and a backticked first word stay paths.
+SCOPE_LABEL = re.compile(r"^\s*[-*]\s+(?=\S*[^\x00-\x7f])[^`\s:/\\*.]+\s+[^:(\n]*:")
 
 
 def normalize_plan(text: str) -> str:
@@ -811,10 +819,10 @@ def plan_task(text: str) -> str | None:
     return m.group(1) if m else None
 
 
-def plan_scope(text: str, base: str) -> list[str]:
-    """Glob patterns under `## 변경 범위`, made absolute against `base` (the approving cwd)."""
+def _scope_items(text: str, headings: str, base: str) -> list[str]:
+    """Glob patterns listed under the `## <heading>` block, absolute against `base`."""
     m = re.search(
-        rf"^##\s*{SCOPE_HEADINGS}\b[^\n]*\n(.*?)(?=^##\s|\Z)",
+        rf"^##\s*{headings}\b[^\n]*\n(.*?)(?=^##\s|\Z)",
         text,
         re.MULTILINE | re.DOTALL,
     )
@@ -822,6 +830,8 @@ def plan_scope(text: str, base: str) -> list[str]:
         return []
     globs: list[str] = []
     for line in m.group(2).splitlines():
+        if SCOPE_LABEL.match(line):
+            continue  # "- 범위 밖: ..." explains the list; it names no path
         item = re.match(r"^\s*[-*]\s+`?([^`\s(]+)`?", line)
         if item:
             g = item.group(1)
@@ -829,6 +839,15 @@ def plan_scope(text: str, base: str) -> list[str]:
             g = os.path.expanduser(g) if g.startswith("~") else g
             globs.append(_norm(g if absolute else os.path.join(base, g)))
     return globs
+
+
+def plan_scope(text: str, base: str) -> list[str]:
+    """What the plan may change, as absolute glob patterns (against `base`, the approving
+    cwd): the `## 변경 범위` items, then the `## 데이터 변경 범위` items marked `data:`. One
+    list, so the signed record keeps its shape (see in_approved_scope for how they differ)."""
+    return _scope_items(text, SCOPE_HEADINGS, base) + [
+        DATA_SCOPE + g for g in _scope_items(text, DATA_SCOPE_HEADINGS, base)
+    ]
 
 
 def _norm(path: str) -> str:
@@ -1079,6 +1098,32 @@ def active_approval(state: dict[str, Any], prompt_id: object) -> dict[str, Any] 
     return None  # approved in an earlier prompt and not re-armed for this one
 
 
+def path_class(real_path: str, base: str, in_repo: bool) -> str:
+    """What kind of path an approval given in `base` (a git root) is asked to cover:
+    "plan" (inside base/docs/plans), "code" (elsewhere inside base), "external" (outside
+    base, inside or possibly inside another repository) or "data" (outside base and
+    certainly in no repository: nothing tracks its changes)."""
+    target, root = _norm(real_path), _norm(base)
+    if target.startswith(root + "/docs/plans/"):
+        return "plan"
+    if (
+        not in_repo
+    ):  # also inside a base that is no repository (a session started there)
+        return "data"
+    inside = target == root or target.startswith(root + "/")
+    return "code" if inside else "external"
+
+
+def plain_path(path: str) -> str:
+    r"""A Windows path without the `\\?\` long-path prefix (`\\?\UNC\server` -> `\\server`),
+    so the same file is classified the same way however it was spelled."""
+    if path.startswith(("\\\\?\\UNC\\", "//?/UNC/")):
+        return "\\\\" + path[8:]
+    if path.startswith(("\\\\?\\", "//?/")):
+        return path[4:]
+    return path
+
+
 def in_approved_scope(approval: dict[str, Any] | None, path: str) -> bool:
     import fnmatch
 
@@ -1089,10 +1134,35 @@ def in_approved_scope(approval: dict[str, Any] | None, path: str) -> bool:
         return not approval.get(
             "rearmed_from"
         )  # unscoped approval covers only its own prompt
-    target = _norm(path)
-    if "/docs/plans/" in target:
+    path = plain_path(path)
+    patterns = [g for g in scope if isinstance(g, str)]
+    data = [g[len(DATA_SCOPE) :] for g in patterns if g.startswith(DATA_SCOPE)]
+    if is_unc(path):
+        # Never resolved (a stalled share must not time the hook out) and never known to be
+        # tracked by a repository: only the data block can cover it.
+        target = _norm(path)
+        return any(fnmatch.fnmatch(target, g) or target == g for g in data)
+    # Plans and data are judged where the path really is: a link must not move another
+    # repository's plans folder, or another data folder, under what was approved.
+    real = os.path.realpath(path)
+    in_repo = may_be_repository(real)
+    base = approval.get("base")
+    if isinstance(base, str) and base:
+        kind = path_class(real, os.path.realpath(plain_path(base)), in_repo)
+    else:  # a record without its repository: no plans exception
+        kind = "external" if in_repo else "data"
+    if kind == "plan":
         return True  # keeping the plan file up to date is part of the approved work
-    return any(fnmatch.fnmatch(target, g) or target == g for g in scope)
+    if kind == "data":  # only the data block covers it, never a code pattern
+        target = _norm(real)
+        return any(fnmatch.fnmatch(target, g) or target == g for g in data)
+    # Code (here or in another repository) is matched as the tool named it, as before.
+    target = _norm(path)
+    return any(
+        fnmatch.fnmatch(target, g) or target == g
+        for g in patterns
+        if not g.startswith(DATA_SCOPE)
+    )
 
 
 # ---------------------------------------------------------------- P0-04: v2 approval instances
