@@ -187,7 +187,7 @@
         ]
       },
       {
-        "matcher": "Edit|Write|MultiEdit|Bash|PowerShell",
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell",
         "hooks": [
           {
             "type": "command",
@@ -209,7 +209,7 @@
         ]
       },
       {
-        "matcher": "Edit|Write|MultiEdit|Bash|PowerShell|Agent|Task|ExitPlanMode",
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell|Agent|Task|ExitPlanMode",
         "hooks": [
           {
             "type": "command",
