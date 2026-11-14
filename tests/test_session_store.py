@@ -555,12 +555,39 @@ check("S-T5' released: the missed pre shows as a marker", blocked_for_reset(s), 
 bash(s, GATE, "g5")
 check("S-T5' ... gate passed: cleared", blocked_for_reset(s), False)
 
+# ---- F-T11 a missed subagent event: the marker names the subagent, and blocks as any other
+s = uuid.uuid4().hex
+hook("prompt", s, prompt_id="p", prompt="work")
+edit_post(s, "f11.py")
+fd = hold_lock(s)
+hook(
+    "pre",
+    s,
+    env=short,
+    prompt_id="p",
+    tool_name="Write",
+    tool_input={"file_path": str(PROJ / "src" / "f11.py"), "content": "x"},
+    agent_id="a7",
+    agent_type="code-reviewer",
+)
+release_lock(fd)
+hook("prompt", s, prompt_id="p", prompt="next")
+check(
+    "F-T11 missed subagent event: the marker names it and blocks",
+    (
+        "code-reviewer:a7" in str(state(s).get("state_reset", {}).get("why")),
+        blocked_for_reset(s),
+    ),
+    (True, True),
+)
+
 # ---- S-T16 well-formed JSON with wrong value types: no crash, preserved, marker
 shapes = {
     "seen_events": json.dumps({"seen_events": "x"}),
     "state_reset.at": json.dumps({"state_reset": {"at": "abc", "why": "w"}}),
     "evidence": json.dumps({"evidence": []}),
     "background_tops": json.dumps({"background_tops": "C:/x"}),
+    "owners": json.dumps({"owners": ["main"]}),
 }
 result = {}
 for label, text in shapes.items():

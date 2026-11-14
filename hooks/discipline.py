@@ -197,6 +197,8 @@ def default_state() -> dict[str, Any]:
         "last_review": 0.0,
         # plan approval: {task_id, plan_hash, scope, prompt_id[, rearmed_from]} or None
         "approval": None,
+        # repository top -> who acted on it ("main" or "<agent_type>:<agent_id>"); labels only
+        "owners": {},
     }
 
 
@@ -463,6 +465,59 @@ def shell_in_background(data: dict[str, Any]) -> bool:
     )
 
 
+MAX_ACTOR = 80
+MAX_OWNERS = 8
+
+
+def actor(data: dict[str, Any]) -> str:
+    """Who this hook event belongs to: "main", or "<agent_type>:<agent_id>" inside a subagent.
+    A label for reasons and audit lines only: no decision reads it, so a made-up value cannot
+    release anything."""
+    agent = data.get("agent_id")
+    if agent is None or agent == "":
+        return "main"
+    if not isinstance(agent, str):
+        return "agent:?"
+    kind = data.get("agent_type")
+    label = f"{kind if isinstance(kind, str) and kind else 'agent'}:{agent}"
+    return "".join(ch for ch in label if ch.isprintable())[:MAX_ACTOR]
+
+
+def event_label(mode: str, data: dict[str, Any]) -> str:
+    """The hook mode, with the subagent it ran in (for missed-event notes)."""
+    who = actor(data)
+    return mode if who == "main" else f"{mode}[{who}]"
+
+
+def add_actors(seen: list[Any], names: object) -> None:
+    """Append the new labels among `names`, keeping the latest MAX_OWNERS."""
+    for who in names if isinstance(names, list | tuple) else ():
+        if isinstance(who, str) and who and who not in seen:
+            seen.append(who)
+    del seen[:-MAX_OWNERS]
+
+
+def note_owner(state: dict[str, Any], top: str, who: str) -> None:
+    """Remember that `who` acted on the repository at `top` (edited it, ran a shell in it)."""
+    owners = state.setdefault("owners", {})
+    if top not in owners and len(owners) >= MAX_DIR_CACHE:
+        return
+    seen = owners.get(top)
+    if not isinstance(seen, list):
+        seen = owners[top] = []
+    add_actors(seen, [who])
+
+
+def owner_note(names: object) -> str:
+    """Reason suffix naming who left a record; empty unless a subagent is among them."""
+    labels = [
+        n for n in (names if isinstance(names, list) else []) if isinstance(n, str)
+    ]
+    if not any(n != "main" for n in labels):
+        return ""
+    return f" (이 기록을 남긴 주체: {', '.join(labels)})"
+
+
 def note_shell_touch(
     data: dict[str, Any], state: dict[str, Any], *, after: bool = False
 ) -> None:
@@ -483,6 +538,8 @@ def note_shell_touch(
             shell_tops.append(top)  # Bash edits there are visible only via content maps
         if top and top not in touched:
             touched.append(top)  # may change it before the next Stop
+        if top:
+            note_owner(state, top, actor(data))  # only where the command ran
         if after and top and top not in known and top in state.get("repos", {}):
             # First seen only now, so its baseline already holds whatever the command wrote:
             # late, never "unchanged".
@@ -524,6 +581,8 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
         top = track_repo(state, absolute(str(ti["file_path"]), cwd))
         if top and top not in state.setdefault("touched_tops", []):
             state["touched_tops"].append(top)  # may change it before the next Stop
+        if top:
+            note_owner(state, top, actor(data))
 
     if tool in ("Bash", "PowerShell"):
         tests = deleted_test_files(ti.get("command", ""))
@@ -597,9 +656,11 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
             top = track_repo(state, path)
             if top and top not in state.setdefault("touched_tops", []):
                 state["touched_tops"].append(top)  # also when no PreToolUse was seen
+            if top:
+                note_owner(state, top, actor(data))
             if Path(path).suffix.lower() in CODE_EXT:
                 state["last_code_edit"] = now
-                mark_dirty(state, path, now, changed_lines(tool, ti))
+                mark_dirty(state, path, now, changed_lines(tool, ti), by=[actor(data)])
     elif tool in ("Bash", "PowerShell"):
         note_shell_touch(data, state, after=True)  # also when no PreToolUse was seen
         record_evidence(data, state, failed=False)
@@ -1302,8 +1363,11 @@ def v2_write_check(
 MAX_DIRTY_FILES = 200
 
 
-def mark_dirty(state: dict[str, Any], path: str, at: float, lines: int = 0) -> None:
-    """Group an edited code file under its project's verification policy (nearest declaration)."""
+def mark_dirty(
+    state: dict[str, Any], path: str, at: float, lines: int = 0, by: object = None
+) -> None:
+    """Group an edited code file under its project's verification policy (nearest declaration).
+    `by` lists who made the edit (labels for the reasons, see `actor`)."""
     from verification import find_policy
 
     policy = find_policy(path)
@@ -1321,6 +1385,11 @@ def mark_dirty(state: dict[str, Any], path: str, at: float, lines: int = 0) -> N
         files.append(path)
     changed = entry.setdefault("lines", {})
     changed[path] = int(changed.get(path, 0)) + lines
+    if by:
+        seen = entry.get("by")
+        if not isinstance(seen, list):
+            seen = entry["by"] = []
+        add_actors(seen, by)
 
 
 def reresolve_dirty(state: dict[str, Any]) -> None:
@@ -1337,6 +1406,7 @@ def reresolve_dirty(state: dict[str, Any]) -> None:
                 f,
                 float(entry.get("at", 0)),
                 int((entry.get("lines") or {}).get(f, 0)),
+                by=entry.get("by"),
             )
 
 
@@ -1447,7 +1517,7 @@ def record_evidence(
         ) >= float(entry.get("at", 0))
         if still_valid_pass and ev["outcome"] in ("partial", "unknown"):
             continue  # a later side run does not revoke a passed gate for unchanged code
-        record: dict[str, Any] = {**ev, "at": now}
+        record: dict[str, Any] = {**ev, "at": now, "by": actor(data)}
         if ev["outcome"] == "passed":
             record["digests"] = evidence_digests(state, root, targets[-1])
         state["evidence"][root] = record
@@ -1829,6 +1899,7 @@ def refresh_content(state: dict[str, Any]) -> None:
             status.pop(
                 top, None
             )  # proven clean: nothing kept for a new repository there
+            state.get("owners", {}).pop(top, None)
             continue
         kept[top] = base
         if top not in state.setdefault("content_removed", []):
@@ -2088,7 +2159,9 @@ def _first_stop_problem(state: dict[str, Any]) -> tuple[str, str | None] | None:
         # Every turn while it is missing and not proven clean: its changes were never verified.
         key = f"content-removed|{top}|{state.get('turn')}"
         if _not_yet_notified(state, key):
-            return REASON_REMOVED.format(top=top), key
+            return REASON_REMOVED.format(top=top) + owner_note(
+                (state.get("owners") or {}).get(top)
+            ), key
     for top in state.get("content_late", []):
         key = f"content-late|{top}"
         if _not_yet_notified(state, key):
@@ -2110,7 +2183,7 @@ def _first_stop_problem(state: dict[str, Any]) -> tuple[str, str | None] | None:
         ev = state.get("evidence", {}).get(root) or {}
         ev_at = float(ev.get("at", 0))
         if ev_at < edited_at:
-            return REASON_UNVERIFIED + where, None
+            return REASON_UNVERIFIED + where + owner_note(entry.get("by")), None
         outcome = ev.get("outcome")
         if outcome == "partial":
             return REASON_GATE_NOT_RUN.format(root=root, gate=entry.get("gate")), None
@@ -2172,6 +2245,7 @@ def _content_decision(
 ) -> tuple[str, str | None] | None:
     """A project whose file contents changed this session: evidence must match the current content."""
     where = f" (프로젝트: {root})" if root else ""
+    edited_by = owner_note((state.get("dirty", {}).get(root) or {}).get("by"))
     ev = state.get("evidence", {}).get(root) or {}
     outcome = ev.get("outcome")
     digests: dict[str, str] = c.get("digests", {})
@@ -2193,7 +2267,7 @@ def _content_decision(
             return REASON_GATE_NOT_RUN.format(root=root, gate=c.get("gate")), None
         if outcome == "passed":
             return REASON_STALE.format(root=root or "이 프로젝트"), None
-        return REASON_UNVERIFIED + where, None
+        return REASON_UNVERIFIED + where + edited_by, None
     if c.get("ci") != "required":
         return None
     ref_sha = "|".join(sorted(digests.values()))
@@ -2393,7 +2467,7 @@ def run_hook(mode: str, data: dict[str, Any], handler: Any, path: Path) -> None:
                 run_locked(mode, data, handler, path)
     except session_store.StateBusy as e:
         # Nothing can be recorded: refuse what needs the state, remember that it was missed.
-        note_safely(path, f"{mode}: {e}")
+        note_safely(path, f"{event_label(mode, data)}: {e}")
         fail_closed(mode, data, REASON_STATE_BUSY.format(why=e))
     except (
         Exception
@@ -2401,7 +2475,7 @@ def run_hook(mode: str, data: dict[str, Any], handler: Any, path: Path) -> None:
         log.exception("discipline.hook_failure")
         why = f"{type(e).__name__}: {e}"[:200]
         # What was known is saved (run_locked's finally); this event may be half applied.
-        note_safely(path, f"{mode}: 처리 중 오류({why})")
+        note_safely(path, f"{event_label(mode, data)}: 처리 중 오류({why})")
         fail_closed(mode, data, REASON_HOOK_ERROR.format(why=why))
 
 
@@ -2599,6 +2673,13 @@ def ack_missing(data: dict[str, Any], state: dict[str, Any]) -> str | None:
             "prompt_id": data.get("prompt_id"),
             "path": target,
             "released": what,
+            "owners": [
+                who
+                for t, names in (state.get("owners") or {}).items()
+                if same_place(t, target) and isinstance(names, list)
+                for who in names
+                if isinstance(who, str)
+            ],
             "edited_files_gone": len(gone_files),
         }
     ):
@@ -2611,6 +2692,10 @@ def ack_missing(data: dict[str, Any], state: dict[str, Any]) -> str | None:
         state["repos_removed"].pop(t, None)
         state.get("repo_state", {}).pop(t, None)
         forget_dir_tops(state, t)
+    owners = state.get("owners")
+    if isinstance(owners, dict):
+        for t in [t for t in owners if same_place(t, target)]:
+            owners.pop(t)
     if in_marker and isinstance(marker, dict):
         marker["roots"] = [r for r in roots or [] if not same_place(r, target)]
     # Edits recorded for files that went with it can never be verified: they are part of what
@@ -2907,7 +2992,7 @@ def run_locked(mode: str, data: dict[str, Any], handler: Any, path: Path) -> Non
         try:
             session_store.save(path, state)
         except session_store.StateWriteFailed as e:
-            note_safely(path, f"{mode}: {e}")
+            note_safely(path, f"{event_label(mode, data)}: {e}")
 
 
 if __name__ == "__main__":

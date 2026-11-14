@@ -2058,6 +2058,216 @@ check(
     (False, True, True),
 )
 
+
+# ---- F4a: who left a record (main or a subagent) is written next to it and shown in the
+# reasons. It never changes a decision.
+def owners_of(session: str, path: Path) -> list[str]:
+    return {
+        os.path.normcase(k): v for k, v in state_file(session).get("owners", {}).items()
+    }.get(os.path.normcase(str(path)), [])
+
+
+def agent_shell(session: str, pid: str, repo: Path, **who: object) -> None:
+    call(
+        "post",
+        session,
+        prompt_id=pid,
+        cwd=str(repo),
+        tool_name="Bash",
+        tool_input={"command": "python build.py"},
+        tool_response={},
+        **who,
+    )
+
+
+def agent_write(session: str, pid: str, repo: Path, name: str, **who: object) -> str:
+    w = {"file_path": str(repo / name), "content": "x = 2\n"}
+    out = call(
+        "pre",
+        session,
+        prompt_id=pid,
+        cwd=str(repo),
+        tool_name="Write",
+        tool_input=w,
+        **who,
+    )
+    (repo / name).write_text("x = 2\n", encoding="utf-8")
+    call(
+        "post",
+        session,
+        prompt_id=pid,
+        cwd=str(repo),
+        tool_name="Write",
+        tool_input=w,
+        **who,
+    )
+    return str(decision(out))
+
+
+REVIEWER = {"agent_id": "a7", "agent_type": "code-reviewer"}
+OWNER_NOTE = "주체"
+
+FT1 = d3_repo("ft1")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="f1", prompt="work", cwd=str(FT1))
+d3_edit(s, "f1", FT1)
+ft1_reason = d3_stop(s, "f1", FT1)
+check(
+    "F-T1 main only: the repository's owner is main, no subagent named in the reason",
+    (owners_of(s, FT1), UNVERIFIED in ft1_reason, OWNER_NOTE in ft1_reason),
+    (["main"], True, False),
+)
+
+FT2 = d3_repo("ft2")  # a subagent's scratch repository (the p3parent case)
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="f2", prompt="review", cwd=str(PB))
+agent_shell(s, "f2", FT2, **REVIEWER)
+rm_tree(FT2)
+ft2_reason = d3_stop(s, "f2", PB)
+check(
+    "F-T2 a repository a subagent ran a shell in, then missing: reported, naming the subagent",
+    (GONE in ft2_reason, "code-reviewer:a7" in ft2_reason),
+    (True, True),
+)
+ack(s, "f3", f"ack-missing {FT2}")
+check(
+    "F-T3 ack-missing: released, the audit line carries the owners, the owner record is dropped",
+    (
+        reported_missing(s, FT2),
+        (audit_rows()[-1:] or [{}])[0].get("owners"),
+        owners_of(s, FT2),
+    ),
+    (False, ["code-reviewer:a7"], []),
+)
+
+FT4 = d3_repo("ft4")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="f4", prompt="implement", cwd=str(FT4))
+agent_write(s, "f4", FT4, "a.py", agent_id="b1", agent_type="general-purpose")
+ft4_reason = d3_stop(s, "f4", FT4)
+check(
+    "F-T4 a subagent's unverified edit: Stop blocked as before, naming the subagent",
+    (UNVERIFIED in ft4_reason, "general-purpose:b1" in ft4_reason),
+    (True, True),
+)
+
+FT5 = d3_repo("ft5", policy=True)
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="f5", prompt="implement", cwd=str(FT5))
+agent_write(s, "f5", FT5, "a.py", agent_id="t1", agent_type="test-runner")
+call(
+    "post",
+    s,
+    prompt_id="f5",
+    cwd=str(FT5),
+    tool_name="Bash",
+    tool_input={"command": "uv run pytest -q --cov"},
+    tool_response={},
+    agent_id="t1",
+    agent_type="test-runner",
+)
+check(
+    "F-T5 a subagent's passing gate: accepted as before, the evidence says who ran it",
+    (
+        d3_stop(s, "f5", FT5),
+        [e.get("by") for e in state_file(s).get("evidence", {}).values()],
+    ),
+    ("", ["test-runner:t1"]),
+)
+
+FT6 = d3_repo("ft6")
+FT7 = d3_repo("ft7")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="f6", prompt="work", cwd=str(FT7))
+d3_edit(s, "f6", FT6)
+agent_shell(s, "f6", FT6, **REVIEWER)
+agent_shell(s, "f6", FT6, **REVIEWER)
+d3_edit(s, "f6", FT6)
+check(
+    "F-T6 main and a subagent in one repository: both recorded once",
+    owners_of(s, FT6),
+    ["main", "code-reviewer:a7"],
+)
+check(
+    "F-T7 a repository the subagent's shell did not run in: not attributed to it",
+    owners_of(s, FT7),
+    [],
+)
+
+FT8 = d3_repo("ft8")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="f8", prompt="work", cwd=str(PB))
+for odd in (7, {"a": 1}, "x" * 200, "a\nb\x07c"):
+    agent_shell(s, "f8", FT8, agent_id=odd, agent_type="t\ty")
+ft8 = owners_of(s, FT8) or ["<none>"]
+check(
+    "F-T8 odd agent ids: no failure, labels bounded and free of control characters",
+    (
+        ft8[0],
+        len(ft8),
+        max(len(label) for label in ft8) <= 80,
+        any(ch < " " for label in ft8 for ch in label),
+        ft8[-1],
+    ),
+    ("agent:?", 3, True, False, "ty:abc"),
+)
+
+FT9 = d3_repo("ft9")
+s = uuid.uuid4().hex
+call("prompt", s, prompt_id="f9", prompt="work", cwd=str(PB))
+for n in range(10):
+    agent_shell(s, "f9", FT9, agent_id=f"n{n}", agent_type="w")
+check(
+    "F-T9 more than eight owners of one repository: the latest eight are kept",
+    owners_of(s, FT9),
+    [f"w:n{n}" for n in range(2, 10)],
+)
+
+
+def ft10_decisions(tag: str, **who: object) -> list[object]:
+    """One scenario per rule; the decisions must not depend on who acted."""
+    got: list[object] = []
+    edited = d3_repo(f"ft10-{tag}-edit")
+    session = uuid.uuid4().hex
+    call("prompt", session, prompt_id="g1", prompt="work", cwd=str(edited))
+    agent_write(session, "g1", edited, "a.py", **who)
+    got.append(decision(call("stop", session, prompt_id="g1", cwd=str(edited))))
+    call(
+        "fail",
+        session,
+        prompt_id="g1",
+        cwd=str(edited),
+        tool_name="Bash",
+        tool_input={"command": "uv run pytest -q"},
+        error="Exit code 1",
+        **who,
+    )
+    call("prompt", session, prompt_id="g2", prompt="next", cwd=str(edited))
+    got.append(decision(call("stop", session, prompt_id="g2", cwd=str(edited))))
+    gone = d3_repo(f"ft10-{tag}-gone")
+    session = uuid.uuid4().hex
+    call("prompt", session, prompt_id="g3", prompt="work", cwd=str(PB))
+    agent_shell(session, "g3", gone, **who)
+    rm_tree(gone)
+    got.append(decision(call("stop", session, prompt_id="g3", cwd=str(PB))))
+    many = d3_repo(f"ft10-{tag}-many")
+    session = uuid.uuid4().hex
+    call("prompt", session, prompt_id="g4", prompt="work", cwd=str(many))
+    got += [agent_write(session, "g4", many, f"m{n}.py", **who) for n in range(7)]
+    return got
+
+
+ft10_main = ft10_decisions("main")
+check(
+    "F-T10 the same scenarios acted by main and by a subagent: identical decisions",
+    (
+        ft10_decisions("agent", **REVIEWER) == ft10_main,
+        "block" in ft10_main,
+        "deny" in ft10_main,
+    ),
+    (True, True, True),
+)
+
 # ---- P0-04b review: git failures and caches must not make a %TEMP% repository look like scratch
 sys.path.insert(0, str(Path(HOOK).parent))
 import discipline as _d
