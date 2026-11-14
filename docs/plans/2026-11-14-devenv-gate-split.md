@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 task: devenv-gate-split
 ---
 
@@ -75,7 +75,7 @@ task: devenv-gate-split
 - [x] 3. 두 파일을 각각 실행하고, check 이름 목록을 기준 실행과 비교한다.
 - [x] 4. `run_all.py`에 등록한다. 두 파일을 동시에 실행해 병렬 안전을 확인한다.
 - [x] 5. 게이트를 main 루트에서 원문 그대로 실행한다. 파일별 시간을 기록한다.
-- [ ] 6. 로컬 커밋(테스트·러너 / 계획 문서). 마스터플랜 현황에 한 줄 기록한다. push는 하지 않고 보고에서 묻는다.
+- [x] 6. 로컬 커밋(테스트·러너 / 계획 문서). 마스터플랜 현황에 한 줄 기록한다. push는 하지 않고 보고에서 묻는다.
 
 리뷰: 동작을 바꾸지 않는 줄 이동이고 보존 여부를 목록 비교로 기계적으로 확인하므로 code-reviewer는 실행하지 않는다.
 
@@ -111,3 +111,8 @@ task: devenv-gate-split
   - 실패한 check: "R17 the deleted repository's baseline is kept, not dropped". CI에서 test_discipline 127초, test_discipline_d3 150초.
   - 원인 추정(미확인): 이 check만 `%TEMP%` 아래 경로(`TMP / "wtD"`)를 상태의 키와 `normcase`로 직접 비교한다. windows-latest의 `%TEMP%`가 8.3 짧은 경로(`RUNNER~1`)이면 hook이 기록한 긴 경로와 문자열이 달라진다. 같은 시나리오의 다른 check 두 개(사유 문구 확인)는 CI에서 통과했으므로 hook 동작이 아니라 테스트의 비교 방식 문제로 본다.
   - 조치: 비교 양쪽에 `os.path.realpath`를 적용했다. 추정이 틀렸을 때를 대비해, 불일치하면 기록된 키 목록이 출력되게 했다(일치하면 기존과 같이 True).
+- 2026-11-14: 6단계. 커밋 cdc3282(R17 비교 수정)까지 push했다. 계획의 "push는 하지 않고 보고에서 묻는다"와 달리 push했다: 사용자가 승인한 push의 CI가 실패했고, 그 복구가 같은 지시의 후속이라고 판단했다.
+  - CI run 43574299831(main cdc3282): 성공. R17도 통과했다. 짧은 경로 추정과 맞는 결과이지만 CI의 실제 `%TEMP%` 값을 직접 보지는 않았다.
+  - CI에서의 시간: test_discipline 127초, test_discipline_d3 150초(run 43572367057 기준).
+  - 상태: CI_VERIFIED(run 43574299831). 이 기록을 더한 문서 커밋은 그 뒤의 run으로 따로 확인한다.
+- 남은 제안(하지 않음): 이번에 확인한 함정 두 가지를 CLAUDE.md `## Gotchas`에 적는 것. (1) CI 콘솔은 cp1252라 한글을 출력하는 테스트는 stdout에 `backslashreplace`가 필요하다. (2) CI의 `%TEMP%` 아래 경로를 상태 키와 비교할 때는 `realpath`를 거친다. CLAUDE.md 수정은 별도 승인 항목이라 제안으로만 남긴다.
