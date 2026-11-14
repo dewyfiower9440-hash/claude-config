@@ -681,6 +681,66 @@ def note_shell_touch(
                 late_writers.append(top)
 
 
+def shell_write_denial(
+    data: dict[str, Any], state: dict[str, Any], command: str, cwd: str
+) -> str | None:
+    """P0-07: judge the files a shell command visibly writes like an Edit (best effort, see
+    shellwrites.py for what is not seen). Warn mode only records the targets enforce would
+    refuse; enforce returns the refusal. A failure here refuses under enforce and changes
+    nothing under warn."""
+    tool = data.get("tool_name", "")
+    try:
+        from shellwrites import write_targets
+
+        paths, unresolved = write_targets(
+            command, "powershell" if tool == "PowerShell" else "bash", cwd
+        )
+        paths = [f for f in paths if not ignored_path(state, f, cwd)]
+        if not paths and not unresolved:
+            return None
+        if AUTHZ_MODE == "enforce" and v2_active():
+            for f in paths:  # per target: the plan file itself has its own rule
+                refused = v2_write_check(state, cwd, f)
+                if refused:
+                    return refused
+        approval = active_approval(state, data.get("prompt_id"))
+        base = approval.get("base") if approval else None
+        outside = [
+            f
+            for f in paths
+            # an existing folder stands for the files in it (`rm -r src`)
+            if not in_approved_scope(
+                approval,
+                os.path.join(f, "_") if not is_unc(f) and os.path.isdir(f) else f,
+            )
+        ]
+        reason = "out_of_scope" if approval else "no_approval"
+        if unresolved:  # a write this check could not judge: counted in both modes
+            observe_authz("unresolved", cwd, tool, base)
+        if AUTHZ_MODE != "enforce":
+            for f in outside:
+                observe_authz(reason, f, tool, base)
+            return None
+        if not outside:
+            return None
+        why = (
+            f"승인된 계획(task: {approval.get('task_id')})의 변경 범위 밖"
+            if approval
+            else "승인된 계획 없음"
+        )
+        shown = ", ".join(Path(f).name for f in outside[:5])
+        return REASON_AUTHZ.format(why=f"{why}, 셸 명령의 쓰기 대상: {shown}")
+    except (
+        Exception
+    ) as e:  # hook boundary: enforce refuses, warn keeps today's behaviour
+        log.exception("discipline.shell_write_check_failed")
+        if AUTHZ_MODE == "enforce":
+            return REASON_AUTHZ.format(
+                why=f"셸 쓰기 대상 판정 중 오류 {type(e).__name__}"
+            )
+        return None
+
+
 def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
     tool = data.get("tool_name", "")
     ti = data.get("tool_input", {}) or {}
@@ -707,6 +767,9 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
             note_owner(state, top, actor(data))
 
     if tool in ("Bash", "PowerShell"):
+        refusal = shell_write_denial(data, state, str(ti.get("command", "")), cwd)
+        if refusal:
+            emit_pre("deny", refusal)
         tests = deleted_test_files(ti.get("command", ""))
         if tests:
             emit_pre(

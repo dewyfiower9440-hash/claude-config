@@ -40,6 +40,7 @@ TESTS = [
     "test_approvals_store",
     "test_scope",
     "test_authz",
+    "test_shellwrites",
     "test_guard",
     "test_discipline",
     "test_discipline_d3",
