@@ -1,6 +1,6 @@
 ---
 name: plan
-description: Design and plan a non-trivial change before writing code - clarify requirements, investigate the codebase, compare 2-3 approaches, and produce an approved step-by-step plan with verification criteria. Use for features, multi-file changes (3+ files), new modules/dependencies/schemas/APIs, migrations, or whenever there is a real design choice. Required before editing more than 5 files in a turn.
+description: Design and plan a non-trivial change before writing code - clarify requirements, investigate the codebase, compare 2-3 approaches, and produce an approved step-by-step plan with verification criteria. Use for features, multi-file changes (3+ files), new modules/dependencies/schemas/APIs, migrations, or whenever there is a real design choice. Required before editing more than 5 files in a turn, and for every edit once the approval hook enforces (CLAUDE_AUTHZ_MODE=enforce).
 argument-hint: <what to build or change>
 ---
 
