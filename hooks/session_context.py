@@ -478,6 +478,39 @@ def usage_notes(data: dict[str, object]) -> list[str]:
         return []
 
 
+def recurrence_notes(data: dict[str, object], root: Path) -> list[str]:
+    """P2-04: a Gotchas candidate for every trap-like failure kind that came back in this
+    repository (see recurrence.py). Only for a real session start (not after a
+    compaction), not when CLAUDE_RECURRENCE=0; any failure means no lines."""
+    if (
+        data.get("hook_event_name") != "SessionStart"
+        or data.get("source") == "compact"
+        or os.environ.get("CLAUDE_RECURRENCE") == "0"
+    ):
+        return []
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import recurrence
+
+        return recurrence.lines(
+            recurrence.recurring(recurrence.read(str(root)), time.time())
+        )
+    except (
+        OSError,
+        ValueError,
+        ImportError,
+        TypeError,
+        KeyError,
+        AttributeError,
+        OverflowError,
+    ) as e:
+        print(
+            f"session-context: recurrence not shown ({type(e).__name__})",
+            file=sys.stderr,
+        )
+        return []
+
+
 def session_notes(data: dict[str, object], root: Path, info: GitInfo) -> list[str]:
     """P0-12: what the last session in this repository left behind (its handoff record, or
     another session's open marker), then this session's own marker is written. Only for a
@@ -531,6 +564,7 @@ def main() -> None:
             # last: when the notes do not all fit, the ledger lines are the ones left out
             *ledger_section(root, summaries, info),
             *usage_notes(data),
+            *recurrence_notes(data, root),
         )
         context = build_context(str(data.get("source", "")), info, plan, notes)
     elif in_work_tree(cwd):

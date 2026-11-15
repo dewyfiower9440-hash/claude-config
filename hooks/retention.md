@@ -16,6 +16,7 @@
 | 놓친 이벤트 기록 폴더 `<id>.notes/` | 같은 폴더 | `hooks/session_store.py` | 안의 기록은 읽힌 뒤 지워지고, 빈 폴더는 남는다 | 드묾 |
 | 종료 기록 | `~/.claude/state/handoff/` | `hooks/handoff.py` | 저장소마다 파일 하나를 덮어쓴다. 14일 지난 것은 읽지 않는다 | 저장소 수만큼 |
 | 작업 원장 | `~/.claude/state/ledger/` | `hooks/ledger.py` | **지우지 않는다**(상태가 바뀔 때 약 260바이트 한 줄) | 아직 거의 없음 |
+| 실패 종류 기록 | `~/.claude/state/failures/` | `hooks/recurrence.py`(`hooks/discipline.py`가 부름) | **지우지 않는다**(세션마다 저장소·종류별로 많아야 한 줄, 약 90바이트. 읽을 때는 끝의 64KB만 본다) | 아직 없음 |
 | 사용량 기록 | `~/.claude/state/usage.json` | `hooks/usage.py` | 파일 하나를 덮어쓴다 | 1개 |
 | 승인 기록, 관측 기록(`*-observe.jsonl`), 복구 감사 기록 | `~/.claude/discipline/` | `hooks/discipline.py`, `hooks/approvals.py` | **지우지 않는다**. 관측 기록은 크기 상한이 없다 | 미확인(도구로 읽지 못하게 막힌 폴더) |
 | 계획 문서, 기준선 측정 | `docs/plans/`, `tests/_baseline/` | 작업 중 작성 | git으로 관리 | — |

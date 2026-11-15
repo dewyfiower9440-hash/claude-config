@@ -61,6 +61,7 @@ TESTS = [
     "test_test_gap",
     "test_output_size",
     "test_risk",
+    "test_recurrence",
     "test_format_lint",
     "test_guard_corpus",  # prints a notice and passes when no local transcripts exist
     "test_run_all",

@@ -263,6 +263,9 @@ def default_state() -> dict[str, Any]:
         # compares alternatives, and the turn that was last scored in the observation file
         "risk_note": "",
         "risk_turn": 0,
+        # P2-04: "<repository>|<gate or ci>|<kind>" of the failures this session has
+        # already counted in the repository's recurrence file
+        "failures_noted": [],
         "output_advice_turn": 0,  # P1-04: the turn that already got the delegation hint
         "turn_cover_off": 0,  # 1: not known what an approval started from; cover nothing
     }
@@ -2053,6 +2056,7 @@ def record_evidence(
     for d in targets:
         found = find_policy(os.path.join(d, "_"))
         policies.setdefault(found["root"], found)
+    failed_gates: list[str] = []
     for root, policy in policies.items():
         entry = state["dirty"].get(root, {})
         ev = evaluate(
@@ -2081,7 +2085,14 @@ def record_evidence(
         if ev["outcome"] == "passed":
             record["digests"] = evidence_digests(state, root, targets[-1])
         state["evidence"][root] = record
+        if ev["outcome"] == "failed" and ev.get("kind") == "gate":
+            failed_gates.append(root)
+    gate_root = innermost_root(failed_gates)
+    if gate_root is not None:
+        note_gate_failure(data, state, gate_root, failed=failed)
     record_ci_activity(str(ti.get("command", "")), is_ps, cwd, state, failed=failed)
+    # here too, not only at the Stop: a CI failure that is fixed within the turn counts
+    note_ci_failures(state, data.get("session_id"))
 
 
 def record_ci_activity(
@@ -2122,6 +2133,97 @@ def record_ci_activity(
 
             for top, push in state.get("pushes", {}).items():
                 state.setdefault("ci", {})[top] = {**fetch_ci(push), "at": now}
+
+
+FAILURES_NOTED_MAX = 60
+FAILURE_TAIL_CHARS = 20_000  # the end of a gate's output is where it failed
+
+
+def note_failure(
+    state: dict[str, Any], root: str, source: str, kind: object, session_id: object
+) -> None:
+    """P2-04: count a failure's kind once per session in the recurrence file of the
+    repository that holds `root` (see recurrence.py). A record for a later note; it
+    changes nothing a hook decides. CLAUDE_RECURRENCE=0 switches it off."""
+    if os.environ.get("CLAUDE_RECURRENCE") == "0":
+        return
+    try:
+        import recurrence
+
+        if (
+            not isinstance(session_id, str)
+            or not session_id
+            or source not in recurrence.SOURCES
+            or kind not in recurrence.KINDS
+        ):
+            return
+        tops = [t for t in (state.get("repos") or {}) if isinstance(t, str)]
+        top = _repo_place(root, tops)[0]
+        if not top:
+            # not a tracked repository (tracking ran out of time, say): ask git once, so
+            # that the row lands under the key the session start reads with
+            import worktree
+
+            top = os.path.normcase(worktree.toplevel(root) or root)
+        noted = state.setdefault("failures_noted", [])
+        key = f"{top}|{source}|{kind}"
+        if (
+            not isinstance(noted, list)
+            or key in noted
+            or len(noted)
+            >= FAILURES_NOTED_MAX  # "once per session" can no longer be kept
+        ):
+            return
+        recurrence.record(top, source, str(kind), session_id, time.time())
+        noted.append(key)
+    except Exception:  # hook boundary: a record, nothing depends on it
+        log.exception("discipline.recurrence_failed")
+
+
+def innermost_root(roots: list[str]) -> str | None:
+    """The deepest of the project roots one failed gate run was recorded for (an outer
+    project that declares the same gate is not where it failed)."""
+    return max(roots, key=lambda r: len(os.path.normpath(r)), default=None)
+
+
+def note_gate_failure(
+    data: dict[str, Any], state: dict[str, Any], root: str, *, failed: bool
+) -> None:
+    """A gate run that failed: its kind, from the end of its output (used for the
+    classification only, never stored), goes to the recurrence file."""
+    if os.environ.get("CLAUDE_RECURRENCE") == "0":
+        return
+    try:
+        from ci_status import classify_failure
+
+        parts: list[str] = []
+        for source in (
+            data.get("tool_response"),
+            data.get("error") if failed else None,
+        ):
+            if isinstance(source, str):
+                parts.append(source)
+            elif isinstance(source, dict):
+                parts.extend(v for v in source.values() if isinstance(v, str))
+        tail = "\n".join(parts)[-FAILURE_TAIL_CHARS:]
+        kind = classify_failure("", "failure", tail)
+    except Exception:  # hook boundary: a record, nothing depends on it
+        log.exception("discipline.recurrence_failed")
+        return
+    note_failure(state, root, "gate", kind, data.get("session_id"))
+
+
+def note_ci_failures(state: dict[str, Any], session_id: object) -> None:
+    """Stop: every repository whose CI is known to have failed, with the kind the CI check
+    gave it, is counted (once per session and kind)."""
+    known = state.get("ci")
+    for top, ci in (known if isinstance(known, dict) else {}).items():
+        if (
+            isinstance(top, str)
+            and isinstance(ci, dict)
+            and ci.get("status") == "failed"
+        ):
+            note_failure(state, top, "ci", ci.get("kind"), session_id)
 
 
 def on_fail(data: dict[str, Any], state: dict[str, Any]) -> None:
@@ -3536,6 +3638,7 @@ def on_stop(data: dict[str, Any], state: dict[str, Any]) -> None:
     observe_reviews(state)
     note_test_gap(state)
     note_risk(state)
+    note_ci_failures(state, data.get("session_id"))
     damaged = state_reset_active(state)
     decision = _stop_decision(state)
     if decision is None:
