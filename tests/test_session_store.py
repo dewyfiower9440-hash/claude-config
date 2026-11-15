@@ -16,6 +16,9 @@ import time
 import uuid
 from pathlib import Path
 
+sys.stdout.reconfigure(
+    errors="backslashreplace"
+)  # Korean values on a cp1252 console (CI)
 HERE = Path(__file__).resolve().parent
 HOOK = HERE.parent / "hooks" / "discipline.py"
 ROOT = HERE / "_tmp_sstore"
