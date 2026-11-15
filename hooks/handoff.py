@@ -28,6 +28,7 @@ MAX_AGE_S = 14 * 86400
 GIT_TIMEOUT_S = 1
 END_BUDGET_S = 3.0  # all git calls of one SessionEnd together (the hook's limit is 5)
 SWEEP_RESERVE_S = 1.5  # the state sweep starts only this long before END_BUDGET_S
+USAGE_START_S = 2.0  # the usage measurement (up to 1 s) starts only before this
 STEP_CHARS = 200
 VALUE_CHARS = 160  # any other text value when shown
 SECTION_CHARS = 600
@@ -357,6 +358,15 @@ def main(argv: list[str]) -> int:
             state_gc.sweep_default(time.time())
     except (OSError, ValueError, ImportError, OverflowError) as e:
         print(f"handoff: state sweep skipped ({type(e).__name__})", file=sys.stderr)
+    try:  # P1-07: last, and only with time to spare: how much the growing folders hold
+        if time.monotonic() - started < USAGE_START_S:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import usage
+
+            if usage.enabled():
+                usage.write(usage.snapshot(time.time()))
+    except (OSError, ValueError, ImportError, OverflowError, TypeError) as e:
+        print(f"handoff: usage not measured ({type(e).__name__})", file=sys.stderr)
     return 0
 
 

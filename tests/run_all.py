@@ -53,6 +53,7 @@ TESTS = [
     "test_project_switch",
     "test_handoff",
     "test_state_gc",
+    "test_usage",
     "test_ledger",
     "test_task_switch",
     "test_review_binding",

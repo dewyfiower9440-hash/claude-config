@@ -439,6 +439,29 @@ def ledger_section(
         return []
 
 
+def usage_notes(data: dict[str, object]) -> list[str]:
+    """P1-07: a warning for every folder the last session end measured over its limit.
+    Only for a real session start (not after a compaction); any failure means no lines."""
+    if data.get("hook_event_name") != "SessionStart" or data.get("source") == "compact":
+        return []
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import usage
+
+        return usage.warnings(usage.read(), time.time())
+    except (
+        OSError,
+        ValueError,
+        ImportError,
+        TypeError,
+        KeyError,
+        AttributeError,
+        OverflowError,
+    ) as e:
+        print(f"session-context: usage not shown ({type(e).__name__})", file=sys.stderr)
+        return []
+
+
 def session_notes(data: dict[str, object], root: Path, info: GitInfo) -> list[str]:
     """P0-12: what the last session in this repository left behind (its handoff record, or
     another session's open marker), then this session's own marker is written. Only for a
@@ -491,6 +514,7 @@ def main() -> None:
             *plan_notes(summaries, plan.path if plan else None),
             # last: when the notes do not all fit, the ledger lines are the ones left out
             *ledger_section(root, summaries, info),
+            *usage_notes(data),
         )
         context = build_context(str(data.get("source", "")), info, plan, notes)
     elif in_work_tree(cwd):
