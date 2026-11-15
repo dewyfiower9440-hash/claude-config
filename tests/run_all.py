@@ -37,6 +37,7 @@ TESTS = [
     "test_verification",
     "test_powershell_semantics",
     "test_ci_status",
+    "test_ci_classify",
     "test_worktree",
     "test_approvals",
     "test_approvals_store",

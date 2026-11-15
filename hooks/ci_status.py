@@ -14,9 +14,12 @@ import os
 import re
 import shutil
 import subprocess
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 GH_TIMEOUT_S = 15
+LOG_TIMEOUT_S = 10
+LOG_TAIL_CHARS = 20_000  # the end of a job log is where it failed
+STEP_CHARS = 80
 GIT_TIMEOUT_S = 5
 
 
@@ -44,6 +47,9 @@ class CiEvidence(TypedDict):
     sha: str
     runs: list[RunResult]
     why: str
+    kind: NotRequired[
+        str
+    ]  # of a failed run: a hint (classify_failure), never the verdict
 
 
 # ---------------------------------------------------------------- pure
@@ -148,6 +154,58 @@ def _evidence(
     }
 
 
+KIND_LABEL = {
+    "timeout": "시간 초과",
+    "encoding": "인코딩",
+    "environment": "환경·설치",
+    "lint": "린트·형식",
+    "test": "테스트 실패",
+    "other": "기타",
+}
+_TIMEOUT = re.compile(
+    r"exceeded the maximum execution time|TimeoutExpired", re.IGNORECASE
+)
+_ENCODING = re.compile(
+    r"Unicode(En|De)codeError|codec can't (en|de)code", re.IGNORECASE
+)
+_ENVIRONMENT = re.compile(
+    r"ModuleNotFoundError|No module named|is not on PATH|command not found"
+    r"|is not recognized as (an? |the )(internal|name)",
+    re.IGNORECASE,
+)
+_LINT = re.compile(
+    r"FAIL ruff|Would reformat|would be reformatted|^[A-Z]{1,4}\d{3,4} \[\*?\]"
+    r"|^Found \d+ errors?\b",
+    re.MULTILINE,
+)
+_TEST = re.compile(
+    r"^FAIL |FAILURES: [1-9]|AssertionError|\b[1-9]\d* failed\b", re.MULTILINE
+)
+_SETUP_STEP = re.compile(r"\b(install|set ?up|checkout|cache|restore)\b", re.IGNORECASE)
+
+
+def classify_failure(step: object, conclusion: object, log_tail: object) -> str:
+    """What kind of failure a CI job ended with, from the failed step's name and the end
+    of its log: timeout, encoding, environment, lint, test or other (first match in that
+    order; a failing setup step without any clue in the log is environment). A hint for
+    the first look, shaped by the failures this repository's CI has had; it never decides
+    whether the run counts."""
+    log = log_tail if isinstance(log_tail, str) else ""
+    if conclusion == "timed_out" or _TIMEOUT.search(log):
+        return "timeout"
+    for kind, pattern in (
+        ("encoding", _ENCODING),
+        ("environment", _ENVIRONMENT),
+        ("lint", _LINT),
+        ("test", _TEST),
+    ):
+        if pattern.search(log):
+            return kind
+    if isinstance(step, str) and _SETUP_STEP.search(step):
+        return "environment"
+    return "other"
+
+
 def _worse(a: str, b: str) -> str:
     order = ["verified", "pending", "unknown", "failed"]
     return a if order.index(a) >= order.index(b) else b
@@ -233,6 +291,62 @@ def _gh_json(path: str, **params: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _failed_log(repo: str, run_id: int) -> str | None:
+    """The log of a run's failed steps. Through `gh run view --log-failed`: the job-log
+    API answer holds terminal escape sequences, which `gh api` refuses to print."""
+    gh = shutil.which("gh")
+    if not gh:
+        return None
+    return _run(
+        [gh, "run", "view", str(run_id), "--repo", repo, "--log-failed"],
+        None,
+        LOG_TIMEOUT_S,
+    )
+
+
+_LOG_PREFIX = re.compile(
+    r"^(?:[^\t\n]*\t){0,2}\d{4}-\d\d-\d\dT[\d:.]+Z ?", re.MULTILINE
+)
+
+
+def _plain_lines(log: str) -> str:
+    """Log lines without what gh puts in front of them (job, step, timestamp)."""
+    return _LOG_PREFIX.sub("", log)
+
+
+def _not_the_failure(item: Any) -> bool:
+    return item.get("conclusion") not in ("failure", "timed_out")
+
+
+def failure_note(repo: str, run_id: int) -> tuple[str, str]:
+    """(kind, name of the failed step) of a failed run. The log is used for the
+    classification only: nothing of it is returned, stored or logged. Whatever cannot be
+    fetched is done without (kind "other" at worst)."""
+    data = _gh_json(f"repos/{repo}/actions/runs/{run_id}/jobs")
+    jobs = data.get("jobs") if isinstance(data, dict) else None
+    candidates = [
+        j
+        for j in (jobs if isinstance(jobs, list) else [])
+        if isinstance(j, dict) and j.get("conclusion") not in ("success", "skipped")
+    ]
+    # the job (and step) that failed or timed out, before one that was merely cancelled
+    for job in sorted(candidates, key=_not_the_failure):
+        steps = [
+            s
+            for s in (job.get("steps") if isinstance(job.get("steps"), list) else [])
+            if isinstance(s, dict)
+            and s.get("conclusion") not in ("success", "skipped", None)
+        ]
+        failed = min(steps, key=_not_the_failure, default={})
+        step = " ".join(str(failed.get("name") or "").split())[:STEP_CHARS]
+        log = _failed_log(repo, run_id)
+        tail = _plain_lines(log[-LOG_TAIL_CHARS:]) if isinstance(log, str) else ""
+        return classify_failure(
+            step, failed.get("conclusion") or job.get("conclusion"), tail
+        ), step
+    return "other", ""
+
+
 def fetch_ci(push: PushInfo) -> CiEvidence:
     required = required_workflows(push["toplevel"], push["sha"])
     listing = _gh_json(
@@ -262,4 +376,19 @@ def fetch_ci(push: PushInfo) -> CiEvidence:
                 if data is None
                 else [j for j in data.get("jobs", []) if isinstance(j, dict)]
             )
-    return ci_verdict(push, required, runs, jobs)
+    evidence = ci_verdict(push, required, runs, jobs)
+    if evidence["status"] == "failed":
+        not_passed = [
+            r
+            for r in evidence["runs"]
+            if r["status"] == "completed" and r["conclusion"] != "success"
+        ]
+        failed_run = min(not_passed, key=_not_the_failure, default=None)
+        if (
+            failed_run
+        ):  # a failure seen at job level only is left without a made-up kind
+            kind, step = failure_note(push["repo"], failed_run["id"])
+            evidence["kind"] = kind
+            where = f" (실패 단계: {step})" if step else ""
+            evidence["why"] += f"; 원인 분류: {KIND_LABEL[kind]}{where}"
+    return evidence
