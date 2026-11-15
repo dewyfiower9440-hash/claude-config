@@ -52,6 +52,7 @@ TESTS = [
     "test_handoff",
     "test_state_gc",
     "test_ledger",
+    "test_task_switch",
     "test_format_lint",
     "test_guard_corpus",  # prints a notice and passes when no local transcripts exist
     "test_run_all",

@@ -247,6 +247,13 @@ def default_state() -> dict[str, Any]:
         "context_seeded": 0,
         # 1 once this session's earlier-format missed-event notes were looked for (P0-15)
         "notes_checked": 0,
+        # path -> content hash of this turn's changes that an approval valid at the time
+        # covered when another approval took its place (P1-01b); emptied at every prompt
+        "turn_covered": {},
+        # path -> content hash of what the turn had already changed when the current
+        # approval was recorded (those are not that approval's changes)
+        "turn_approval_from": {},
+        "turn_cover_off": 0,  # 1: not known what an approval started from; cover nothing
     }
 
 
@@ -850,6 +857,77 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
         )
 
 
+def turn_changed_now(state: dict[str, Any]) -> dict[str, str] | None:
+    """normcased path -> content hash now ("" when it is no regular file now) of everything
+    that differs from the turn baselines; None when a repository cannot be read."""
+    import worktree
+
+    out: dict[str, str] = {}
+    for top, base in state.get("repos", {}).items():
+        turn_base = base.get("turn") or base.get("session")
+        now = worktree.content_map(top, _watch_globs(top))
+        if turn_base is None or now is None:
+            return None
+        for rel in worktree.changed(turn_base, now):
+            out[os.path.normcase(os.path.join(top, rel))] = now.get(rel) or ""
+    return out
+
+
+def cover_changes(
+    state: dict[str, Any],
+    approval: dict[str, Any],
+    changed: dict[str, str] | None = None,
+) -> None:
+    """Remember which of this turn's changes `approval` covers, with their content as it is
+    now: the Stop of this turn does not hold them against the scope of a later approval
+    (P1-01b). Covered is only what is inside the approval's scope and changed after the
+    approval began (not what was already like this when it was recorded); a file that
+    changes again later no longer matches. Nothing is covered when git cannot answer or
+    when it is not known what the turn looked like when the approval began."""
+    if state.get("turn_cover_off"):
+        return
+    changed = turn_changed_now(state) if changed is None else changed
+    if changed is None:
+        return
+    began = state.get("turn_approval_from") or {}
+    covered = state.setdefault("turn_covered", {})
+    for full, digest in changed.items():
+        if began.get(full) == digest:
+            continue  # as it was when this approval began: not made under it
+        if not digest and os.path.lexists(full):
+            continue  # there, but no regular file: a later change could not be told apart
+        if in_approved_scope(approval, full):
+            covered[full] = digest
+
+
+def keep_covered_changes(
+    data: dict[str, Any], state: dict[str, Any]
+) -> dict[str, str] | None:
+    """Called when a new approval is about to replace the current one in the middle of a
+    turn. Returns what the turn has changed so far (None if unknown), which is also what
+    the new approval starts from. The validity check runs on a copy of the state's top
+    level: what it decides about the outgoing approval must not stick to the new one."""
+    changed = turn_changed_now(state)
+    prompt_id = data.get("prompt_id")
+    if changed is None or not active_approval(state, prompt_id):
+        return changed
+    state.setdefault("turn_covered", {})  # shared with the copy below
+    probe = dict(state)
+    if v2_active():
+        try:
+            # a plan closed as done covers its changes inside this call (see there)
+            refused = v2_write_check(probe, str(data.get("cwd") or os.getcwd()))
+        except Exception:  # hook boundary: an unreadable store covers nothing
+            log.exception("approvals.v2_hook_failure")
+            return changed
+        if refused:
+            return changed
+    previous = active_approval(probe, prompt_id)
+    if previous:
+        cover_changes(state, previous, changed)
+    return changed
+
+
 def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
     tool = data.get("tool_name", "")
     ti = data.get("tool_input", {}) or {}
@@ -884,7 +962,11 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
             state["last_review"] = now  # a review, not verification
     elif tool == "ExitPlanMode":
         # PostToolUse only fires once the user approved the plan.
+        changed = keep_covered_changes(data, state)
         record_approval(data, state)
+        state["turn_approval_from"] = changed or {}
+        if changed is None:
+            state["turn_cover_off"] = 1
 
 
 # ---------------------------------------------------------------- plan approval scope
@@ -1548,6 +1630,10 @@ def v2_record_approval(
             "저장소 문제를 해결한 뒤 계획을 다시 승인받으세요"
         )
         return
+    # A stored, fresh user approval: what was decided about the approval it replaces
+    # (lost for the rest of the prompt) is not a verdict on this one.
+    state["approval_invalid"] = None
+    state["v2_block"] = None
     state["approval"] = {
         "v": 2,
         "approval_id": rec["approval_id"],
@@ -1688,6 +1774,10 @@ def v2_write_check(
             )  # the stored scope, not the cache
             return None
         why = verdict.reason
+    if not state.get("approval_invalid") and "plan_status:done" in str(why):
+        # The plan was closed as done: the ordinary end of a task. What it changed inside
+        # its scope stays covered for this turn's Stop; any other loss covers nothing.
+        cover_changes(state, ptr)
     state["approval_invalid"] = why
     state["v2_block"] = why
     return REASON_V2_INVALID.format(task=ptr.get("task_id"), why=why)
@@ -2080,6 +2170,9 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
             emit_prompt_context(told)
     if not relay:
         refresh_turn_baselines(state)
+        state["turn_covered"] = {}
+        state["turn_approval_from"] = {}
+        state["turn_cover_off"] = 0
 
 
 # ---------------------------------------------------------------- D-5 content tracking
@@ -2422,6 +2515,16 @@ def refresh_content(state: dict[str, Any]) -> None:
                         and now.get(p) == new_tree.get(p)
                     )
                 }
+        covered = state.get("turn_covered") or {}
+        if covered:
+            # covered by the approval that was valid when another replaced it, and not
+            # touched since (same content): not this approval's to answer for
+            moved = {
+                p
+                for p in moved
+                if covered.get(os.path.normcase(os.path.join(top, p)))
+                != (now.get(p) or "")
+            }
         turn_changes |= {os.path.join(top, p) for p in moved}
         changed_roots: dict[str, Any] = {}
         for p in worktree.changed(base["session"], now):
