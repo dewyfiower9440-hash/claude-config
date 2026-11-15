@@ -325,14 +325,17 @@ check(
     (summary("risk", []), call("summarize_rows", "nonsense", [], 0.0)),
     ("rows 0 (skipped 0)", None),
 )
-import risk as risk_module
-
 import discipline as disc
+
+# a statement between the two imports: `discipline` is sorted as first-party only where
+# ~/.claude/discipline/ exists, so one block with both is "unsorted" either here or on CI
+OUTPUT_DEFAULT = disc.OUTPUT_ADVICE_DEFAULT
+import risk as risk_module
 
 check(
     "U6 the thresholds the report names are the hooks' own",
     (getattr(ur, "RISK_AT", None), getattr(ur, "OUTPUT_AT", None)),
-    (risk_module.ADVICE_AT, disc.OUTPUT_ADVICE_DEFAULT),
+    (risk_module.ADVICE_AT, OUTPUT_DEFAULT),
 )
 
 # ---------------------------------------------------------------- the commands
