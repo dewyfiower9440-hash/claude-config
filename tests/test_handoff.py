@@ -168,8 +168,17 @@ git(repo, "add", ".")
 git(repo, "commit", "-m", "feat: start")
 (repo / "dirty1.txt").write_text("x", encoding="utf-8")
 (repo / "dirty2.txt").write_text("x", encoding="utf-8")
-STORED = STORE / f"{handoff.key(str(repo))}.json"
-MARKER = STORE / f"{handoff.key(str(repo))}.open.json"
+# The hooks key the store by the path git reports; on CI the temp folder's own spelling
+# is a short (8.3) name, so the test asks git too instead of using its own path.
+TOP = subprocess.run(
+    ["git", "rev-parse", "--show-toplevel"],
+    cwd=repo,
+    capture_output=True,
+    text=True,
+    check=True,
+).stdout.strip()
+STORED = STORE / f"{handoff.key(TOP)}.json"
+MARKER = STORE / f"{handoff.key(TOP)}.open.json"
 
 first = start(repo, "sess-A")
 check(
