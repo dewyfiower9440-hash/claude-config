@@ -80,6 +80,16 @@ def build_handoff(
     return clean(raw)
 
 
+def masked(text: str) -> str:
+    """`text` with token-shaped parts masked (P1-09, hooks/redact.py)."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from redact import redact
+
+    return str(redact(text))
+
+
 def clean(raw: object) -> dict[str, Any]:
     """`raw` reduced to the allow-list: known keys of the right type, text on one line."""
     out: dict[str, Any] = {}
@@ -95,9 +105,10 @@ def clean(raw: object) -> dict[str, Any]:
         if isinstance(value, bool) or not isinstance(value, kind):
             continue
         if kind is str:
-            value = one_line(
-                value, STEP_CHARS if key == "next_step" else VALUE_CHARS * 2
-            )
+            # masked before it is cut: a token cut in two would no longer look like one
+            limit = STEP_CHARS if key == "next_step" else VALUE_CHARS * 2
+            # bounded first (with room for a token that straddles the limit to stay whole)
+            value = masked(" ".join(value[: limit * 20].split())[: limit + 512])[:limit]
             if not value:
                 continue
         out[key] = value

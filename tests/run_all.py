@@ -54,6 +54,7 @@ TESTS = [
     "test_handoff",
     "test_state_gc",
     "test_usage",
+    "test_redact",
     "test_ledger",
     "test_task_switch",
     "test_review_binding",

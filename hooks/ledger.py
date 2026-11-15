@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import secrets
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -119,6 +120,16 @@ def content_id(digests: dict[str, str]) -> str:
 
 
 # ---------------------------------------------------------------- pure: entries
+def masked(text: str) -> str:
+    """`text` with token-shaped parts masked (P1-09, hooks/redact.py)."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from redact import redact
+
+    return str(redact(text))
+
+
 def clean(raw: object) -> dict[str, Any]:
     """`raw` reduced to the allow-list: known keys of the right type, text on one line."""
     out: dict[str, Any] = {}
@@ -134,7 +145,9 @@ def clean(raw: object) -> dict[str, Any]:
         if isinstance(value, bool) or not isinstance(value, kind):
             continue
         if kind is str:
-            value = " ".join(value.split())[:TEXT_CHARS]
+            value = masked(
+                " ".join(value[: TEXT_CHARS * 20].split())[: TEXT_CHARS + 512]
+            )[:TEXT_CHARS]
             if not value:
                 continue
         out[key] = value

@@ -88,9 +88,12 @@ def summarize_plan(path: str, text: str) -> PlanSummary | None:
     return PlanSummary(
         path=path,
         status=status.group(1).lower(),
-        task=task.group(1)[:TASK_CHARS] if task else "-",
+        # masked before it is cut, like every text below: half a token is still a secret
+        task=masked(task.group(1)[:600])[:TASK_CHARS] if task else "-",
         unchecked=sum(1 for s in steps if UNCHECKED.match(s)),
-        reason=" ".join(reason.group(1).strip().strip("'\"").split())[:REASON_CHARS]
+        reason=masked(" ".join(reason.group(1).strip().strip("'\"").split())[:600])[
+            :REASON_CHARS
+        ]
         if reason
         else "",
     )
@@ -158,6 +161,16 @@ def _when(at: object) -> tuple[float | None, str]:
     return None, "?"
 
 
+def masked(text: str) -> str:
+    """`text` with token-shaped parts masked (P1-09, hooks/redact.py)."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from redact import redact
+
+    return str(redact(text))
+
+
 def ledger_notes(
     summaries: object,
     latest: object,
@@ -190,14 +203,15 @@ def ledger_notes(
     for s in plans:
         task = s.task[:TASK_CHARS]
         entry = entries.get(task)
+        shown = masked(task)  # matched by the id as written, shown masked
         if not isinstance(entry, dict):
-            out.append(f"- task:{task}: 원장 기록 없음")
+            out.append(f"- task:{shown}: 원장 기록 없음")
             continue
         state = entry.get("state")
         at, stamp = _when(entry.get("at"))
-        review = " ".join(str(entry.get("review") or "?").split())[:20]
+        review = masked(" ".join(str(entry.get("review") or "?").split()))[:20]
         line = (
-            f"- task:{task}: {LEDGER_STATE.get(str(state), '알 수 없는 상태')} "
+            f"- task:{shown}: {LEDGER_STATE.get(str(state), '알 수 없는 상태')} "
             f"({stamp}, 리뷰 {review})"
         )
         if state in ("LOCALLY_VERIFIED", "CI_VERIFIED"):
@@ -243,8 +257,10 @@ def parse_plan(path: str, text: str) -> PlanInfo | None:
     if heading:
         rest = body[heading.end() :]
         nxt = re.search(r"^#", rest, re.MULTILINE)
-        goal = rest[: nxt.start() if nxt else len(rest)].strip()[:GOAL_CHARS]
-    steps = tuple(m.group(0).strip() for m in CHECKBOX.finditer(body))
+        goal = masked(
+            rest[: nxt.start() if nxt else len(rest)].strip()[: GOAL_CHARS + 512]
+        )[:GOAL_CHARS]
+    steps = tuple(masked(m.group(0).strip()[:2000]) for m in CHECKBOX.finditer(body))
     return PlanInfo(path=path, goal=goal, checklist=steps)
 
 
@@ -528,7 +544,8 @@ def main() -> None:
     out = {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": context,
+            # P1-09: whatever the plan, the branch name or a record brought along
+            "additionalContext": masked(context)[:MAX_CHARS],
         }
     }
     sys.stdout.buffer.write(json.dumps(out, ensure_ascii=False).encode("utf-8"))
