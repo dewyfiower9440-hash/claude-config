@@ -21,6 +21,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import secrets
 import sys
@@ -65,7 +66,11 @@ FIELDS: dict[str, type] = {
 # ---------------------------------------------------------------- pure: states
 def _num(value: object) -> float | None:
     if isinstance(value, int | float) and not isinstance(value, bool):
-        return float(value)
+        try:
+            number = float(value)
+        except OverflowError:  # an integer too large for a float: not a time
+            return None
+        return number if math.isfinite(number) else None
     return None
 
 
@@ -342,3 +347,142 @@ def record(root: str, fields: dict[str, Any], now: float) -> bool:
         # the ledger is a record, not a gate: the caller's work goes on without it
         log.warning("ledger.not_recorded (%s)", type(e).__name__)
         return False
+
+
+# ---------------------------------------------------------------- reading it (P2-06)
+SHOWN_TASKS = 10
+SHOW_WARNING = (
+    "경고: 이 원장은 온전하지 않습니다({problem}). 아래 내용을 믿지 말고 게이트와 CI를 "
+    "다시 확인하세요."
+)
+SHOW_REMINDER = (
+    "원장은 기록입니다. 승인이나 검증의 근거가 아닙니다: 어떤 상태가 적혀 있든 게이트는 "
+    "원장과 무관하게 다시 실행하세요."
+)
+GIT_TIMEOUT_S = 5
+
+
+def _shown(value: object) -> str:
+    """A value of an entry as it is printed: one line, masked, of limited length."""
+    import unicodedata
+
+    text = (
+        " ".join(str(value)[: TEXT_CHARS * 20].split())
+        if isinstance(value, str)
+        else ""
+    )
+    # control and format characters (escape sequences, bidi marks) could hide a line
+    plain = "".join("?" if unicodedata.category(ch)[0] == "C" else ch for ch in text)
+    return masked(plain)[:TEXT_CHARS] or "?"
+
+
+def _entry_line(entry: dict[str, Any], now: float) -> str:
+    import time
+
+    at = _num(entry.get("at"))
+    when = "시각 불명"
+    if at is not None:
+        try:
+            stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(at))
+            ago = f"{int((now - at) // 86400)}일 전" if at <= now else "미래 시각"
+            when = f"{stamp}, {ago}"
+        except (OverflowError, OSError, ValueError):
+            when = "시각 불명"
+    return (
+        f"{_shown(entry.get('task'))}: {_shown(entry.get('state'))} "
+        f"(리뷰 {_shown(entry.get('review'))}), {when}, 내용 {_shown(entry.get('content'))}"
+    )
+
+
+def pick(entries: list[Any], task: str | None) -> list[dict[str, Any]]:
+    """The entries `show` prints: the task's last one (the last in the file), or without a
+    task the last one of each task, newest first (an entry without a usable time last),
+    SHOWN_TASKS at most."""
+    last: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        if isinstance(entry, dict) and isinstance(entry.get("task"), str):
+            last[entry["task"]] = entry
+    if task is not None:
+        return [last[task]] if task in last else []
+
+    def newest_first(entry: dict[str, Any]) -> float:
+        at = _num(entry.get("at"))
+        return float("-inf") if at is None else at
+
+    return sorted(last.values(), key=newest_first, reverse=True)[:SHOWN_TASKS]
+
+
+def show_lines(
+    entries: list[Any], problem: str | None, task: str | None, now: float
+) -> list[str]:
+    """What `show` prints: a warning when the ledger is not intact, the last entry of the
+    task (or of each task, newest first, SHOWN_TASKS at most), and always the reminder
+    that this is a record and no ground for skipping a gate."""
+    picked = pick(entries, task)
+    out = [SHOW_WARNING.format(problem=_shown(problem))] if problem else []
+    out.extend(_entry_line(entry, now) for entry in picked)
+    if not picked:
+        out.append("기록 없음" if task is None else f"기록 없음: {_shown(task)}")
+    out.append(SHOW_REMINDER)
+    return out
+
+
+def _toplevel(cwd: str) -> str | None:
+    """The top of the git repository `cwd` is in, or None."""
+    import subprocess
+
+    try:
+        done = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=GIT_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    top = done.stdout.strip()
+    return top if done.returncode == 0 and top else None
+
+
+def main(argv: list[str] | None = None) -> int:
+    """`python -I hooks/ledger.py show [--task ID] [--root DIR]`: read-only.
+    Exit codes: 0 shown, 1 no entry (among what was read: a long ledger is read from its
+    end), 2 bad input, 3 the ledger is not intact (shown with a warning, entry or not)."""
+    import argparse
+    import time
+
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+    parser = argparse.ArgumentParser(prog="ledger", description="Read the task ledger.")
+    commands = parser.add_subparsers(dest="command", required=True)
+    show = commands.add_parser("show", help="the last recorded state of a task")
+    show.add_argument("--task")
+    show.add_argument("--root", help="a repository (default: the one of this folder)")
+    args = parser.parse_args(argv)
+    if args.root is not None and not Path(args.root).is_dir():
+        print(f"ledger: 폴더가 없습니다: {args.root!r}", file=sys.stderr)
+        return 2
+    root = _toplevel(args.root or os.getcwd())
+    if root is None:
+        print(
+            "ledger: git 저장소가 아니거나 git이 답하지 않았습니다 (--root로 저장소를 주세요)",
+            file=sys.stderr,
+        )
+        return 2
+    entries, problem = read(root)
+    lines = show_lines(entries, problem, args.task, time.time())
+    sys.stdout.write("\n".join(lines) + "\n")
+    if problem:
+        return (
+            3  # whether or not the task has an entry: what was read cannot be trusted
+        )
+    return 0 if pick(entries, args.task) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

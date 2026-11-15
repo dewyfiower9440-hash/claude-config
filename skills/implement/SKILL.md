@@ -12,6 +12,7 @@ Arguments: `$ARGUMENTS`
 - The plan file is the source of truth: the one given (`docs/plans/...md`), or for "continue"/no argument the newest `docs/plans/*.md` with `status: in-progress`. If there is none and the change is non-trivial, run `/plan` first.
 - Resume from the first unchecked step (`- [ ]`). After a compaction or a new session, re-read the plan file and `git log --oneline -10` before doing anything; do not trust memory of earlier steps.
 - Check that the working tree is clean (`git status --porcelain`); if it is not and the changes are not explained by the plan's progress, ask what to do with them.
+- Read the task's last recorded verification state: `python -I ~/.claude/hooks/ledger.py show --task <the plan's task id>` (run from the project; exit code 1 means no entry among the recent records, 3 that the ledger is not intact). It is a note on where the last session stopped, nothing more: when it disagrees with the checkboxes (all steps ticked but `BLOCKED` or `UNKNOWN`, or a warning that the ledger is not intact), say so in the report and start with the quality gate. Never skip a gate, a review or the plan approval because the ledger says `LOCALLY_VERIFIED` or `CI_VERIFIED`: the hooks judge by content, not by the ledger.
 
 ## 1. Run every step autonomously
 Proceed through all remaining steps without asking between them. For each step:
