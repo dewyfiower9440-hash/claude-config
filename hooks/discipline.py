@@ -255,6 +255,10 @@ def default_state() -> dict[str, Any]:
         "turn_approval_from": {},
         # "<root>|<content id>" of changes already noted as lacking a current review
         "review_observed": [],
+        # P1-03: what the next prompt is told about a turn without any test change, and
+        # the turn that was last counted in the observation file
+        "test_gap_note": "",
+        "test_gap_turn": 0,
         "turn_cover_off": 0,  # 1: not known what an approval started from; cover nothing
     }
 
@@ -957,6 +961,11 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
                 state["touched_tops"].append(top)  # also when no PreToolUse was seen
             if top:
                 note_owner(state, top, actor(data))
+            if state.get("test_gap_note") and is_test_file(
+                path, list(state.get("repos") or {})
+            ):
+                # a test written after the Stop that prepared the note: withdrawn
+                state["test_gap_note"] = ""
             if Path(path).suffix.lower() in CODE_EXT:
                 state["last_code_edit"] = now
                 mark_dirty(state, path, now, changed_lines(tool, ti), by=[actor(data)])
@@ -2172,6 +2181,10 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
         # stale approval does not carry over to it.
         state["approval"]["prompt_id"] = data.get("prompt_id")
     told = ack_missing(data, state)  # the user's `ack-missing <path>`, if this is one
+    if not relay and state.get("test_gap_note"):
+        # P1-03: said once, to the user's own next prompt (a relayed one leaves it)
+        told = "\n\n".join(x for x in (told, str(state["test_gap_note"])) if x)
+        state["test_gap_note"] = ""
     try:
         top = track_repo(state, str(data.get("cwd") or os.getcwd()))
         if not relay and new_context_root(state, top) and top:
@@ -3081,6 +3094,100 @@ def observe_reviews(state: dict[str, Any]) -> None:
         log.exception("discipline.review_observe_failed")
 
 
+TEST_GAP_OBSERVE_FILE = APPROVALS_HOME / "test-gap-observe.jsonl"
+TEST_GAP_NOTE = (
+    "[discipline] 지난 턴에 구현 파일 {n}개({files})가 바뀌었고 테스트 파일은 바뀌지 않았습니다. "
+    "테스트가 필요한 변경이면 추가하고, 필요 없으면 보고에 그 이유를 적으세요. "
+    "(알림이며 차단이 아닙니다.)"
+)
+TEST_GAP_NOTE_CHARS = 300
+
+
+def _repo_place(path: str, tops: list[str]) -> tuple[str, str]:
+    """(the innermost repository of `tops` that holds `path` or "", the path inside it)."""
+    holding = [top for top in tops if _inside(path, top)]
+    if not holding:
+        return "", path
+    top = max(holding, key=len)
+    return os.path.normcase(top), os.path.relpath(path, top)
+
+
+def is_test_file(path: str, tops: list[str]) -> bool:
+    """A code file at a test path, judged by its place inside its own repository (a
+    repository below some `tests` folder is not all tests; `latest.md` is no test)."""
+    if Path(path).suffix.lower() not in CODE_EXT:
+        return False
+    return bool(
+        TEST_NAME.search(Path(path).name) or TEST_DIR.search(_repo_place(path, tops)[1])
+    )
+
+
+TEST_DIR = re.compile(r"(^|[\\/])(tests?|__tests__|spec)[\\/]", re.IGNORECASE)
+TEST_NAME = re.compile(
+    r"^test_.+|.+(_test|\.test|\.spec)\.[a-z0-9]+$|.+[a-z0-9]Tests?\.[a-z0-9]+$"
+)
+
+
+def test_gap(turn_changes: object, session_files: object, tops: object) -> list[str]:
+    """The implementation files a turn changed without any test file to go with them
+    (P1-03): code files among `turn_changes` whose repository saw no test file changed in
+    the turn or edited earlier in the session. Coarse on purpose (a refactoring is flagged
+    too, one touched test file covers its whole repository): it is a note, never a reason
+    to block."""
+    roots = [t for t in (tops if isinstance(tops, list) else []) if isinstance(t, str)]
+
+    def texts(value: object) -> list[str]:
+        return [
+            v for v in (value if isinstance(value, list) else []) if isinstance(v, str)
+        ]
+
+    changed = texts(turn_changes)
+    tested = {
+        _repo_place(path, roots)[0]
+        for path in changed + texts(session_files)
+        if is_test_file(path, roots)
+    }
+    return [
+        path
+        for path in changed
+        if Path(path).suffix.lower() in CODE_EXT
+        and not is_test_file(path, roots)
+        and _repo_place(path, roots)[0] not in tested
+    ]
+
+
+def note_test_gap(state: dict[str, Any]) -> None:
+    """Stop: prepare the note for the next prompt and count the turn once in the
+    observation file (no path, no content). Never changes the Stop."""
+    try:
+        edited = [
+            path
+            for entry in (state.get("dirty") or {}).values()
+            if isinstance(entry, dict)
+            for path in entry.get("files") or []
+        ]
+        missing = test_gap(
+            state.get("turn_changes"), edited, list(state.get("repos") or {})
+        )
+        if not missing:
+            state["test_gap_note"] = ""
+            return
+        names = ", ".join(Path(path).name for path in missing[:3])
+        if len(missing) > 3:
+            names += " 등"
+        state["test_gap_note"] = TEST_GAP_NOTE.format(n=len(missing), files=names)[
+            :TEST_GAP_NOTE_CHARS
+        ]
+        if state.get("test_gap_turn") == state.get("turn"):
+            return  # this turn is already counted (a Stop can run more than once)
+        state["test_gap_turn"] = state.get("turn") or 0
+        APPROVALS_HOME.mkdir(parents=True, exist_ok=True)
+        with open(TEST_GAP_OBSERVE_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"at": time.time(), "files": len(missing)}) + "\n")
+    except (OSError, ValueError, TypeError, AttributeError):
+        log.exception("discipline.test_gap_failed")
+
+
 def ledger_capped(state: dict[str, Any], base: str) -> bool:
     """Whether something besides the per-project content check keeps a Stop from accepting
     the task under `base` as verified: the ledger must never say more than the Stop does.
@@ -3199,6 +3306,7 @@ def on_stop(data: dict[str, Any], state: dict[str, Any]) -> None:
         # a record, not a gate: this Stop is decided the same without it
         log.exception("discipline.ledger_failed")
     observe_reviews(state)
+    note_test_gap(state)
     damaged = state_reset_active(state)
     decision = _stop_decision(state)
     if decision is None:
