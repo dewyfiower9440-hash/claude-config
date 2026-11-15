@@ -3,7 +3,7 @@
 handoff.py (SessionEnd) calls `snapshot` and `write`; session_context.py (SessionStart)
 calls `read` and `warnings`. Only numbers are kept: how many files and bytes each kind of
 folder holds and how much disk is free. No file name, no path, no content. Nothing here
-deletes anything: what removes old data is described in docs/retention.md.
+deletes anything: what removes old data is described in hooks/retention.md.
 
 The limits are initial priors (re-tune them from what the record shows over time).
 """
@@ -93,7 +93,7 @@ def warnings(snapshot: object, now: float) -> list[str]:
             out.append(
                 f"경고: {label}이(가) {value:.0f}{unit}입니다. {more}"
                 f"기준({limit:.0f}{unit})을 넘었습니다. 자동으로 지우지 않습니다. "
-                "`docs/retention.md`를 보세요."
+                "`hooks/retention.md`를 보세요."
             )
     free = snap["free_gb"]
     if free is not None and free < FREE_GB_LIMIT:
