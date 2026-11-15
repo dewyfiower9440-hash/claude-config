@@ -64,6 +64,7 @@ TESTS = [
     "test_recurrence",
     "test_memory_search",
     "test_ledger_show",
+    "test_usage_report",
     "test_format_lint",
     "test_guard_corpus",  # prints a notice and passes when no local transcripts exist
     "test_run_all",
