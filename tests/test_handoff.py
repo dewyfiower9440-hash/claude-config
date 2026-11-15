@@ -22,6 +22,8 @@ ROOT = Path(tempfile.mkdtemp(prefix="handoff-"))
 STORE = ROOT / "store"
 os.environ["CLAUDE_HANDOFF_HOME"] = str(STORE)
 os.environ["CLAUDE_PROJECTS_ROOT"] = str(ROOT / "no-projects")
+# SessionEnd also sweeps old session state (P0-13): keep that away from the real folder.
+os.environ["CLAUDE_STATE_GC_DIR"] = str(ROOT / "state-gc")
 sys.stdout.reconfigure(errors="backslashreplace")
 sys.path.insert(0, str(HOOKS))
 import handoff

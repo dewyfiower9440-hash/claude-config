@@ -27,6 +27,7 @@ V = 1
 MAX_AGE_S = 14 * 86400
 GIT_TIMEOUT_S = 1
 END_BUDGET_S = 3.0  # all git calls of one SessionEnd together (the hook's limit is 5)
+SWEEP_RESERVE_S = 1.5  # the state sweep starts only this long before END_BUDGET_S
 STEP_CHARS = 200
 VALUE_CHARS = 160  # any other text value when shown
 SECTION_CHARS = 600
@@ -330,6 +331,7 @@ def main(argv: list[str]) -> int:
     if argv[:1] != ["end"]:
         print("usage: handoff.py end  (SessionEnd payload on stdin)", file=sys.stderr)
         return 0
+    started = time.monotonic()
     try:
         data = json.loads(sys.stdin.buffer.read().decode("utf-8-sig"))
         if isinstance(data, dict):
@@ -347,6 +349,14 @@ def main(argv: list[str]) -> int:
     ) as e:
         # SessionEnd cannot block: never fail the session's end
         print(f"handoff: not written ({type(e).__name__})", file=sys.stderr)
+    try:  # P0-13: once per session end, drop state files of long-silent sessions
+        if time.monotonic() - started < END_BUDGET_S - SWEEP_RESERVE_S:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import state_gc
+
+            state_gc.sweep_default(time.time())
+    except (OSError, ValueError, ImportError, OverflowError) as e:
+        print(f"handoff: state sweep skipped ({type(e).__name__})", file=sys.stderr)
     return 0
 
 
