@@ -195,8 +195,15 @@ def latest(entries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 # ---------------------------------------------------------------- storage
 def home() -> Path:
+    """The ledger folder. A run with an isolated approval home (a test, a benchmark) keeps
+    its ledger there too: its tasks are not the user's and must not reach the real ledger."""
     custom = os.environ.get("CLAUDE_LEDGER_HOME")
-    return Path(custom) if custom else Path.home() / ".claude" / "state" / "ledger"
+    if custom:
+        return Path(custom)
+    isolated = os.environ.get("CLAUDE_DISCIPLINE_HOME")
+    if isolated:
+        return Path(isolated) / "ledger"
+    return Path.home() / ".claude" / "state" / "ledger"
 
 
 def repo_file(root: str) -> Path:

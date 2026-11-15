@@ -263,6 +263,26 @@ check(
     ),
 )
 
+# ---------------------------------------------------------------- where the ledger lives
+_saved = {
+    k: os.environ.pop(k, None) for k in ("CLAUDE_LEDGER_HOME", "CLAUDE_DISCIPLINE_HOME")
+}
+real_home = ledger.home()
+os.environ["CLAUDE_DISCIPLINE_HOME"] = str(ROOT / "home")
+follows = ledger.home()
+os.environ["CLAUDE_LEDGER_HOME"] = str(ROOT / "explicit")
+explicit = ledger.home()
+os.environ.pop("CLAUDE_LEDGER_HOME")
+check(
+    "R-T21 the real ledger by default; next to an isolated approval home; where it is told to be",
+    (real_home, follows, explicit),
+    (
+        Path.home() / ".claude" / "state" / "ledger",
+        ROOT / "home" / "ledger",
+        ROOT / "explicit",
+    ),
+)
+
 # ---------------------------------------------------------------- storage
 os.environ["CLAUDE_LEDGER_HOME"] = str(LHOME)
 REPO_A = "C:\\some\\repo"
