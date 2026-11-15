@@ -259,6 +259,7 @@ def default_state() -> dict[str, Any]:
         # the turn that was last counted in the observation file
         "test_gap_note": "",
         "test_gap_turn": 0,
+        "output_advice_turn": 0,  # P1-04: the turn that already got the delegation hint
         "turn_cover_off": 0,  # 1: not known what an approval started from; cover nothing
     }
 
@@ -874,6 +875,115 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
         )
 
 
+OUTPUT_OBSERVE_MIN = 2000  # smaller outputs are not worth a row
+OUTPUT_ADVICE_DEFAULT = 8000  # initial prior; re-tune from output-size-observe.jsonl
+OUTPUT_ADVICE_NOTE = (
+    "[discipline] 방금 테스트·검사 명령의 출력이 {n}자였습니다(기준 {limit}자). 긴 출력은 "
+    "`test-runner` subagent에 맡기면 요약만 돌아옵니다. 직접 실행할 때는 조용한 옵션(-q 등)을 "
+    "쓰세요. (알림이며 차단이 아닙니다.)"
+)
+
+
+def response_chars(response: object) -> int:
+    """How much text a shell tool result carries."""
+    if isinstance(response, str):
+        return len(response)
+    if isinstance(response, dict):
+        return sum(len(v) for v in response.values() if isinstance(v, str))
+    return 0
+
+
+def advice_threshold(raw: object) -> int:
+    """CLAUDE_OUTPUT_ADVICE_CHARS: a whole number from 1000 to 1000000, else the default."""
+    if isinstance(raw, str) and raw.strip().isascii() and raw.strip().isdigit():
+        value = int(raw.strip())
+        if 1000 <= value <= 1_000_000:
+            return value
+    return OUTPUT_ADVICE_DEFAULT
+
+
+def is_test_run(command: object, dialect: str, gate: object) -> bool:
+    """Whether a shell command runs tests or checks: it contains the project's declared
+    gate, or one of its commands is a real runner. A command that cannot be parsed is not."""
+    if not isinstance(command, str):
+        return False
+    if isinstance(gate, str) and gate.strip() and gate.strip() in command:
+        return True
+    from shellparse import ParseError, parse
+    from verification import is_runner
+
+    try:
+        return any(
+            is_runner(cmd)
+            for cmd in parse(
+                command, "powershell" if dialect == "powershell" else "bash"
+            )
+        )
+    except ParseError:
+        return False
+
+
+def note_output_size(
+    data: dict[str, Any], state: dict[str, Any], *, failed: bool
+) -> None:
+    """P1-04: count large shell outputs (no command, no content, no path) and, for a large
+    test run made by the main conversation, say once per turn that it can be delegated.
+    A note only; a failure here changes nothing else the hook does."""
+    try:
+        # a failure event may carry its text as `error` instead of a tool_response
+        size = response_chars(data.get("tool_response")) or response_chars(
+            data.get("error") if failed else None
+        )
+        if size < OUTPUT_OBSERVE_MIN:
+            return
+        from verification import find_policy
+
+        cwd = str(data.get("cwd") or os.getcwd())
+        dialect = "powershell" if data.get("tool_name") == "PowerShell" else "bash"
+        test = is_test_run(
+            (data.get("tool_input") or {}).get("command"),
+            dialect,
+            find_policy(os.path.join(cwd, "_")).get("gate"),
+        )
+        main = actor(data) == "main"
+        limit = advice_threshold(os.environ.get("CLAUDE_OUTPUT_ADVICE_CHARS"))
+        if (
+            test
+            and main
+            and not failed
+            and size >= limit
+            and state.get("output_advice_turn") != state.get("turn")
+        ):
+            state["output_advice_turn"] = state.get("turn") or 0
+            print(
+                json.dumps(
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PostToolUse",
+                            "additionalContext": OUTPUT_ADVICE_NOTE.format(
+                                n=size, limit=limit
+                            ),
+                        }
+                    }
+                )
+            )
+        row = {
+            "at": time.time(),
+            "chars": size,
+            "test": test,
+            "failed": failed,
+            "who": "main" if main else "subagent",
+        }
+        APPROVALS_HOME.mkdir(parents=True, exist_ok=True)
+        with open(
+            APPROVALS_HOME / "output-size-observe.jsonl", "a", encoding="utf-8"
+        ) as f:
+            f.write(json.dumps(row) + "\n")
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+        # RecursionError: the parser on an absurdly nested command
+        log.exception("discipline.output_size_failed")
+
+
 def turn_changed_now(state: dict[str, Any]) -> dict[str, str] | None:
     """normcased path -> content hash now ("" when it is no regular file now) of everything
     that differs from the turn baselines; None when a repository cannot be read."""
@@ -979,6 +1089,7 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
                 log.exception("approvals.v2_hook_failure")
                 state["approval"] = None
                 state["approval_warning"] = v2_failure(e)
+        note_output_size(data, state, failed=False)
     elif tool in ("Agent", "Task"):
         if ti.get("subagent_type") in REVIEW_AGENTS:
             state["last_review"] = now  # a review, not verification
@@ -2014,6 +2125,7 @@ def on_fail(data: dict[str, Any], state: dict[str, Any]) -> None:
     if data.get("tool_name") in ("Bash", "PowerShell"):
         note_shell_touch(data, state, after=True)  # also when no PreToolUse was seen
         record_evidence(data, state, failed=True)
+        note_output_size(data, state, failed=True)
 
 
 def relay_shaped(prompt: str) -> bool:
