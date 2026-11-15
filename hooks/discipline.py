@@ -253,6 +253,8 @@ def default_state() -> dict[str, Any]:
         # path -> content hash of what the turn had already changed when the current
         # approval was recorded (those are not that approval's changes)
         "turn_approval_from": {},
+        # "<root>|<content id>" of changes already noted as lacking a current review
+        "review_observed": [],
         "turn_cover_off": 0,  # 1: not known what an approval started from; cover nothing
     }
 
@@ -611,7 +613,8 @@ def agent_key(data: dict[str, Any]) -> str | None:
 
 def on_agent_start(data: dict[str, Any], state: dict[str, Any]) -> None:
     """SubagentStart (spawned or resumed): remember it as running and tell it the tracking
-    rules. Recorded for the reasons only; no decision reads it."""
+    rules. Recorded for the reasons; the one thing a decision reads is what a review agent
+    saw when it started (`review`, P1-02), and only the review gate reads that."""
     who = agent_key(data)
     if who is None:
         return
@@ -631,6 +634,16 @@ def on_agent_start(data: dict[str, Any], state: dict[str, Any]) -> None:
         "stopped": None,
         "runs": (runs if isinstance(runs, int) else 0) + 1,
     }
+    if data.get("agent_type") in REVIEW_AGENTS:
+        # P1-02: the review counts for this content only, and only once the agent ended
+        try:
+            agents[who]["review"] = review_snapshot(
+                state, str(data.get("cwd") or os.getcwd())
+            )
+        except (OSError, ValueError):
+            # no snapshot means "no review recorded": the safe side, and the agent starts
+            log.exception("discipline.review_snapshot_failed")
+            agents[who]["review"] = {}
     print(
         json.dumps(
             {
@@ -2853,6 +2866,9 @@ def _content_decision(
         if outcome == "passed":
             return REASON_STALE.format(root=root or "이 프로젝트"), None
         return REASON_UNVERIFIED + where + edited_by, None
+    review = _review_decision(state, root)
+    if review:
+        return review
     if c.get("ci") != "required":
         return None
     ref_sha = "|".join(sorted(digests.values()))
@@ -2960,9 +2976,116 @@ def stop_block_reason(state: dict[str, Any], stop_hook_active: bool) -> str | No
     return decision[0] if decision else None
 
 
+REVIEW_ORDER = ("missing", "stale", "running", "current", "none")  # worst first
+REVIEW_OBSERVE_FILE = APPROVALS_HOME / "review-observe.jsonl"
+MAX_REVIEW_OBSERVED = 50
+MAX_REVIEW_ROOTS = 10
+
+
+def review_state(state: dict[str, Any], root: str) -> str:
+    """Whether the change in project `root` has had its independent review (P1-02):
+    "none" (no review rule applies), "current" (a reviewer that has ended saw exactly this
+    content), "running" (one that saw it has not ended), "stale" (reviewed, changed since),
+    "missing". A project whose content git does not track is judged by time, as before."""
+    entry = (state.get("dirty") or {}).get(root)
+    if not isinstance(entry, dict) or not review_triggers(entry, root):
+        return "none"
+    content = (state.get("content") or {}).get(root)
+    digests = content.get("digests") if isinstance(content, dict) else None
+    if not digests or root not in (state.get("content_tracked_roots") or []):
+        reviewed_at = _number(state.get("last_review")) or 0.0
+        return (
+            "current" if reviewed_at >= (_number(entry.get("at")) or 0.0) else "missing"
+        )
+    found = "missing"
+    for agent in (state.get("agents") or {}).values():
+        seen = agent.get("review") if isinstance(agent, dict) else None
+        snap = seen.get(root) if isinstance(seen, dict) else None
+        if not isinstance(snap, dict):
+            continue
+        if all(snap.get(top) == digest for top, digest in digests.items()):
+            if agent.get("stopped"):
+                return "current"
+            found = "running"
+        elif found == "missing":
+            found = "stale"
+    return found
+
+
+def review_snapshot(state: dict[str, Any], cwd: str) -> dict[str, dict[str, str]]:
+    """What a reviewer that starts now sees: the content hashes of the edited projects."""
+    out: dict[str, dict[str, str]] = {}
+    dirty = state.get("dirty") or {}
+    newest = sorted(
+        dirty,
+        key=lambda r: _number((dirty.get(r) or {}).get("at")) or 0.0,
+        reverse=True,
+    )
+    for root in newest[:MAX_REVIEW_ROOTS]:
+        digests = evidence_digests(state, root, cwd)
+        if digests:
+            out[root] = digests
+    return out
+
+
+def _review_decision(state: dict[str, Any], root: str) -> tuple[str, str] | None:
+    """The review gate (CLAUDE_REVIEW_GATE=1) for a project judged by content."""
+    if os.environ.get("CLAUDE_REVIEW_GATE") != "1":
+        return None
+    if root not in (state.get("content_tracked_roots") or []):
+        return None  # judged by time: _first_stop_problem asks for that review, once
+    if review_state(state, root) in ("none", "current"):
+        return None
+    content = (state.get("content") or {}).get(root) or {}
+    key = f"{root}|review|{'|'.join(sorted((content.get('digests') or {}).values()))}"
+    if not _not_yet_notified(state, key):
+        return None
+    entry = (state.get("dirty") or {}).get(root) or {}
+    return REASON_REVIEW.format(
+        root=root or "이 프로젝트", why=", ".join(review_triggers(entry, root))
+    ), key
+
+
+def observe_reviews(state: dict[str, Any]) -> None:
+    """One line per verified change that lacks a current review (what the review gate
+    would hold, were it on): for judging the gate before it is made the default. No path
+    and no content; never changes the Stop, so a failure is logged and nothing else."""
+    try:
+        seen: list[str] = state.setdefault("review_observed", [])
+        for root, content in sorted((state.get("content") or {}).items()):
+            digests = content.get("digests") or {}
+            ev = (state.get("evidence") or {}).get(root) or {}
+            if ev.get("outcome") != "passed" or not all(
+                (ev.get("digests") or {}).get(t) == d for t, d in digests.items()
+            ):
+                continue  # not verified yet: the review question comes after that
+            verdict = review_state(state, root)
+            if verdict in ("none", "current"):
+                continue
+            key = f"{root}|{'|'.join(sorted(digests.values()))}|{verdict}"
+            if key in seen:
+                continue
+            seen.append(key)
+            del seen[:-MAX_REVIEW_OBSERVED]
+            entry = (state.get("dirty") or {}).get(root) or {}
+            row = {
+                "at": time.time(),
+                "state": verdict,
+                "rules": len(review_triggers(entry, root)),
+                "gate": os.environ.get("CLAUDE_REVIEW_GATE") == "1",
+            }
+            APPROVALS_HOME.mkdir(parents=True, exist_ok=True)
+            with open(REVIEW_OBSERVE_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=True) + "\n")
+    except (OSError, ValueError, TypeError, AttributeError):
+        log.exception("discipline.review_observe_failed")
+
+
 def ledger_capped(state: dict[str, Any], base: str) -> bool:
     """Whether something besides the per-project content check keeps a Stop from accepting
-    the task under `base` as verified: the ledger must never say more than the Stop does."""
+    the task under `base` as verified: the ledger must never say more than the Stop does.
+    The review gate is not part of this: a missing review is noted in the entry's own
+    `review` field, next to the verification state it does not change."""
 
     def touches(place: object) -> bool:
         return isinstance(place, str) and (_inside(place, base) or _inside(base, place))
@@ -3000,6 +3123,7 @@ def record_ledger(data: dict[str, Any], state: dict[str, Any]) -> None:
 
     base = str(ptr["base"])
     states: list[str] = []
+    reviews: list[str] = []
     digests: dict[str, str] = {}
     for root, entry in sorted(state.get("content", {}).items()):
         tops = entry.get("digests") or {}
@@ -3013,6 +3137,7 @@ def record_ledger(data: dict[str, Any], state: dict[str, Any]) -> None:
                 state.get("ci", {}),
             )
         )
+        reviews.append(review_state(state, root))
         digests.update(tops)
     reached = ledger.task_state(states)
     if reached is None:
@@ -3030,6 +3155,7 @@ def record_ledger(data: dict[str, Any], state: dict[str, Any]) -> None:
             "content": ledger.content_id(digests),
             "roots": len(states),
             "session": str(data.get("session_id") or ""),
+            "review": min(reviews, key=REVIEW_ORDER.index),
         },
         time.time(),
     )
@@ -3072,6 +3198,7 @@ def on_stop(data: dict[str, Any], state: dict[str, Any]) -> None:
     ):
         # a record, not a gate: this Stop is decided the same without it
         log.exception("discipline.ledger_failed")
+    observe_reviews(state)
     damaged = state_reset_active(state)
     decision = _stop_decision(state)
     if decision is None:

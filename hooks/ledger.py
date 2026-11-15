@@ -57,6 +57,7 @@ FIELDS: dict[str, type] = {
     "content": str,
     "roots": int,
     "session": str,
+    "review": str,  # P1-02: none | current | running | stale | missing (a note, no gate)
 }
 
 
@@ -312,7 +313,8 @@ def record(root: str, fields: dict[str, Any], now: float) -> bool:
                 return False
             last = latest(entries).get(entry["task"])
             if last and all(
-                last.get(k) == entry.get(k) for k in ("state", "content", "approval")
+                last.get(k) == entry.get(k)
+                for k in ("state", "content", "approval", "review")
             ):
                 return False
             with open(path, "ab+") as f:
