@@ -69,6 +69,7 @@ def hook(mode: str, s: str, env: dict | None = None, **payload: object) -> dict 
         capture_output=True,
         text=True,
         encoding="utf-8",
+        errors="replace",  # a logged OS error message is in the console code page
         check=False,
     )
     assert p.returncode == 0, (mode, p.returncode, p.stderr[-400:])
@@ -482,6 +483,160 @@ check(
     (writer.returncode, len(got), len(set(got))),
     (0, NOTES, NOTES),
 )
+
+# ---- L (P0-15): notes live in a per-session folder; the crowded state folder is not listed
+LT = ROOT / "lt" / "claude-discipline"
+LT.mkdir(parents=True)
+
+
+def old_note(target: Path, suffix: str, *whys: str) -> Path:
+    """A note in the earlier format: a file next to the state file."""
+    f = target.with_name(f"{target.stem}.missed{suffix}")
+    f.write_text(
+        "".join(json.dumps({"at": 1.0, "why": w}) + "\n" for w in whys),
+        encoding="utf-8",
+    )
+    return f
+
+
+t1 = LT / "sess1.json"
+session_store.note_missed(t1, "first")
+session_store.note_missed(t1, "second")
+notes1 = LT / "sess1.notes"
+check(
+    "L-T1 notes are files inside <session>.notes, nothing appears beside the state file",
+    (
+        sorted(x.name for x in LT.iterdir()),
+        notes1.is_dir() and [x.name.startswith("missed.") for x in notes1.iterdir()],
+    ),
+    (["sess1.notes"], [True, True]),
+)
+check(
+    "L-T2 take: both reasons in order, the files are removed, nothing the second time",
+    (
+        session_store.take_missed(t1),
+        list(notes1.iterdir()),
+        session_store.take_missed(t1),
+    ),
+    (["first", "second"], [], []),
+)
+
+t2 = LT / "sess2.json"
+old_note(t2, ".5.1.aa", "old-a")
+old_note(t2, "", "old-b", "old-c")
+check(
+    "L-T3 earlier-format notes are read and removed when asked for",
+    (
+        session_store.take_missed(t2, legacy=True),
+        sorted(x.name for x in LT.iterdir() if x.name.startswith("sess2")),
+    ),
+    (["old-b", "old-c", "old-a"], []),
+)
+kept = old_note(t2, ".6.1.bb", "old-d")
+check(
+    "L-T4 ... and neither read nor touched otherwise",
+    (session_store.take_missed(t2), kept.exists()),
+    ([], True),
+)
+
+listed: list[str] = []
+real_names = getattr(session_store, "_names", None)
+
+
+def spy_names(folder: Path) -> list[str]:
+    listed.append(Path(folder).name)
+    return real_names(folder)
+
+
+session_store._names = spy_names
+session_store.take_missed(t2)
+plain = list(listed)
+session_store.take_missed(t2, legacy=True)
+session_store._names = real_names
+check(
+    "L-T7 a plain take lists only the session's notes folder, never the state folder",
+    (plain, sorted(listed[len(plain) :])),
+    (["sess2.notes"], ["claude-discipline", "sess2.notes"]),
+)
+
+t3 = LT / "sess3.json"
+(LT / "sess3.notes").write_text("not a folder", encoding="utf-8")
+logging.disable(
+    logging.CRITICAL
+)  # the refused note is logged; keep the output readable
+session_store.note_missed(t3, "cannot be written")
+logging.disable(logging.NOTSET)
+check(
+    "L-T8 a file in the notes folder's place: reported, no exception",
+    session_store.take_missed(t3),
+    ["놓친 이벤트 기록 목록을 읽을 수 없음"],
+)
+t4 = LT / "sess4.json"
+(LT / "sess4.notes" / "missed.1.1.dir").mkdir(parents=True)
+check(
+    "L-T8 a note that cannot be read: reported, no exception",
+    session_store.take_missed(t4),
+    ["놓친 이벤트 기록을 읽을 수 없음"],
+)
+
+s = uuid.uuid4().hex
+old_note(STATE / f"{s}.json", ".7.1.cc", "post: legacy-note")
+hook("prompt", s, prompt_id="p", prompt="work")
+check(
+    "L-T5 a session not checked yet: its earlier-format note is taken",
+    (
+        "legacy-note" in str(state(s).get("state_reset", {}).get("why")),
+        [x.name for x in STATE.iterdir() if x.name.startswith(f"{s}.missed")],
+    ),
+    (True, []),
+)
+check(
+    "L-T5 ... a run that found something looks once more before the session is marked",
+    (
+        state(s).get("notes_checked"),
+        hook("prompt", s, prompt_id="p1b", prompt="work") and None,
+        state(s).get("notes_checked"),
+    ),
+    (0, None, 1),
+)
+late = old_note(STATE / f"{s}.json", ".8.1.dd", "post: late-legacy-note")
+hook("prompt", s, prompt_id="p2", prompt="next")
+check(
+    "L-T6 a checked session does not look at earlier-format notes again",
+    (
+        "late-legacy-note" in str(state(s).get("state_reset", {}).get("why")),
+        late.exists(),
+    ),
+    (False, True),
+)
+session_store.note_missed(STATE / f"{s}.json", "post: new-format-note")
+hook("prompt", s, prompt_id="p3", prompt="again")
+check(
+    "L-T6 ... while a new-format note is still taken",
+    "new-format-note" in str(state(s).get("state_reset", {}).get("why")),
+    True,
+)
+
+if os.name == "nt":
+    # review: an earlier-format note that cannot be removed yet is read again next run,
+    # as its message says, also when it was found by the once-per-session look
+    s = uuid.uuid4().hex
+    stuck = old_note(STATE / f"{s}.json", ".7.2.ff", "post: stuck-legacy-note")
+    with open(stuck, "rb"):  # an open file cannot be removed on Windows
+        hook("prompt", s, prompt_id="p", prompt="work")
+    first = (
+        "다음 실행에서 다시 읽음" in str(state(s).get("state_reset", {}).get("why")),
+        stuck.exists(),
+        state(s).get("notes_checked"),
+    )
+    hook("prompt", s, prompt_id="p2", prompt="next")
+    check(
+        "L-T5b a note that could not be removed: reported, kept, and taken by the next run",
+        (first, stuck.exists()),
+        ((True, True, 0), False),
+    )
+else:
+    print("NOTICE: L-T5b needs Windows file locking; skipped on this platform")
 
 # ---- S-T14 a busy post/fail/prompt leaves a note that becomes a marker next run
 short = dict(ENV, CLAUDE_DISCIPLINE_LOCK_BUDGET_S="0.3")

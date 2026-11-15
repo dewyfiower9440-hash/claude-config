@@ -180,31 +180,59 @@ def save(path: Path, state: dict[str, Any]) -> None:
         raise StateWriteFailed(f"세션 상태 저장 실패: {e}") from e
 
 
+def notes_dir(path: Path) -> Path:
+    """The folder that holds the missed-event notes of the session whose state is `path`."""
+    return path.with_name(f"{path.stem}.notes")
+
+
+def _names(folder: Path) -> list[str]:
+    """Sorted entry names of `folder`; none when it does not exist."""
+    try:
+        with os.scandir(folder) as it:
+            return sorted(entry.name for entry in it)
+    except FileNotFoundError:
+        return []
+
+
 def note_missed(path: Path, why: str) -> None:
     """Record, without the lock, that an event could not be recorded; the next locked run
     turns it into a reset marker. One file per note, published complete by a rename, so a
-    concurrent take never sees a partial note and never deletes one it has not read."""
+    concurrent take never sees a partial note and never deletes one it has not read.
+
+    Notes live in the session's own folder (`<session>.notes/`): the state folder holds one
+    file per session ever seen, and looking for notes there meant listing all of it on
+    every hook run."""
     name = f"{time.time_ns()}.{os.getpid()}.{secrets.token_hex(4)}"
-    tmp = path.with_name(f"{path.stem}.note-tmp.{name}")
+    folder = notes_dir(path)
+    tmp = folder / f"note-tmp.{name}"
     try:
+        folder.mkdir(exist_ok=True)
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             line = json.dumps({"at": time.time(), "why": str(why)}) + "\n"
             os.write(fd, line.encode("utf-8", errors="replace"))
         finally:
             os.close(fd)
-        os.replace(tmp, path.with_name(f"{path.stem}.missed.{name}"))
+        os.replace(tmp, folder / f"missed.{name}")
     except (OSError, ValueError):  # nothing more can be recorded; caller fails closed
         log.warning("session_store.note_missed_failed", exc_info=True)
 
 
-def take_missed(path: Path) -> list[str]:
+def take_missed(path: Path, legacy: bool = False) -> list[str]:
     """Reasons of events missed since the last locked run (call only while locked). Each
     note is removed only after it was read; one that cannot be removed yet is read again
-    next time and still counts now (as a generic reason), so nothing is lost."""
+    next time and still counts now (as a generic reason), so nothing is lost.
+
+    `legacy` also takes the notes of the earlier formats (`<stem>.missed` and
+    `<stem>.missed.<name>` next to the state file). Finding them lists the whole state
+    folder, so the caller asks for it once per session, not on every run."""
+    folder = notes_dir(path)
     try:
-        # `<stem>.missed` is the earlier single-file format; read it the same way.
-        notes = sorted(path.parent.glob(f"{path.stem}.missed*"))
+        notes = [folder / n for n in _names(folder) if n.startswith("missed.")]
+        if legacy:
+            prefix = f"{path.stem}.missed"
+            old = [n for n in _names(path.parent) if n.startswith(prefix)]
+            notes = [path.parent / n for n in old] + notes
     except OSError:
         return ["놓친 이벤트 기록 목록을 읽을 수 없음"]
     out: list[str] = []

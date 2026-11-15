@@ -845,6 +845,58 @@ s, p = v2_prompt("task:widget 계속")
 check("T13 v1 approval is not re-armed under v2", state_of(s).get("approval"), None)
 check("T13 edit denied without a v2 approval", edit_decision(s, p), "deny")
 
+# ---- L-T9 (P0-15): one hook run reads and verifies the store once
+_loads: list[int] = []
+_real_load = ap.Store.load
+
+
+def _counting_load(self: ap.Store, seen_gen: int = 0) -> ap.Snapshot:
+    _loads.append(seen_gen)
+    return _real_load(self, seen_gen)
+
+
+ap.Store.load = _counting_load
+_forget = getattr(_disc, "_v2_forget", lambda: None)
+_forget()
+_st: dict = {}
+_a, _b = _disc._v2_load(_st), _disc._v2_load(_st)
+check(
+    "L-T9 two reads in one run: the store is loaded once",
+    (len(_loads), _a is _b, _st.get("approvals_seen_gen") == _a.gen),
+    (1, True, True),
+)
+_c = _disc._v2_update(_st, lambda recs: recs)
+_n = len(_loads)
+_d = _disc._v2_load(_st)
+check(
+    "L-T9 after a change by this run: what the change wrote, without another load",
+    (_d is _c, _d.gen, len(_loads) - _n),
+    (True, _a.gen + 1, 0),
+)
+
+
+def _refuse(recs: dict) -> dict:
+    raise ap.StoreError("refused for the test")
+
+
+try:
+    _disc._v2_update(_st, _refuse)
+except ap.StoreError:
+    pass
+_n = len(_loads)
+_e = _disc._v2_load(_st)
+check(
+    "L-T9 after a change that failed: read again, not what was kept",
+    (len(_loads) - _n, _e.gen),
+    (1, _c.gen),
+)
+_forget()
+_n = len(_loads)
+_disc._v2_load(_st)
+check("L-T9 a new run starts without what the last one read", len(_loads) - _n, 1)
+ap.Store.load = _real_load
+_forget()
+
 # ---- normal approval, resume, progress updates
 s1, p1 = v2_approve()
 a1 = state_of(s1).get("approval") or {}

@@ -245,6 +245,8 @@ def default_state() -> dict[str, Any]:
         # prompt, which records where the session is without announcing it
         "context_roots": [],
         "context_seeded": 0,
+        # 1 once this session's earlier-format missed-event notes were looked for (P0-15)
+        "notes_checked": 0,
     }
 
 
@@ -1371,17 +1373,35 @@ def _seen(state: dict[str, Any]) -> int:
     return int(state.get("approvals_seen_gen") or 0)
 
 
+# The store as this run read it. One hook run is one process and lasts a few hundred ms;
+# reading and verifying the store once per run instead of at every use costs nothing in
+# guarantees: a revocation by another session that lands during the run was already able to
+# land just after the last read. run_locked starts every run without it.
+_v2_snap: Any = None
+
+
+def _v2_forget() -> None:
+    global _v2_snap
+    _v2_snap = None
+
+
 def _v2_load(state: dict[str, Any]) -> Any:
-    snap = _v2_store().load(
-        _seen(state)
-    )  # this session's memory is a rollback witness too
-    state["approvals_seen_gen"] = max(_seen(state), snap.gen)
-    return snap
+    global _v2_snap
+    if _v2_snap is None:
+        # this session's memory is a rollback witness too
+        _v2_snap = _v2_store().load(_seen(state))
+    state["approvals_seen_gen"] = max(_seen(state), _v2_snap.gen)
+    return _v2_snap
 
 
 def _v2_update(state: dict[str, Any], fn: Any) -> Any:
+    global _v2_snap
+    _v2_snap = (
+        None  # if the change fails, what was read before it is not trusted either
+    )
     snap = _v2_store().update(fn, _seen(state))
     state["approvals_seen_gen"] = snap.gen
+    _v2_snap = snap
     return snap
 
 
@@ -1630,8 +1650,9 @@ def v2_rearm(
 def v2_write_check(
     state: dict[str, Any], cwd: str, path: str | None = None
 ) -> str | None:
-    """Denial reason for a protected write under v2, else None. The store is re-read and
-    verified every time; a cached ACTIVE pointer alone never authorizes anything. Only a
+    """Denial reason for a protected write under v2, else None. The store is read and
+    verified in every hook run (once per run, see _v2_load); a cached ACTIVE pointer alone
+    never authorizes anything. Only a
     lost approval (revoked, expired, superseded, missing) sticks for the rest of the prompt;
     a plan that cannot be judged right now refuses this write only."""
     import approvals as ap
@@ -3417,6 +3438,7 @@ def run_locked(mode: str, data: dict[str, Any], handler: Any, path: Path) -> Non
     import session_store
     import worktree
 
+    _v2_forget()
     state = default_state()
     why: list[str] = []
     try:
@@ -3437,7 +3459,14 @@ def run_locked(mode: str, data: dict[str, Any], handler: Any, path: Path) -> Non
     # already taken, marker half computed, handler) still persists what is known, and the
     # loaded state is never replaced by defaults.
     try:
-        why += session_store.take_missed(path)
+        # The earlier note format is looked for once per session: it lists the whole
+        # state folder (tens of thousands of entries), which every run used to pay for.
+        # A look that found anything (also a note it could not read or remove yet) is
+        # repeated by the next run: "read again next time" holds for the earlier format too.
+        checked = bool(state.get("notes_checked"))
+        taken = session_store.take_missed(path, legacy=not checked)
+        why += taken
+        state["notes_checked"] = 1 if checked or not taken else 0
         if why:
             mark_reset(state, saved, why, str(data.get("cwd") or os.getcwd()))
         # Every git call of this run shares one budget, cut to what is left before the
