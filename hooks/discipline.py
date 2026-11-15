@@ -259,6 +259,10 @@ def default_state() -> dict[str, Any]:
         # the turn that was last counted in the observation file
         "test_gap_note": "",
         "test_gap_turn": 0,
+        # P2-01: what the next prompt is told about a high-risk turn without a plan that
+        # compares alternatives, and the turn that was last scored in the observation file
+        "risk_note": "",
+        "risk_turn": 0,
         "output_advice_turn": 0,  # P1-04: the turn that already got the delegation hint
         "turn_cover_off": 0,  # 1: not known what an approval started from; cover nothing
     }
@@ -2297,6 +2301,15 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
         # P1-03: said once, to the user's own next prompt (a relayed one leaves it)
         told = "\n\n".join(x for x in (told, str(state["test_gap_note"])) if x)
         state["test_gap_note"] = ""
+    if (
+        not relay
+        and state.get("risk_note")
+        and os.environ.get("CLAUDE_RISK_SCORE") != "0"
+    ):
+        # P2-01: the same way, once (a note left from before the score was switched off
+        # is not told)
+        told = "\n\n".join(x for x in (told, str(state["risk_note"])) if x)
+        state["risk_note"] = ""
     try:
         top = track_repo(state, str(data.get("cwd") or os.getcwd()))
         if not relay and new_context_root(state, top) and top:
@@ -3300,6 +3313,109 @@ def note_test_gap(state: dict[str, Any]) -> None:
         log.exception("discipline.test_gap_failed")
 
 
+RISK_OBSERVE_FILE = APPROVALS_HOME / "risk-observe.jsonl"
+RISK_NOTE = (
+    "[discipline] 지난 턴의 변경은 위험 점수 {score}입니다({parts}; 안내 기준 {at}). "
+    "진행 중인 계획에 대안 비교가 없습니다. 되돌리기 어려운 변경이면 대안 2~3개와 "
+    "trade-off를 계획에 적고 진행하세요. (알림이며 차단이 아닙니다.)"
+)
+RISK_NOTE_CHARS = 300
+
+
+def _approved_plan_texts(state: dict[str, Any]) -> list[str]:
+    """The plan files of the task the current approval is for (read at a Stop, only when a
+    score is high). Reading them gives nothing but the answer to "does one compare
+    alternatives"."""
+    approval = state.get("approval")
+    if not isinstance(approval, dict):
+        return []
+    base, task = approval.get("base"), approval.get("task_id")
+    if not isinstance(base, str) or not isinstance(task, str):
+        return []
+    plans_dir = Path(base) / "docs" / "plans"
+    texts: list[str] = []
+    for plan in sorted(plans_dir.glob("*.md")) if plans_dir.is_dir() else []:
+        try:
+            text = plan.read_text(encoding="utf-8")
+        except (OSError, ValueError):  # unreadable or not UTF-8: not a plan to judge by
+            continue
+        if plan_task(text) == task:
+            texts.append(text)
+    return texts
+
+
+def note_risk(state: dict[str, Any]) -> None:
+    """Stop: score what the turn changed (P2-01), count it once in the observation file
+    (numbers and kinds, no path) and prepare the note for the next prompt when the score is
+    high and no plan of the approved task compares alternatives (P2-03). Never changes the
+    Stop. CLAUDE_RISK_SCORE=0 switches all of it off.
+
+    The line count is coarse: lines the Edit/Write tools changed during the session in the
+    turn's code files (CODE_EXT); nothing for other files (workflows, lock files, settings,
+    documents) and nothing for shell edits. A Stop that was blocked is not scored again
+    when the turn goes on, and a note is not withdrawn when a plan gets its comparison
+    afterwards."""
+    if os.environ.get("CLAUDE_RISK_SCORE") == "0":
+        return
+    try:
+        import risk
+
+        tops = [t for t in (state.get("repos") or {}) if isinstance(t, str)]
+        changed = [p for p in (state.get("turn_changes") or []) if isinstance(p, str)]
+        if not changed:
+            state["risk_note"] = ""
+            return
+        edited: dict[str, int] = {}
+        for entry in (state.get("dirty") or {}).values():
+            counts = entry.get("lines") if isinstance(entry, dict) else None
+            for path, n in (counts if isinstance(counts, dict) else {}).items():
+                if isinstance(path, str) and isinstance(n, int):
+                    edited[_norm(path)] = n
+        places = [_repo_place(path, tops) for path in changed]
+        found = risk.assess(
+            [
+                risk.kind(
+                    rel
+                    if top
+                    else Path(path).name,  # outside every repository: its name
+                    is_test_file(path, tops),
+                    Path(path).suffix.lower() in CODE_EXT,
+                )
+                for path, (top, rel) in zip(changed, places, strict=True)
+            ],
+            sum(edited.get(_norm(path), 0) for path in changed),
+            len({top for top, _rel in places}),
+        )
+        at = risk.threshold(os.environ.get("CLAUDE_RISK_ADVICE_AT"))
+        # plan files are read only for a score that is high enough to ask
+        advised = risk.advice_needed(found.score, at, []) and risk.advice_needed(
+            found.score, at, _approved_plan_texts(state)
+        )
+        parts = ", ".join(f"{k} {n}" for k, n in sorted(found.kinds.items()))
+        state["risk_note"] = (
+            RISK_NOTE.format(score=found.score, parts=parts, at=at)[:RISK_NOTE_CHARS]
+            if advised
+            else ""
+        )
+        if state.get("risk_turn") == state.get("turn"):
+            return  # this turn is already counted
+        state["risk_turn"] = state.get("turn") or 0
+        row = {
+            "at": time.time(),
+            "score": found.score,
+            "kinds": found.kinds,
+            "files": found.files,
+            "lines": found.lines,
+            "repos": found.repos,
+            "advised": advised,
+        }
+        APPROVALS_HOME.mkdir(parents=True, exist_ok=True)
+        with open(RISK_OBSERVE_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=True) + "\n")
+    except Exception:  # hook boundary: an observation, the Stop is decided without it
+        log.exception("discipline.risk_failed")
+
+
 def ledger_capped(state: dict[str, Any], base: str) -> bool:
     """Whether something besides the per-project content check keeps a Stop from accepting
     the task under `base` as verified: the ledger must never say more than the Stop does.
@@ -3419,6 +3535,7 @@ def on_stop(data: dict[str, Any], state: dict[str, Any]) -> None:
         log.exception("discipline.ledger_failed")
     observe_reviews(state)
     note_test_gap(state)
+    note_risk(state)
     damaged = state_reset_active(state)
     decision = _stop_decision(state)
     if decision is None:
