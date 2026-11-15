@@ -49,6 +49,7 @@ TESTS = [
     "test_discipline_d3",
     "test_session_store",
     "test_session_context",
+    "test_ledger_context",
     "test_project_switch",
     "test_handoff",
     "test_state_gc",

@@ -52,6 +52,7 @@ class GitInfo:
     branch: str
     status: tuple[str, ...]
     commits: tuple[str, ...]
+    head_at: float | None = None  # commit time of the newest commit, when git gave it
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +134,82 @@ def plan_notes(summaries: tuple[PlanSummary, ...], main_path: str | None) -> lis
             f"경고: `{s.path}`는 진행 중인데 미체크 단계가 없습니다(완료 표시가 빠졌을 수 있음)."
         )
     return out
+
+
+LEDGER_TASKS = 4
+LEDGER_STATE = {
+    "IMPLEMENTED": "구현됨(미검증)",
+    "LOCALLY_VERIFIED": "로컬 검증됨",
+    "CI_VERIFIED": "CI 검증됨",
+    "BLOCKED": "실패 상태",
+    "UNKNOWN": "결과 불명",
+}
+LEDGER_HEADING = (
+    "## 작업 원장 (hook이 남긴 검증 기록) - 참고용이며 승인·검증을 복원하지 않습니다"
+)
+
+
+def _when(at: object) -> tuple[float | None, str]:
+    if isinstance(at, int | float) and not isinstance(at, bool):
+        try:
+            return float(at), time.strftime("%Y-%m-%d %H:%M", time.localtime(at))
+        except (OverflowError, OSError, ValueError):
+            return None, "?"
+    return None, "?"
+
+
+def ledger_notes(
+    summaries: object,
+    latest: object,
+    problem: object,
+    dirty: object,
+    head_at: object,
+) -> list[str]:
+    """P1-06: for each plan in progress, how far the task ledger says its task got, and
+    what looks different now (changes in the work tree, a commit after the entry). Hints
+    for a session that starts or resumes; nothing here approves or verifies anything."""
+    plans = [
+        s
+        for s in (summaries if isinstance(summaries, list | tuple) else [])
+        if isinstance(s, PlanSummary) and s.status == "in-progress" and s.task
+    ][:LEDGER_TASKS]
+    if not plans:
+        return []
+    # a summary keeps TASK_CHARS of a task id, the ledger more: matched on what both keep
+    entries = {
+        str(key)[:TASK_CHARS]: value
+        for key, value in (latest if isinstance(latest, dict) else {}).items()
+    }
+    out = [LEDGER_HEADING]
+    if problem:
+        why = " ".join(str(problem).split())[:REASON_CHARS]
+        out.append(
+            f"주의: 원장에 문제가 있습니다({why}). 아래 값을 그대로 믿지 마세요."
+        )
+    head, _ = _when(head_at)
+    for s in plans:
+        task = s.task[:TASK_CHARS]
+        entry = entries.get(task)
+        if not isinstance(entry, dict):
+            out.append(f"- task:{task}: 원장 기록 없음")
+            continue
+        state = entry.get("state")
+        at, stamp = _when(entry.get("at"))
+        review = " ".join(str(entry.get("review") or "?").split())[:20]
+        line = (
+            f"- task:{task}: {LEDGER_STATE.get(str(state), '알 수 없는 상태')} "
+            f"({stamp}, 리뷰 {review})"
+        )
+        if state in ("LOCALLY_VERIFIED", "CI_VERIFIED"):
+            flags = []
+            if isinstance(dirty, int) and not isinstance(dirty, bool) and dirty > 0:
+                flags.append(f"지금 작업 폴더에 변경 {dirty}개: 그 뒤 달라졌을 수 있음")
+            if at is not None and head is not None and head > at:
+                flags.append("기록 뒤에 커밋이 있음")
+            if flags:
+                line += " -> " + ", ".join(flags)
+        out.append(line)
+    return [line[:NOTE_LINE_CHARS] for line in out]
 
 
 def build_outside(cwd: str, root: str, names: list[str]) -> str:
@@ -265,9 +342,15 @@ def read_git(cwd: Path) -> tuple[Path, GitInfo] | None:
     branch = "?"
     if status and status[0].startswith("## "):
         branch = status.pop(0)[3:].split("...")[0].replace("No commits yet on ", "")
-    log = git(root, "log", "--oneline", f"-{COMMITS}") or ""
+    # "<hash> <subject>" as --oneline prints it, with the commit time after a tab
+    log = git(root, "log", "--format=%h %s%x09%ct", f"-{COMMITS}") or ""
+    rows = [line.rpartition("\t") for line in log.splitlines()]
+    stamp = rows[0][2] if rows else ""
     return root, GitInfo(
-        branch=branch, status=tuple(status), commits=tuple(log.splitlines())
+        branch=branch,
+        status=tuple(status),
+        commits=tuple(text or when for text, _tab, when in rows),
+        head_at=float(stamp) if stamp.isascii() and stamp.isdigit() else None,
     )
 
 
@@ -326,6 +409,36 @@ def list_projects(root: Path) -> list[str] | None:
     return names
 
 
+def ledger_section(
+    root: Path, summaries: tuple[PlanSummary, ...], info: GitInfo
+) -> list[str]:
+    """The ledger lines of this repository's plans in progress. Read-only; any failure
+    means no lines, never a failed start."""
+    if not any(s.status == "in-progress" and s.task for s in summaries):
+        return []
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import ledger
+
+        entries, problem = ledger.read(str(root))
+        return ledger_notes(
+            summaries, ledger.latest(entries), problem, len(info.status), info.head_at
+        )
+    except (
+        OSError,
+        ValueError,
+        ImportError,
+        TypeError,
+        KeyError,
+        AttributeError,
+        RecursionError,
+    ) as e:
+        print(
+            f"session-context: ledger not shown ({type(e).__name__})", file=sys.stderr
+        )
+        return []
+
+
 def session_notes(data: dict[str, object], root: Path, info: GitInfo) -> list[str]:
     """P0-12: what the last session in this repository left behind (its handoff record, or
     another session's open marker), then this session's own marker is written. Only for a
@@ -376,6 +489,8 @@ def main() -> None:
         notes = (
             *session_notes(data, root, info),
             *plan_notes(summaries, plan.path if plan else None),
+            # last: when the notes do not all fit, the ledger lines are the ones left out
+            *ledger_section(root, summaries, info),
         )
         context = build_context(str(data.get("source", "")), info, plan, notes)
     elif in_work_tree(cwd):
