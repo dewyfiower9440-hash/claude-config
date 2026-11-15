@@ -6,8 +6,10 @@ stay as with the sequential runner. Fake test scripts in an isolated temp folder
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import io
+import os
 import re
 import shutil
 import sys
@@ -134,6 +136,41 @@ check(
     "(e) ALWAYS_SHOW output is printed even when it passes",
     ("measurement 42" in out, ok),
     (True, True),
+)
+
+# L-T10 (P0-15): the modules get a temp folder of their own, removed after the run
+script(
+    "temp_probe",
+    "import os, sys, tempfile\n"
+    "from pathlib import Path\n"
+    "seen = {k: os.environ.get(k) for k in ('TEMP', 'TMP', 'TMPDIR')}\n"
+    "seen['tempfile'] = tempfile.gettempdir()\n"
+    "state = Path(tempfile.gettempdir()) / 'claude-discipline'\n"
+    "state.mkdir()\n"
+    "(state / 'left-behind.json').write_text('{}')\n"
+    "(state / 'read-only.bin').write_text('x')\n"
+    "os.chmod(state / 'read-only.bin', 0o444)  # like git's object files\n"
+    "(Path(sys.argv[0]).parent / 'temp.result').write_text(repr(sorted(set(seen.values()))))\n"
+    "print('FAILURES: 0')\n",
+)
+outer = tempfile.gettempdir()
+ok, out = run(["temp_probe"], workers=1)
+seen_temp = ast.literal_eval((TMP / "temp.result").read_text())
+check(
+    "L-T10 a module sees one temp folder, made for this run under the usual one",
+    (
+        ok,
+        len(seen_temp),
+        Path(seen_temp[0]).name.startswith("claude-gate-"),
+        os.path.normcase(os.path.realpath(Path(seen_temp[0]).parent))
+        == os.path.normcase(os.path.realpath(outer)),
+    ),
+    (True, 1, True, True),
+)
+check(
+    "L-T10 ... and it is gone afterwards, with what the module left (read-only too)",
+    (Path(seen_temp[0]).exists(), tempfile.gettempdir() == outer),
+    (False, True),
 )
 
 check(

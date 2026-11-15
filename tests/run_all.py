@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -55,11 +57,14 @@ TESTS = [
 ]
 
 
-def run_one(name: str, cmd: list[str]) -> tuple[str, int, str, float]:
+def run_one(
+    name: str, cmd: list[str], env: Mapping[str, str] | None = None
+) -> tuple[str, int, str, float]:
     start = time.monotonic()
     p = subprocess.run(
         cmd,
         cwd=ROOT,
+        env=env,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -90,18 +95,39 @@ def step(name: str, cmd: list[str]) -> bool:
     return report(*run_one(name, cmd))
 
 
+def _retry_writable(func: Callable[[str], object], path: str, _exc: object) -> None:
+    """rmtree could not remove `path`: git writes its object files read-only and Windows
+    refuses to delete those. Anything still refused is left (and reported by the caller)."""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except OSError:  # in use or not permitted: the rest of the tree is still removed
+        return
+
+
 def run_tests(names: list[str], workers: int, tests_dir: Path = ROOT / "tests") -> bool:
-    """Run every module (slow ones submitted first), report in the declared order."""
+    """Run every module (slow ones submitted first), report in the declared order.
+
+    The modules share a temp folder made for this run and removed after it: the hooks they
+    start keep one state file per session under the temp folder, and a gate run starts
+    thousands of sessions (they used to pile up in the real one, tens of thousands)."""
     rank = {n: i for i, n in enumerate(SLOW_FIRST)}
     order = sorted(names, key=lambda n: rank.get(n, len(SLOW_FIRST)))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            n: pool.submit(
-                run_one, n, [sys.executable, "-I", str(tests_dir / f"{n}.py")]
-            )
-            for n in order
-        }
-        results = {n: f.result() for n, f in futures.items()}
+    temp = tempfile.mkdtemp(prefix="claude-gate-")
+    env = {**os.environ, "TEMP": temp, "TMP": temp, "TMPDIR": temp}
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                n: pool.submit(
+                    run_one, n, [sys.executable, "-I", str(tests_dir / f"{n}.py")], env
+                )
+                for n in order
+            }
+            results = {n: f.result() for n, f in futures.items()}
+    finally:
+        shutil.rmtree(temp, onexc=_retry_writable)
+        if os.path.exists(temp):  # something still holds a file: not a test result
+            print(f"NOTICE: temp folder not fully removed: {temp}", flush=True)
     ok = True
     for n in names:
         ok &= report(*results[n])
