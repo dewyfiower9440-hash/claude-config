@@ -2857,6 +2857,81 @@ def stop_block_reason(state: dict[str, Any], stop_hook_active: bool) -> str | No
     return decision[0] if decision else None
 
 
+def ledger_capped(state: dict[str, Any], base: str) -> bool:
+    """Whether something besides the per-project content check keeps a Stop from accepting
+    the task under `base` as verified: the ledger must never say more than the Stop does."""
+
+    def touches(place: object) -> bool:
+        return isinstance(place, str) and (_inside(place, base) or _inside(base, place))
+
+    if state_reset_active(state) is not None or state.get("approval_warning"):
+        return True
+    for key in (
+        "content_unknown",
+        "content_too_large",
+        "content_late",
+        "content_removed",
+    ):
+        if any(touches(place) for place in state.get(key) or []):
+            return True
+    tracked = set(state.get("content_tracked_roots") or [])
+    for root, entry in (state.get("dirty") or {}).items():
+        edited_at = _number(entry.get("at")) or 0.0
+        if edited_at <= 0 or root in tracked or not touches(root):
+            continue  # decided by content (root_state), or not this task's
+        ev = (state.get("evidence") or {}).get(root) or {}
+        if (_number(ev.get("at")) or 0.0) < edited_at or ev.get("outcome") != "passed":
+            return True
+    return False
+
+
+def record_ledger(data: dict[str, Any], state: dict[str, Any]) -> None:
+    """P1-01: note in the repository's task ledger how far the approved task is, from what
+    refresh_content just computed. A record only: nothing here or elsewhere reads it to
+    decide, and a ledger that cannot be written changes nothing about this Stop."""
+    # the approval this prompt works under (one of an earlier prompt names no task now)
+    ptr = active_approval(state, state.get("stop_prompt_id"))
+    if not ptr or not ptr.get("task_id") or not ptr.get("base"):
+        return
+    import ledger
+
+    base = str(ptr["base"])
+    states: list[str] = []
+    digests: dict[str, str] = {}
+    for root, entry in sorted(state.get("content", {}).items()):
+        tops = entry.get("digests") or {}
+        if not any(_inside(top, base) for top in tops):
+            continue  # another repository's project: not this task's
+        states.append(
+            ledger.root_state(
+                entry,
+                state.get("evidence", {}).get(root),
+                state.get("pushes", {}),
+                state.get("ci", {}),
+            )
+        )
+        digests.update(tops)
+    reached = ledger.task_state(states)
+    if reached is None:
+        return  # nothing of this task changed in this session
+    if reached in (ledger.LOCALLY_VERIFIED, ledger.CI_VERIFIED) and ledger_capped(
+        state, base
+    ):
+        reached = ledger.IMPLEMENTED
+    ledger.record(
+        base,
+        {
+            "task": str(ptr["task_id"]),
+            "approval": str(ptr.get("approval_id") or ""),
+            "state": reached,
+            "content": ledger.content_id(digests),
+            "roots": len(states),
+            "session": str(data.get("session_id") or ""),
+        },
+        time.time(),
+    )
+
+
 def on_stop(data: dict[str, Any], state: dict[str, Any]) -> None:
     if data.get("stop_hook_active"):
         return
@@ -2882,6 +2957,18 @@ def on_stop(data: dict[str, Any], state: dict[str, Any]) -> None:
         marker = str(data.get("cwd") or os.getcwd())
         if marker not in state["content_unknown"]:
             state["content_unknown"].append(marker)
+    try:
+        record_ledger(data, state)
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        AttributeError,
+        ImportError,
+        RecursionError,
+    ):
+        # a record, not a gate: this Stop is decided the same without it
+        log.exception("discipline.ledger_failed")
     damaged = state_reset_active(state)
     decision = _stop_decision(state)
     if decision is None:
