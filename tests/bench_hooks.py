@@ -5,6 +5,9 @@ Everything runs against throw-away repositories under tests/_tmp_bench and an is
 home (CLAUDE_DISCIPLINE_HOME); the real approvals, state of real projects and notify toasts are
 never touched.
 
+The isolated approval home is switched to the v2 store before anything runs, as the real one
+was on 2026-11-14 (P0-04): the corpus measures the path that is in use, not the dormant v1.
+
   python -I tests/bench_hooks.py <label>     -> tests/_baseline/2026-11-11-<label>.json
 """
 
@@ -34,7 +37,14 @@ RUNS = 20
 shutil.rmtree(TMP, ignore_errors=True)
 TMP.mkdir(parents=True)
 os.environ["CLAUDE_DISCIPLINE_HOME"] = str(HOME)
+WITNESS = TMP / "witness" / "hwm"
+os.environ["CLAUDE_DISCIPLINE_WITNESS"] = str(WITNESS)
 sys.path.insert(0, str(HOOKS))
+import approvals
+
+# Not one import block with the line above: ruff sorts `discipline` differently on machines
+# where ~/.claude/discipline/ exists (CLAUDE.md Gotchas).
+approvals.Store(HOME, WITNESS).admin_activate(lambda code: True, "bench")
 import discipline as d
 
 SESSIONS: list[str] = []
@@ -125,7 +135,10 @@ def approve(task: str, cwd: Path = REPO) -> None:
         cwd=str(cwd),
         tool_name="ExitPlanMode",
         tool_input={},
-        tool_response={"plan": plan_text(task)},
+        tool_response={
+            "plan": plan_text(task),
+            "filePath": str(next(PLANS.glob(f"*-{task}.md"))),  # v2 binds the plan file
+        },
     )
 
 
@@ -370,6 +383,9 @@ def corpus() -> list[dict[str, Any]]:
     alpha.unlink()
     widget = PLANS / "2026-11-02-widget.md"
     widget.write_text(plan_text("widget", "blocked"), encoding="utf-8")
+    # A status is acted on when a hook sees it (test_approvals T1 does the same): without a
+    # hook run while the plan is parked, the flip leaves no trace to act on.
+    rearmed("task:widget")
     widget.write_text(plan_text("widget", "in-progress"), encoding="utf-8")
     row(
         "attack",
@@ -381,8 +397,12 @@ def corpus() -> list[dict[str, Any]]:
     )
 
     # Normal cases run with both approved plans active, so selection is exercised.
+    # A9 revoked widget (and removing alpha's plan revokes alpha once seen): a v2 approval
+    # never comes back, the user approves again and gets a new one (approvals.py, T7).
     write_plan("2026-11-01-alpha.md", "alpha")
     write_plan("2026-11-02-widget.md", "widget")
+    approve("alpha")
+    approve("widget")
     row(
         "normal",
         "N1",
@@ -455,6 +475,8 @@ def main() -> None:
         "hooks_dirty": dirty,
         "python": sys.version.split()[0],
         "runs_per_hook": RUNS,
+        "approval_store": "v2" if approvals.is_active(HOME) else "v1",
+        "authz_mode": os.environ.get("CLAUDE_AUTHZ_MODE", "warn (default)"),
         "latency": latency(),
         "sessions": sessions(),
         "corpus": corpus(),
