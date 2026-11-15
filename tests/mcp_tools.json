@@ -1,0 +1,312 @@
+{
+ "how": "tools/list of the local servers; readOnly and destructive are the servers' own hints",
+ "read_on": "2026-11-16",
+ "servers": {
+  "github": {
+   "tools": {
+    "actions_get": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "actions_list": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "actions_run_trigger": {
+     "destructive": true,
+     "readOnly": false
+    },
+    "add_comment_to_pending_review": {
+     "destructive": null,
+     "readOnly": false
+    },
+    "add_issue_comment": {
+     "destructive": null,
+     "readOnly": false
+    },
+    "add_reply_to_pull_request_comment": {
+     "destructive": null,
+     "readOnly": false
+    },
+    "assign_copilot_to_issue": {
+     "destructive": null,
+     "readOnly": false
+    },
+    "create_branch": {
+     "destructive": null,
+     "readOnly": false
+    },
+    "create_or_update_file": {
+     "destructive": null,
+     "readOnly": false
+    },
+    "create_pull_request": {
+     "destructive": null,
+     "readOnly": false
+    },
+    "delete_file": {
+     "destructive": true,
+     "readOnly": false
+    },
+    "get_commit": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "get_file_contents": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "get_job_logs": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "get_label": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "get_latest_release": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "get_me": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "get_release_by_tag": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "get_tag": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "get_team_members": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "get_teams": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "issue_read": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "issue_write": {
+     "destructive": null,
+     "readOnly": false
+    },
+    "list_branches": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "list_commits": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "list_issue_fields": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "list_issue_types": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "list_issues": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "list_pull_requests": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "list_releases": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "list_repository_collaborators": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "list_tags": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "merge_pull_request": {
+     "destructive": null,
+     "readOnly": false
+    },
+    "pull_request_read": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "pull_request_review_write": {
+     "destructive": null,
+     "readOnly": false
+    },
+    "push_files": {
+     "destructive": null,
+     "readOnly": false
+    },
+    "request_copilot_review": {
+     "destructive": null,
+     "readOnly": false
+    },
+    "search_code": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "search_commits": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "search_issues": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "search_pull_requests": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "search_repositories": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "search_users": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "sub_issue_write": {
+     "destructive": null,
+     "readOnly": false
+    },
+    "ui_get": {
+     "destructive": null,
+     "readOnly": true
+    },
+    "update_issue_comment": {
+     "destructive": null,
+     "readOnly": false
+    },
+    "update_pull_request": {
+     "destructive": null,
+     "readOnly": false
+    },
+    "update_pull_request_branch": {
+     "destructive": null,
+     "readOnly": false
+    }
+   },
+   "version": "2.1.0"
+  },
+  "playwright": {
+   "tools": {
+    "browser_click": {
+     "destructive": true,
+     "readOnly": false
+    },
+    "browser_close": {
+     "destructive": true,
+     "readOnly": false
+    },
+    "browser_console_messages": {
+     "destructive": false,
+     "readOnly": true
+    },
+    "browser_drag": {
+     "destructive": true,
+     "readOnly": false
+    },
+    "browser_drop": {
+     "destructive": true,
+     "readOnly": false
+    },
+    "browser_evaluate": {
+     "destructive": true,
+     "readOnly": false
+    },
+    "browser_file_upload": {
+     "destructive": true,
+     "readOnly": false
+    },
+    "browser_fill_form": {
+     "destructive": true,
+     "readOnly": false
+    },
+    "browser_find": {
+     "destructive": false,
+     "readOnly": true
+    },
+    "browser_handle_dialog": {
+     "destructive": true,
+     "readOnly": false
+    },
+    "browser_hover": {
+     "destructive": true,
+     "readOnly": false
+    },
+    "browser_navigate": {
+     "destructive": true,
+     "readOnly": false
+    },
+    "browser_navigate_back": {
+     "destructive": true,
+     "readOnly": false
+    },
+    "browser_network_request": {
+     "destructive": false,
+     "readOnly": true
+    },
+    "browser_network_requests": {
+     "destructive": false,
+     "readOnly": true
+    },
+    "browser_press_key": {
+     "destructive": true,
+     "readOnly": false
+    },
+    "browser_resize": {
+     "destructive": true,
+     "readOnly": false
+    },
+    "browser_run_code_unsafe": {
+     "destructive": true,
+     "readOnly": false
+    },
+    "browser_select_option": {
+     "destructive": true,
+     "readOnly": false
+    },
+    "browser_snapshot": {
+     "destructive": false,
+     "readOnly": true
+    },
+    "browser_tabs": {
+     "destructive": true,
+     "readOnly": false
+    },
+    "browser_take_screenshot": {
+     "destructive": false,
+     "readOnly": true
+    },
+    "browser_type": {
+     "destructive": true,
+     "readOnly": false
+    },
+    "browser_wait_for": {
+     "destructive": false,
+     "readOnly": true
+    },
+    "browser_webmcp_call": {
+     "destructive": true,
+     "readOnly": false
+    },
+    "browser_webmcp_list": {
+     "destructive": false,
+     "readOnly": true
+    }
+   },
+   "version": "0.0.81"
+  }
+ }
+}
