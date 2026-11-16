@@ -236,6 +236,9 @@ def default_state() -> dict[str, Any]:
         "last_review": 0.0,
         # plan approval: {task_id, plan_hash, scope, prompt_id[, rearmed_from]} or None
         "approval": None,
+        # the task whose plan this session closed as done: {task_id, approval_id, base,
+        # note[, content]}; the ledger keeps recording it while its content stays the same
+        "ledger_closed": None,
         # repository top -> who acted on it ("main" or "<agent_type>:<agent_id>"); labels only
         "owners": {},
         # actor label -> {started, stopped, runs}: subagents seen starting (SubagentStart)
@@ -3610,7 +3613,7 @@ def note_risk(state: dict[str, Any]) -> None:
         log.exception("discipline.risk_failed")
 
 
-def ledger_capped(state: dict[str, Any], base: str) -> bool:
+def ledger_capped(state: dict[str, Any], base: str, closed_note: object = None) -> bool:
     """Whether something besides the per-project content check keeps a Stop from accepting
     the task under `base` as verified: the ledger must never say more than the Stop does.
     The review gate is not part of this: a missing review is noted in the entry's own
@@ -3619,7 +3622,10 @@ def ledger_capped(state: dict[str, Any], base: str) -> bool:
     def touches(place: object) -> bool:
         return isinstance(place, str) and (_inside(place, base) or _inside(base, place))
 
-    if state_reset_active(state) is not None or state.get("approval_warning"):
+    warning = state.get("approval_warning")
+    # closed_note: the notice that this very task's plan was closed as done (the ordinary
+    # end of a task) is not a reason to doubt its verification; any other warning is
+    if state_reset_active(state) is not None or (warning and warning != closed_note):
         return True
     for key in (
         "content_unknown",
@@ -3640,12 +3646,57 @@ def ledger_capped(state: dict[str, Any], base: str) -> bool:
     return False
 
 
+def closed_as_done(state: dict[str, Any], held: dict[str, Any]) -> bool:
+    """True when the approval `held` just ended because its plan was closed as done (the
+    refusal in force is that one, not a store failure or another loss) and everything this
+    turn changed is what the approval covered when the close was first seen, or a plan file
+    of its repository. An edit made after the close, or outside the scope, is not the
+    task's: then nothing is remembered for the ledger."""
+    why = state.get("approval_invalid")
+    if not (
+        held.get("task_id")
+        and held.get("base")
+        and isinstance(why, str)
+        and "plan_status:done" in why
+        and state.get("v2_block") == why
+        and not state.get("turn_cover_off")
+    ):
+        return False
+    changed = turn_changed_now(state)
+    if changed is None:
+        return False  # git cannot say what the turn changed
+    covered = state.get("turn_covered")
+    covered = covered if isinstance(covered, dict) else {}
+    plans = os.path.normcase(os.path.join(str(held["base"]), "docs", "plans"))
+    return all(
+        covered.get(full) == digest or _inside(full, plans)
+        for full, digest in changed.items()
+    )
+
+
 def record_ledger(data: dict[str, Any], state: dict[str, Any]) -> None:
     """P1-01: note in the repository's task ledger how far the approved task is, from what
     refresh_content just computed. A record only: nothing here or elsewhere reads it to
     decide, and a ledger that cannot be written changes nothing about this Stop."""
     # the approval this prompt works under (one of an earlier prompt names no task now)
     ptr = active_approval(state, state.get("stop_prompt_id"))
+    closed: dict[str, Any] | None = None
+    if ptr:
+        state["ledger_closed"] = None  # another task is being worked on now
+    else:
+        # no live approval: only the task this session closed as done, and only while
+        # the content it finished on is still what the repository holds
+        held = state.get("ledger_closed")
+        closed = ptr = held if isinstance(held, dict) else None
+        if (
+            closed is not None
+            and not closed.pop("pin", False)
+            and not closed.get("content")
+        ):
+            # its content was never pinned at the Stop of the close: what the repository
+            # holds now can no longer be told from later work
+            state["ledger_closed"] = None
+            return
     if not ptr or not ptr.get("task_id") or not ptr.get("base"):
         return
     import ledger
@@ -3669,10 +3720,16 @@ def record_ledger(data: dict[str, Any], state: dict[str, Any]) -> None:
         reviews.append(review_state(state, root))
         digests.update(tops)
     reached = ledger.task_state(states)
+    content = ledger.content_id(digests)
+    if closed is not None:
+        if reached is None or closed.get("content") not in (None, content):
+            state["ledger_closed"] = None  # changed since the close: not this task
+            return
+        closed["content"] = content
     if reached is None:
         return  # nothing of this task changed in this session
     if reached in (ledger.LOCALLY_VERIFIED, ledger.CI_VERIFIED) and ledger_capped(
-        state, base
+        state, base, closed.get("note") if closed else None
     ):
         reached = ledger.IMPLEMENTED
     ledger.record(
@@ -3681,7 +3738,7 @@ def record_ledger(data: dict[str, Any], state: dict[str, Any]) -> None:
             "task": str(ptr["task_id"]),
             "approval": str(ptr.get("approval_id") or ""),
             "state": reached,
-            "content": ledger.content_id(digests),
+            "content": content,
             "roots": len(states),
             "session": str(data.get("session_id") or ""),
             "review": min(reviews, key=REVIEW_ORDER.index),
@@ -3697,11 +3754,23 @@ def on_stop(data: dict[str, Any], state: dict[str, Any]) -> None:
 
     state["stop_prompt_id"] = data.get("prompt_id") or state.get("prompt_id")
     if v2_active():
+        held = active_approval(state, state["stop_prompt_id"])
         try:
             refused = v2_write_check(state, str(data.get("cwd") or os.getcwd()))
         except Exception as e:  # hook boundary: block with the failure, never crash
             log.exception("approvals.v2_hook_failure")
             refused, state["v2_block"] = v2_failure(e), v2_failure(e)
+            held = None  # a failed check says nothing about how the task ended
+        if refused and held and closed_as_done(state, held):
+            # the plan was closed as done: the ledger may still record how far this
+            # task's content is verified (record_ledger); nothing is approved by it
+            state["ledger_closed"] = {
+                "task_id": held.get("task_id"),
+                "approval_id": held.get("approval_id"),
+                "base": held.get("base"),
+                "note": state.get("v2_block"),
+                "pin": True,
+            }
         if refused:
             # A revoked/invalid approval (or an untrusted store) covers nothing this turn did.
             state["approval"] = None

@@ -689,6 +689,194 @@ check(
     (rc1, out1.get("decision"), True, True),
 )
 
+# ---- devenv-fix-c: a task whose plan was closed as done keeps its last verification state.
+# Only the content the session finished under the approval is recorded under the task's
+# name; anything changed afterwards is not.
+CLOSED = ROOT / "closed-ledger"
+CENV = dict(ENV, CLAUDE_LEDGER_HOME=str(CLOSED))
+PLAN2 = PLAN.replace("task: widget", "task: gadget").replace("# Widget", "# Gadget")
+PLAN2FILE = PROJ / "docs" / "plans" / "2026-11-16-gadget.md"
+
+
+def start2(text: str = PLAN2, file: Path = PLAN2FILE, s: str | None = None) -> str:
+    s = s or uuid.uuid4().hex
+    file.write_text(text, encoding="utf-8")
+    hook("prompt", s, CENV, prompt="work on the gadget", prompt_id="p")
+    hook(
+        "post",
+        s,
+        CENV,
+        tool_name="ExitPlanMode",
+        tool_input={},
+        tool_response={"plan": text, "filePath": str(file)},
+    )
+    return s
+
+
+def gate2(s: str, prompt_id: str = "p") -> None:
+    common = {
+        "tool_name": "Bash",
+        "tool_input": {"command": GATE},
+        "tool_use_id": uuid.uuid4().hex,
+        "prompt_id": prompt_id,
+    }
+    hook("pre", s, CENV, **common)
+    hook("post", s, CENV, tool_response={}, **common)
+
+
+def gadget() -> list[tuple[object, object]]:
+    return [
+        (e.get("state"), e.get("content"))
+        for e in lines(CLOSED)
+        if e.get("task") == "gadget"
+    ]
+
+
+s = start2()
+edit(s, "e.py", "e = 1\n", CENV)
+PLAN2FILE.write_text(PLAN2.replace("in-progress", "done"), encoding="utf-8")
+gate2(s)
+hook("stop", s, CENV)
+closed = gadget()
+check(
+    "R-T21 edit, plan closed as done, gate passed, Stop: the task ends LOCALLY_VERIFIED",
+    [st for st, _ in closed][-1:],
+    ["LOCALLY_VERIFIED"],
+)
+hook("prompt", s, CENV, prompt="thanks", prompt_id="p2")
+hook("stop", s, CENV, prompt_id="p2")
+check(
+    "R-T22 a later prompt's Stop on the same content: nothing is added or lowered",
+    gadget(),
+    closed,
+)
+edit(s, "e.py", "e = 2\n", CENV)
+hook("stop", s, CENV, prompt_id="p2")
+check(
+    "R-T23 a file changed after the plan was closed: not recorded under the closed task",
+    gadget(),
+    closed,
+)
+edit(s, "e.py", "e = 1\n", CENV)
+gate2(s, "p2")
+hook("stop", s, CENV, prompt_id="p2")
+check(
+    "R-T24 ... and putting the content back does not bring the task back",
+    gadget(),
+    closed,
+)
+
+s = start2()
+edit(s, "f.py", "f = 1\n", CENV)
+PLAN2FILE.write_text(
+    PLAN2.replace("- src/**\n", "- src/**\n- C:/**\n"), encoding="utf-8"
+)
+gate2(s)
+hook("stop", s, CENV)
+check(
+    "R-T25 an approval lost because the plan text changed (not closed): nothing recorded",
+    gadget(),
+    closed,
+)
+
+s = start2()
+edit(s, "g.py", "g = 1\n", CENV)
+PLAN2FILE.write_text(PLAN2.replace("in-progress", "done"), encoding="utf-8")
+gate2(s)
+hook("stop", s, CENV)
+closed2 = gadget()
+PLAN3 = PLAN.replace("task: widget", "task: hobbit").replace("# Widget", "# Hobbit")
+PLAN3FILE = PROJ / "docs" / "plans" / "2026-11-16-hobbit.md"
+PLAN3FILE.write_text(PLAN3, encoding="utf-8")
+hook("prompt", s, CENV, prompt="now the hobbit", prompt_id="p3")
+hook(
+    "post",
+    s,
+    CENV,
+    tool_name="ExitPlanMode",
+    tool_input={},
+    tool_response={"plan": PLAN3, "filePath": str(PLAN3FILE)},
+    prompt_id="p3",
+)
+hook("stop", s, CENV, prompt_id="p3")
+after = json.loads(
+    (TMPD / "claude-discipline" / f"{s}.json").read_text(encoding="utf-8")
+)
+check(
+    "R-T26 a new approval after the close: one more closed entry before it, none after, "
+    "and the closed task is forgotten",
+    (len(closed2) - len(closed), gadget() == closed2, after.get("ledger_closed")),
+    (1, True, None),
+)
+
+PLAN3FILE.write_text(PLAN3.replace("in-progress", "done"), encoding="utf-8")
+s = start2()
+edit(s, "h.py", "h = 1\n", CENV)
+PLAN2FILE.write_text(PLAN2.replace("in-progress", "done"), encoding="utf-8")
+gate2(s)  # the close is seen here
+edit(s, "late.py", "late = 1\n", CENV)
+gate2(s)
+hook("stop", s, CENV)
+after = json.loads(
+    (TMPD / "claude-discipline" / f"{s}.json").read_text(encoding="utf-8")
+)
+check(
+    "R-T27 a file edited in the same turn after the close was seen: the task is not "
+    "recorded and not remembered",
+    (gadget() == closed2, after.get("ledger_closed")),
+    (True, None),
+)
+
+check(
+    "R-T28 the cap ignores only the notice of this task's own close",
+    (
+        cap({"approval_warning": "plan done"}, BASE, "plan done"),
+        cap({"approval_warning": "store not trusted"}, BASE, "plan done"),
+        cap({"approval_warning": "plan done"}, BASE, None),
+        cap({"approval_warning": "plan done"}, BASE),
+    ),
+    (False, True, True, True),
+)
+DONE_WHY = "x plan_status:done"
+held_ok = {"task_id": "gadget", "base": str(PROJ)}
+closed_fn = disc.closed_as_done
+check(
+    "R-T29 closed_as_done: another reason, a store failure over an old done reason, "
+    "unknown turn coverage, an approval without task or base",
+    (
+        closed_fn({"approval_invalid": "revoked", "v2_block": "revoked"}, held_ok),
+        closed_fn({"approval_invalid": DONE_WHY, "v2_block": "store broken"}, held_ok),
+        closed_fn(
+            {"approval_invalid": DONE_WHY, "v2_block": DONE_WHY, "turn_cover_off": 1},
+            held_ok,
+        ),
+        closed_fn({"approval_invalid": DONE_WHY, "v2_block": DONE_WHY}, {"base": "b"}),
+        closed_fn({"approval_invalid": DONE_WHY, "v2_block": DONE_WHY}, held_ok),
+    ),
+    (False, False, False, False, True),
+)
+for shape, held_state in (
+    ("no key (state of an older version)", {"stop_prompt_id": "p"}),
+    ("not a dict", {"stop_prompt_id": "p", "ledger_closed": "gadget"}),
+    (
+        "never pinned at the close",
+        {
+            "stop_prompt_id": "p",
+            "ledger_closed": {"task_id": "gadget", "base": str(PROJ)},
+            "content": {},
+        },
+    ),
+):
+    before_n = len(lines(CLOSED))
+    disc.record_ledger({"session_id": "unit"}, held_state)
+    check(
+        f"R-T30 record_ledger, closed task {shape}: nothing written",
+        (len(lines(CLOSED)) - before_n, held_state.get("ledger_closed")),
+        (0, None)
+        if isinstance(held_state.get("ledger_closed"), dict | None)
+        else (0, "gadget"),
+    )
+
 for p in (ROOT, PROJ):
     shutil.rmtree(p, ignore_errors=True)
 print("FAILURES:", fails)
