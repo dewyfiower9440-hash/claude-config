@@ -270,5 +270,54 @@ check(
     ("allowed", "blocked", "blocked"),
 )
 
+# ---------------------------------------------------------------- agents vs rules (P5-04)
+# The rules say "pick the strongest option" (section 9). A reviewer pinned to a weaker model
+# than the session that wrote the code contradicts that: the three judging agents name no
+# model, so they run on the session's own; only the test runner stays on a small one.
+
+
+def model_of(text: str) -> str | None:
+    """The frontmatter's `model` value, whatever its spelling ("" for a bare key); None
+    when the key is absent; "no frontmatter" when the block cannot be found, so that a file
+    this test cannot read never passes as "names no model"."""
+    front = re.match(r"---\n(.*?)\n---\n", text.replace("\r\n", "\n"), re.DOTALL)
+    if not front:
+        return "no frontmatter"
+    line = re.search(r"^model\s*:[ \t]*(.*)$", front.group(1), re.MULTILINE)
+    return line.group(1).strip() if line else None
+
+
+def agent_model(name: str) -> str | None:
+    return model_of((REPO / "agents" / f"{name}.md").read_text(encoding="utf-8"))
+
+
+check(
+    "D8 model_of sees the key in every spelling and never passes an unreadable block",
+    [
+        model_of("---\nname: a\nmodel: opus\n---\nbody\n"),
+        model_of("---\r\nname: a\r\nmodel: opus\r\n---\r\nbody\r\n"),
+        model_of("---\nmodel : opus # pinned\n---\n"),
+        model_of("---\nmodel:\n---\n"),
+        model_of("---\nname: a\n---\nmodel: opus in the body\n"),
+        model_of("name: a\nmodel: opus\n"),
+    ],
+    ["opus", "opus", "opus # pinned", "", None, "no frontmatter"],
+)
+
+
+check(
+    "D8 the reviewing, researching and auditing agents name no model; the test runner does",
+    {
+        name: agent_model(name)
+        for name in ("code-reviewer", "researcher", "security-auditor", "test-runner")
+    },
+    {
+        "code-reviewer": None,
+        "researcher": None,
+        "security-auditor": None,
+        "test-runner": "sonnet",
+    },
+)
+
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)
