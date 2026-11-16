@@ -20,7 +20,7 @@ from pathlib import Path
 sys.stdout.reconfigure(errors="backslashreplace")
 HERE = Path(__file__).resolve().parent
 HOOKS = HERE.parent / "hooks"
-ROOT = HERE / "_tmp_switch"
+ROOT = HERE / "_tmp_task_switch"  # its own: test_project_switch has `_tmp_switch`
 PROJ = Path("C:/dev/_switch_proj")
 for p in (ROOT, PROJ):
     shutil.rmtree(p, ignore_errors=True)
