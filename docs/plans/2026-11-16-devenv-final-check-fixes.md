@@ -71,7 +71,7 @@ task: devenv-final-check-fixes
 - [x] 1. 이 본문을 `docs/plans/2026-11-16-devenv-final-check-fixes.md`에 저장한다.
 - [x] 2. 묶음 A (자기 계획).
 - [x] 3. 묶음 B (자기 계획).
-- [ ] 4. 묶음 C (자기 계획).
+- [x] 4. 묶음 C (자기 계획).
 - [ ] 5. 묶음 D (자기 계획, 예외 범위는 그때 승인).
 - [ ] 6. 묶음 E (자기 계획).
 - [ ] 7. 묶음 F (자기 계획, 저장소 `C:\\dev\\tools`에서 승인).
@@ -91,3 +91,4 @@ task: devenv-final-check-fixes
 - 2026-11-16 묶음 A 완료: 결함 12는 결함 2와 같은 것으로 재현됐다(백그라운드 명령의 완료 알림이 승인을 버림). 계획·기록 `docs/plans/2026-11-16-devenv-fix-a.md`, 커밋 `e44c977`, CI run 43805353519 성공. 실사용 확인은 남았다(그 문서의 마지막 줄).
 - 2026-11-16 묶음 B 완료: 계획·기록 `docs/plans/2026-11-16-devenv-fix-b.md`, 커밋 `2321a18`, CI run 43809826976 성공.
 - 2026-11-16 순서 변경(사용자 결정): 묶음 B 마감 → 옛 계획 5개 정리 → P5 계획 → 묶음 C~F. 묶음 C의 원인은 이 저장소에서 다시 확인했다: `python -I hooks/ledger.py show --task devenv-fix-a`가 CI까지 성공한 작업을 `IMPLEMENTED`로 보여 준다(`hooks/discipline.py`의 `record_ledger`는 Stop 때 유효한 승인이 있어야 적고, 계획을 done으로 닫은 턴에는 `ledger_capped`가 `approval_warning` 때문에 상태를 낮춘다).
+- 2026-11-16 묶음 C 완료: 계획·기록 `docs/plans/2026-11-16-devenv-fix-c.md`, 커밋 `b66c0db`, CI run 43817718487(1차 실패는 무관한 `test_handoff` 1건, 2차 성공). P5 범위 문서 `docs/plans/2026-11-16-devenv-p5.md`(커밋 `e897180`)가 같은 push로 올라갔다.
