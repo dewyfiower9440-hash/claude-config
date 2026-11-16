@@ -23,14 +23,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 # Modules are independent (own temp folders, uuid sessions, env-set approval homes) and are
 # run in parallel; their results are still printed in TESTS order. GATE_WORKERS=1: sequential.
-DEFAULT_WORKERS = (
-    3  # initial prior (16 GB RAM, resident collectors); re-tune from timings
-)
+# Measured 2026-11-16: 37 modules whose times add up to 1,833-2,139 s. With 3 workers that
+# is 611 s at best, past the 600 s a foreground run may take (a run that goes over is moved
+# to the background and is then no evidence). With 4 it is 458-535 s at best. The last line
+# of a run gives the sum and the wall time of the modules (the two ruff steps before them,
+# a few seconds, are not in it): re-tune when the wall time nears 600 s again.
+DEFAULT_WORKERS = 4
+# Longest first (measured 2026-11-16: 343, 285, 268, 150, 147, 117, 109 s), so that the end
+# of a run is not one worker finishing a long module alone.
 SLOW_FIRST = [
     "test_approvals",
-    "test_discipline",
     "test_discipline_d3",
+    "test_discipline",
     "test_guard_corpus",
+    "test_worktree",
+    "test_session_store",
+    "test_ci_status",
 ]
 TESTS = [
     "test_shellparse",
@@ -66,6 +74,7 @@ TESTS = [
     "test_ledger_show",
     "test_usage_report",
     "test_mcp_permissions",
+    "test_docs_consistency",
     "test_format_lint",
     "test_guard_corpus",  # prints a notice and passes when no local transcripts exist
     "test_run_all",
@@ -130,6 +139,7 @@ def run_tests(names: list[str], workers: int, tests_dir: Path = ROOT / "tests") 
     order = sorted(names, key=lambda n: rank.get(n, len(SLOW_FIRST)))
     temp = tempfile.mkdtemp(prefix="claude-gate-")
     env = {**os.environ, "TEMP": temp, "TMP": temp, "TMPDIR": temp}
+    started = time.monotonic()
     try:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
@@ -143,9 +153,16 @@ def run_tests(names: list[str], workers: int, tests_dir: Path = ROOT / "tests") 
         shutil.rmtree(temp, onexc=_retry_writable)
         if os.path.exists(temp):  # something still holds a file: not a test result
             print(f"NOTICE: temp folder not fully removed: {temp}", flush=True)
+    wall = time.monotonic() - started
     ok = True
     for n in names:
         ok &= report(*results[n])
+    # how close the run is to the time a foreground run may take (see DEFAULT_WORKERS)
+    total = sum(seconds for _name, _code, _output, seconds in results.values())
+    print(
+        f"gate: {len(names)} modules, sum {total:.0f}s, wall {wall:.0f}s, workers {workers}",
+        flush=True,
+    )
     return ok
 
 

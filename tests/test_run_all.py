@@ -178,6 +178,78 @@ check(
     run_all.workers_from_env({}),
     run_all.DEFAULT_WORKERS,
 )
+# The number of workers and the order of the slow modules are tuned from measurements (see
+# run_all.DEFAULT_WORKERS): what must hold whatever they are tuned to is checked here.
+check(
+    "by default the modules run in parallel",
+    isinstance(run_all.DEFAULT_WORKERS, int) and run_all.DEFAULT_WORKERS >= 2,
+    True,
+)
+check(
+    "every module started first is a real module, named once",
+    (
+        [n for n in run_all.SLOW_FIRST if n not in run_all.TESTS],
+        len(run_all.SLOW_FIRST) == len(set(run_all.SLOW_FIRST)),
+        len(run_all.TESTS) == len(set(run_all.TESTS)),
+    ),
+    ([], True, True),
+)
+reset()
+script("ok_quiet", 'print("FAILURES: 0")\n')
+script("ok_show", 'print("FAILURES: 0")\n')
+ok, out = run(["ok_quiet", "ok_show"], workers=2)
+timing = re.search(
+    r"^gate: 2 modules, sum (\d+)s, wall (\d+)s, workers 2$", out, re.MULTILINE
+)
+check(
+    "the run says how long it took: modules, their sum, the wall time, the workers",
+    (ok, timing is not None, out.strip().splitlines()[-1].startswith("gate: ")),
+    (True, True, True),
+)
+# Modules run at the same time: a working folder two of them use is one they delete under
+# each other (2026-11-16: test_project_switch and test_task_switch both had `_tmp_switch`).
+# Every string that names such a folder counts, however the path around it is built
+# (`HERE / "_tmp_x"`, `Path(__file__).resolve().parent / "_tmp_x"`, `"C:/dev/_x"`, ...).
+# This file is left out: it names other modules' folders as data.
+WORK_FOLDER = re.compile(r'"(_tmp[\w-]*)"|"(C:/dev/_[\w-]+)"')
+users: dict[str, set[str]] = {}
+for module in sorted(HERE.glob("test_*.py")):
+    if module.name == Path(__file__).name:
+        continue
+    for a, b in WORK_FOLDER.findall(module.read_text(encoding="utf-8")):
+        users.setdefault((a or b).lower(), set()).add(module.name)
+check(
+    "no two test modules use the same working folder",
+    {name: sorted(mods) for name, mods in users.items() if len(mods) > 1},
+    {},
+)
+check(
+    "... and the folders of the modules are still found (the pattern is not stale)",
+    (
+        len(users) >= 50,
+        "_tmp_switch" in users,
+        "_tmp_task_switch" in users,
+        "c:/dev/_switch_proj" in users,
+        "_tmp_discipline_approvals" in users,
+        "c:/dev/_disc_test_project" in users,
+    ),
+    (True, True, True, True, True, True),
+)
+reset()
+script("ok_quiet", 'print("FAILURES: 0")\n')
+script("bad", 'print("FAILURES: 1")\nraise SystemExit(1)\n')
+ok, out = run(["ok_quiet", "bad"], workers=2)
+check(
+    "the time line is also the last line of a run that failed",
+    (
+        ok,
+        re.search(
+            r"^gate: 2 modules, sum \d+s, wall \d+s, workers 2$", out, re.MULTILINE
+        )
+        is not None,
+    ),
+    (False, True),
+)
 check(
     "GATE_WORKERS=1 -> sequential", run_all.workers_from_env({"GATE_WORKERS": "1"}), 1
 )
