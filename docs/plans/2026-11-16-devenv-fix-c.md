@@ -1,7 +1,7 @@
 ---
 status: blocked
 task: devenv-fix-c
-blocked_reason: 단계 7(실사용 확인)이 남았다. 묶음 G(docs/plans/2026-11-16-devenv-fix-g.md)가 끝난 뒤 닫힌 작업의 원장 기록이 실제로 남는지 보고 닫는다
+blocked_reason: 단계 7(실사용 확인)이 남았다. 묶음 G는 끝났지만 그 닫는 턴에는 Stop이 오지 않아 볼 수 없었다. 이어지는 실행(task: devenv-run-1-7)을 닫는 턴에서 원장에 닫힌 기록이 남는지 보고 닫는다
 ---
 
 # devenv 결함 개선 C: 계획을 닫은 작업의 마지막 검증 상태가 원장에 남게 한다 (결함 7)

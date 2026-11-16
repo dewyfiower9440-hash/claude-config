@@ -16,6 +16,7 @@ approved: 2026-11-11
   - 범위 밖 경로, 다른 task_id, 다른 프로젝트, data·backup 경로는 승인 범위가 따로 있어야 허용됩니다. 해당 승인이 없으면 거부합니다.
   - CLAUDE.md §2의 "1-2파일 작은 변경은 바로 진행" 규칙은 "작은 변경도 경량 승인 계획(ExitPlanMode)을 거친다"로 바꿉니다. 이 문구 수정도 P0-06의 승인 대상입니다.
 - **임시 조치**: quant-research의 stale 계획 3개(phase0-1, phase1-completion, step9)는 `status: blocked` + `blocked_reason`으로 표시합니다(done·cancelled 거짓 표시 금지). **CLAUDE.md, discipline, session_context, 테스트에서 blocked 호환성을 검증하기 전에는 커밋하지 않습니다.** 요구사항은 두 가지입니다. blocked 계획은 승인 권한을 부여하지 않아야 하고, 세션 복원 때는 미완료 항목으로 계속 표시되어야 합니다.
+- **hook 지연 한도의 조정 (2026-11-16, 사용자 결정)**: 셸 쓰기 명령은 +150ms 대신 실행 시간 대비 증가율로 본다 — 측정: +250ms, 실행 시간 p50 6.4~8.2초의 3~4%. Edit·Write는 기존 한도(+150ms) 안에 둔다(측정 +58~98ms). 근거와 측정 방법: `docs/plans/2026-11-16-devenv-fix-g.md`의 진행 기록.
 - **이 임시 조치는 보안 결함을 해결하지 않습니다.** 승인 후보가 phase4 하나로 줄었을 뿐이고, 결함 자체는 아래 P0 근본 해결 목록으로 다룹니다.
 
 ## 현황 재기준 (2026-11-13, 근거: P0-04b 3회 fix first 이후 근본 원인 분석)
