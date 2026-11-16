@@ -1914,6 +1914,12 @@ def v2_rearm(
     return pointer, (f"{NOTE} {'; '.join(problems)}" if problems else None)
 
 
+# Whether the last v2_write_check of this hook run refused only because the ACTIVE
+# approval has no plan file bound yet (never kept in the session state: one event, one
+# process). Unbound is not invalid: saving the approved plan binds it.
+_refused_unbound = False
+
+
 def v2_write_check(
     state: dict[str, Any], cwd: str, path: str | None = None
 ) -> str | None:
@@ -1924,6 +1930,8 @@ def v2_write_check(
     a plan that cannot be judged right now refuses this write only."""
     import approvals as ap
 
+    global _refused_unbound
+    _refused_unbound = False
     ptr = state.get("approval")
     has_ptr = isinstance(ptr, dict) and bool(ptr.get("approval_id"))
     root = str(ptr.get("base")) if has_ptr and isinstance(ptr, dict) else _v2_root(cwd)
@@ -1947,6 +1955,7 @@ def v2_write_check(
             if unreadable == UNBOUND and path and _inside(path, plans):
                 return None  # writing the approved plan file itself is what binds it
             if unreadable == UNBOUND:
+                _refused_unbound = True
                 unreadable = _v2_unbound_why(
                     root, rec.get("task_id"), rec.get("core_hash")
                 )
@@ -2373,8 +2382,11 @@ def v2_keep_on_relay(
     """(pointer, warning) for a relayed prompt under v2 (R1). The pointer survives only a
     report on something this session started (see started_here: a subagent's hand-back, or
     the completion notification of a subagent or a background shell command), in the
-    approval's own git root, and only if the approval verifies right now; every later write is verified again. Anything else
-    drops it as before. A relay never creates an approval: no pointer in, no pointer out."""
+    approval's own git root, and only if the approval verifies right now or is merely not
+    bound to its plan file yet (the notification came between the approval and the save;
+    until it is bound it approves nothing outside docs/plans). Every later write is
+    verified again. Anything else drops it as before. A relay never creates an approval:
+    no pointer in, no pointer out."""
     ptr = state.get("approval")
     dropped = (None, RELAY_NOTE if ptr else None)
     if not (isinstance(ptr, dict) and ptr.get("v") == 2 and ptr.get("approval_id")):
@@ -2384,9 +2396,11 @@ def v2_keep_on_relay(
     if _v2_root(cwd) != str(ptr.get("base")):
         return dropped
     refused = v2_write_check(state, cwd)
-    if refused is None:
+    if refused is None or _refused_unbound:
         # An approval without a scope covers only the prompt it was given in (see
         # in_approved_scope); a relay must not stretch it over further prompts.
+        if refused is not None:
+            state["v2_block"] = None  # not a loss: the plan file can still be saved
         return (ptr, None) if ptr.get("scope") else dropped
     why = state.get("v2_block")
     if refused == REASON_V2_STORE.format(why=why):

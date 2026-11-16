@@ -1432,6 +1432,91 @@ for shape, held in (
         False,
     )
 
+
+# ---- devenv-fix-a2: an approval whose plan file is not saved yet (unbound) is not lost to
+# a notification that arrives before the save. Unbound is not invalid: saving binds it.
+def a_id(st: dict) -> object:
+    return (st.get("approval") or {}).get("approval_id")
+
+
+V2FILE.unlink()
+su, pu0 = v2_approve()  # approved; docs/plans holds no file of this task yet
+bg_start(su, pu0)
+u_before = a_id(state_of(su))
+st, pu = k_relay(su, notif(BG))
+check(
+    "K-T22 a notification before the plan file is saved: the approval is kept",
+    (bool(u_before), a_id(st) == u_before, st.get("approval_warning")),
+    (True, True, None),
+)
+v2_save()
+u_stop = str((call("stop", su, prompt_id=pu, cwd=str(V2REPO)) or {}).get("reason"))
+check(
+    "K-T22 ... the plan saved afterwards: Stop reports no lost approval",
+    ("다시 제시" in u_stop, "승인된 작업이 없습니다" in u_stop, a_id(state_of(su))),
+    (False, False, u_before),
+)
+check("K-T22 ... and an in-scope edit is allowed", edit_decision(su, pu), "allow")
+
+V2FILE.unlink()
+su, pu0 = v2_approve()
+bg_start(su, pu0)
+k_relay(su, notif(BG))
+st, pu = k_relay(su, notif(BG))  # a second notification, still before the save
+u_pre = (raw_pre(su, pu) or {}).get("hookSpecificOutput", {})
+check(
+    "K-T23 kept across two notifications, still unbound: an edit outside docs/plans is "
+    "refused, and the reason says the plan file is missing",
+    (
+        bool(a_id(st)),
+        st.get("approval_warning"),
+        u_pre.get("permissionDecision"),
+        "아직 docs/plans에 없음" in str(u_pre.get("permissionDecisionReason")),
+    ),
+    (True, None, "deny", True),
+)
+u_stop = str((call("stop", su, prompt_id=pu, cwd=str(V2REPO)) or {}).get("reason"))
+check(
+    "K-T23 kept but never saved: Stop says the plan file is missing and drops it",
+    (bool(a_id(st)), "아직 docs/plans에 없음" in u_stop, state_of(su).get("approval")),
+    (True, True, None),
+)
+
+v2_save(V2PLAN.replace("task: widget\n", "task: widget\ncreated: 2026-11-16\n"))
+su, pu0 = v2_approve()
+bg_start(su, pu0)
+st, pu = k_relay(su, notif(BG))
+check(
+    "K-T24 a file of the task with another text (still unbound): kept without a warning, "
+    "it can be fixed",
+    (bool(a_id(st)), st.get("approval_warning"), st.get("v2_block")),
+    (True, None, None),
+)
+V2FILE.unlink()
+
+su, pu0 = v2_approve()
+bg_start(su, pu0)
+check(
+    "K-T25 unbound, a notification with an unknown id: dropped",
+    k_relay(su, notif("zz9unknown"))[0].get("approval"),
+    None,
+)
+su, pu0 = v2_approve()
+bg_start(su, pu0)
+check(
+    "K-T25 unbound, the notification arrives in another git root: dropped",
+    k_relay(su, notif(BG), cwd=V2FOREIGN)[0].get("approval"),
+    None,
+)
+su, pu0 = v2_approve(K_UNSCOPED)
+bg_start(su, pu0)
+check(
+    "K-T25 unbound and without a scope: dropped",
+    k_relay(su, notif(BG))[0].get("approval"),
+    None,
+)
+v2_save()
+
 sb7, _ = b_session()
 sk, _ = k_session()
 v2_prompt("revoke task:widget")  # another session revokes it
