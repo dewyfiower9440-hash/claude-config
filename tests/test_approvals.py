@@ -1451,6 +1451,84 @@ check(
 shutil.rmtree(V2FOREIGN, ignore_errors=True)
 v2_save()
 
+# ---- devenv-fix-b: an approval whose plan file is not bound yet says why. A file of the
+# same task with another text is named (the skill once told sessions to add a key); the
+# verdict is the same refusal either way.
+U_SAVED_WRONG = V2PLAN.replace("task: widget\n", "task: widget\ncreated: 2026-11-16\n")
+U_OTHER = V2REPO / "docs" / "plans" / "2026-11-12-gadget.md"
+U_OTHER.write_text(V2PLAN.replace("task: widget", "task: gadget"), encoding="utf-8")
+
+
+def u_reason(s: str, p: str) -> str:
+    out = raw_pre(s, p) or {}
+    return str(out.get("hookSpecificOutput", {}).get("permissionDecisionReason"))
+
+
+v2_save(U_SAVED_WRONG)
+su, pu = v2_approve()
+u_why = u_reason(su, pu)
+check(
+    "U-T1 saved with an extra frontmatter key: refused, the file is named and the rule said",
+    (V2FILE.name in u_why, "status만" in u_why, "아직 docs/plans에 없음" in u_why),
+    (True, True, False),
+)
+check(
+    "U-T1 ... and neither the other task's file nor any plan text is in the message",
+    (U_OTHER.name in u_why, "created" in u_why, "keep data" in u_why),
+    (False, False, False),
+)
+v2_save()
+check(
+    "U-T2 saved as approved afterwards: the edit is allowed",
+    edit_decision(su, pu),
+    "allow",
+)
+V2FILE.unlink()
+su, pu = v2_approve()
+u_why = u_reason(su, pu)
+check(
+    "U-T3 no file of this task (only another task's): refused with the old wording",
+    ("아직 docs/plans에 없음" in u_why, U_OTHER.name in u_why, "status만" in u_why),
+    (True, False, False),
+)
+U_OTHER.unlink()
+v2_save()
+U_ROOT = TROOT / "_tmp_approval_unbound"
+shutil.rmtree(U_ROOT, ignore_errors=True)
+(U_ROOT / "docs" / "plans").mkdir(parents=True)
+U_CORE = ap.core_hash(V2PLAN)
+check(
+    "U-T4 wording, no plan folder content: not saved yet",
+    _disc._v2_unbound_why(str(U_ROOT), "widget", U_CORE),
+    _disc.UNBOUND,
+)
+for n in range(5):
+    (U_ROOT / "docs" / "plans" / f"d{n}.md").write_text(
+        U_SAVED_WRONG.replace("2026-11-16", f"2026-11-1{n}"), encoding="utf-8"
+    )
+(U_ROOT / "docs" / "plans" / "same1.md").write_text(V2PLAN, encoding="utf-8")
+(U_ROOT / "docs" / "plans" / "bin.md").write_bytes(b"\xff\xfe task: widget")
+check(
+    "U-T4 five files with another text (and one with the approved text): three named, "
+    "the rest counted",
+    _disc._v2_unbound_why(str(U_ROOT), "widget", U_CORE),
+    _disc.UNBOUND_DIFFERS.format(names="d0.md, d1.md, d2.md 외 2개"),
+)
+(U_ROOT / "docs" / "plans" / "same2.md").write_text(
+    V2PLAN.replace("in-progress", "done"), encoding="utf-8"
+)
+check(
+    "U-T4 the approved text in two files: those two are named, not the differing ones",
+    _disc._v2_unbound_why(str(U_ROOT), "widget", U_CORE),
+    _disc.UNBOUND_TWICE.format(names="same1.md, same2.md"),
+)
+check(
+    "U-T4 no task: nothing is named",
+    _disc._v2_unbound_why(str(U_ROOT), None, U_CORE),
+    _disc.UNBOUND,
+)
+shutil.rmtree(U_ROOT, ignore_errors=True)
+
 # ---- T1 / T2 / T11 / T23 / T24: plan changes revoke, restoring them does not revive
 for name, change in (
     ("T1 blocked", V2PLAN.replace("in-progress", "blocked")),

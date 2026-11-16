@@ -1657,6 +1657,40 @@ def _v2_find_plan(root: str, task: object, core: object) -> str | None:
 
 
 UNBOUND = "승인된 계획 파일이 아직 docs/plans에 없음(계획 파일을 먼저 기록하세요)"
+UNBOUND_DIFFERS = (
+    "승인된 글과 다른 계획 파일({names}): frontmatter에는 status만 더하고 본문은 "
+    "승인된 그대로 저장하세요"
+)
+UNBOUND_TWICE = (
+    "승인된 글이 계획 파일 여러 개에 있음({names}): docs/plans에 하나만 남기세요"
+)
+MAX_NAMED_PLANS = 3
+
+
+def _v2_unbound_why(root: str, task: object, core: object) -> str:
+    """Why an approval has no plan file yet, for the refusal's text only (the verdict does
+    not depend on it). Among the files of this task in docs/plans: several holding the
+    approved text, or some holding another text, are named (file names only); with no
+    file of this task, the plain 'not saved yet'."""
+    import approvals
+
+    plans_dir = Path(root) / "docs" / "plans"
+    same: list[str] = []
+    other: list[str] = []
+    for plan in sorted(plans_dir.glob("*.md")) if plans_dir.is_dir() else []:
+        try:
+            text = plan.read_text(encoding="utf-8")
+        except (OSError, ValueError):  # unreadable or not UTF-8: says nothing
+            continue
+        if task and plan_task(text) == task:
+            (same if approvals.core_hash(text) == core else other).append(plan.name)
+    names = same if len(same) > 1 else other
+    if not names:
+        return UNBOUND
+    listed = ", ".join(names[:MAX_NAMED_PLANS])
+    if len(names) > MAX_NAMED_PLANS:
+        listed += f" 외 {len(names) - MAX_NAMED_PLANS}개"
+    return (UNBOUND_TWICE if names is same else UNBOUND_DIFFERS).format(names=listed)
 
 
 def _v2_read_plan(
@@ -1909,6 +1943,10 @@ def v2_write_check(
             plans = os.path.normcase(os.path.join(root, "docs", "plans"))
             if unreadable == UNBOUND and path and _inside(path, plans):
                 return None  # writing the approved plan file itself is what binds it
+            if unreadable == UNBOUND:
+                unreadable = _v2_unbound_why(
+                    root, rec.get("task_id"), rec.get("core_hash")
+                )
             state["v2_block"] = unreadable
             return REASON_V2_INVALID.format(task=ptr.get("task_id"), why=unreadable)
         verdict = ap.check(rec, root=root, plan_text=text, now=time.time())

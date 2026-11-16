@@ -42,6 +42,7 @@ Do not edit production code until step 5. Give a one-line progress update in Kor
 
 ## 4. Regression test
 - A test at the lowest sensible level that reproduces the bug. Run it and **show it failing for the right reason**.
+- If the layer the bug lives in has no test harness (for example a page script in a project whose tests only reach the API): try to reproduce it with a test at the nearest layer that has one. If that cannot show the bug, write the manual reproduction steps and the expected result in the report and state `회귀 테스트 없음` under 미완료·리스크. Adding a test framework is a proposal, not part of the fix.
 
 ## 5. Fix
 - The minimal change that fixes the root cause, not the symptom. No unrelated refactors (propose them). `Grep` for the same faulty pattern elsewhere and list the sibling sites. Fix them only if they are clearly the same bug and in scope; otherwise propose.

@@ -30,7 +30,6 @@ Always save the plan to `docs/plans/YYYY-MM-DD-<slug>.md` in the project (today'
 ```markdown
 ---
 status: draft
-created: YYYY-MM-DD
 ---
 
 # <title>
@@ -67,4 +66,4 @@ task: <slug, same as the file name's slug>
 
 ## 5. Approval
 - Present the plan with **ExitPlanMode** (the user's approval gate). The approval is bound to `task:` + the plan text + `## 변경 범위`: it lifts the >5-file guard only for files inside that scope, and only for the approving prompt.
-- On approval, save the approved text **verbatim** as the body of `docs/plans/<file>.md` with frontmatter `status: in-progress` (only one in-progress plan per project; set any older one to `done` or back to `draft` after asking). Later prompts and new sessions re-arm the approval only while that file stays in progress with unchecked steps and its text (ignoring checkboxes and `## 진행 기록`) is unchanged; changing steps or scope needs a new approval. Then continue with `/implement docs/plans/<file>.md`.
+- On approval, and before the first edit, save the approved text **verbatim** to `docs/plans/<file>.md`, replacing `draft` with `in-progress` in its existing `status:` line (if the approved text has no frontmatter, add one that holds only `status: in-progress`; never a second frontmatter block). Saving changes only the `status` line: any other frontmatter key you add (`created`, `author`, ...) or any change to the body makes the hook refuse the file as not the approved text. (only one in-progress plan per project; set any older one to `done` or back to `draft` after asking). Later prompts and new sessions re-arm the approval only while that file stays in progress with unchecked steps and its text (ignoring checkboxes and `## 진행 기록`) is unchanged; changing steps or scope needs a new approval. Then continue with `/implement docs/plans/<file>.md`.

@@ -18,6 +18,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 HOOKS = REPO / "hooks"
 sys.path.insert(0, str(HOOKS))
+import approvals
 import verification
 
 fails = 0
@@ -153,6 +154,78 @@ check(
 check(
     f"D5 the rules stay within {MAX_RULE_LINES} lines",
     len(rules.splitlines()) <= MAX_RULE_LINES,
+    True,
+)
+
+# ---------------------------------------------------------------- skills vs hooks (fix-b)
+# What `/plan` tells a session to save must be what the approval hook accepts: the hook's
+# plan hash covers every frontmatter key except `status`.
+skill = {
+    name: (REPO / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
+    for name in ("plan", "implement", "debug")
+}
+block = re.search(r"```markdown\n(.*?)\n```", skill["plan"], re.DOTALL)
+template = block.group(1) if block else ""
+front = re.match(r"---\n(.*?)\n---\n", template, re.DOTALL)
+check(
+    "D6 the plan template's frontmatter holds `status` only",
+    [ln.split(":")[0] for ln in front.group(1).splitlines()] if front else None,
+    ["status"],
+)
+approved = template[front.end() :] if front else ""
+saved = template.replace("status: draft", "status: in-progress", 1)
+check(
+    "D6 the template's body, approved, then saved the way the skill says: same plan hash",
+    bool(approved) and approvals.core_hash(approved) == approvals.core_hash(saved),
+    True,
+)
+check(
+    "D6 /plan says that saving changes the `status` line only, before the first edit",
+    (
+        "only the `status` line" in skill["plan"],
+        "before the first edit" in skill["plan"],
+    ),
+    (True, True),
+)
+check(
+    "D6 /plan says to change the existing status line, never to add a second frontmatter",
+    (
+        "existing `status:` line" in skill["plan"],
+        "never a second frontmatter" in skill["plan"],
+        approvals.core_hash(template) == approvals.core_hash(saved),
+        approvals.core_hash("---\nstatus: in-progress\n---\n\n" + template)
+        == approvals.core_hash(template),
+    ),
+    (True, True, True, False),
+)
+stop_line = next(
+    (ln for ln in skill["implement"].splitlines() if "outward-facing action" in ln), ""
+)
+check(
+    "D6 /implement's stop condition for a push names the same exception",
+    "`git push` (unless the approved plan quotes the push decision" in stop_line,
+    True,
+)
+push_line = next(
+    (ln for ln in skill["implement"].splitlines() if "Do not push" in ln), ""
+)
+check(
+    "D6 /implement's push rule names the exception the global rules give (section 6)",
+    bool(re.search(r"Do not push unless [^.]*approved plan[^.]*quotes", push_line)),
+    True,
+)
+check(
+    "D6 every `~/.claude` command in /implement says it is for Git Bash",
+    [
+        "Git Bash" in ln
+        for ln in skill["implement"].splitlines()
+        if "python -I ~/.claude" in ln
+    ],
+    [True],
+)
+check(
+    "D6 /debug says what to do when the layer has no test harness",
+    "no test harness" in skill["debug"] and "회귀 테스트 없음" in skill["debug"],
     True,
 )
 
