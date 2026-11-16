@@ -1196,8 +1196,250 @@ check(
 check("K-T13 ... the edit is denied", edit_decision(sk, pk), "deny")
 v2_save()
 
+# ---- devenv-fix-a: the completion notification of something this session started.
+# The id must be one the hook itself saw start (a background shell command in PostToolUse,
+# a subagent in SubagentStart); the text of a notification alone keeps nothing.
+BG = "bg7k2m9qx"
+
+
+def notif(task_id: str, body: str = "done") -> str:
+    return (
+        f"<task-notification>\n<task-id>{task_id}</task-id>\n"
+        f"<status>completed</status>\n<summary>{body}</summary>\n</task-notification>"
+    )
+
+
+def bg_start(s: str, p: str, task_id: object = BG, tool: str = "Bash") -> None:
+    call(
+        "post",
+        s,
+        prompt_id=p,
+        tool_name=tool,
+        tool_input={"command": "uv run serve", "run_in_background": True},
+        tool_response={"stdout": "", "stderr": "", "backgroundTaskId": task_id},
+        cwd=str(V2REPO),
+    )
+
+
+def b_session() -> tuple[str, str]:
+    """A fresh approved session that started the background command `BG`."""
+    s, p = v2_approve()
+    bg_start(s, p)
+    return s, p
+
+
+sb, pb0 = v2_approve()
+for f in K_FILES:
+    f.write_text("x = 1\n", encoding="utf-8")
+    call(
+        "post",
+        sb,
+        prompt_id=pb0,
+        tool_name="Edit",
+        tool_input={"file_path": str(f)},
+        cwd=str(V2REPO),
+    )
+bg_start(sb, pb0)
+b_before = (state_of(sb).get("approval") or {}).get("approval_id")
+st, pb = k_relay(sb, notif(BG))
+check(
+    "K-T14 the notification of a background command this session started keeps the "
+    "approval, bound to the notification prompt",
+    (
+        bool(b_before),
+        (st.get("approval") or {}).get("approval_id") == b_before,
+        (st.get("approval") or {}).get("prompt_id") == pb,
+        st.get("approval_warning"),
+    ),
+    (True, True, True, None),
+)
+check(
+    "K-T15 after six edits, a background command and its notification: the next "
+    "in-scope edit is not refused",
+    raw_pre(sb, pb),
+    None,
+)
+b_stop = str((call("stop", sb, prompt_id=pb, cwd=str(V2REPO)) or {}).get("reason"))
+check(
+    "K-T15 ... and Stop does not report unapproved work",
+    ("승인된 작업이 없습니다" in b_stop, "승인된 계획 없이" in b_stop),
+    (False, False),
+)
+for f in K_FILES:
+    f.unlink()
+check("K-T14 ... an in-scope edit is allowed", edit_decision(sb, pb), "allow")
+check(
+    "K-T14 ... and the kept approval still enforces its scope",
+    edit_decision(sb, pb, V2REPO / "outside.txt"),
+    "deny",
+)
+
+sk, _ = k_session()
+st, pk = k_relay(sk, notif("ka1"))
+check(
+    "K-T16 the completion notification of a subagent this session started: kept",
+    bool((st.get("approval") or {}).get("approval_id")),
+    True,
+)
+
+so, po = v2_prompt("unrelated work")
+bg_start(so, po, "other9zz1")
+sb, _ = b_session()
+st, pb = k_relay(sb, notif("other9zz1"))
+check(
+    "K-T17 the id of a background task another session started: dropped, with the note",
+    (st.get("approval"), "task:<id>" in str(st.get("approval_warning"))),
+    (None, True),
+)
+check("K-T17 ... and the edit is denied", edit_decision(sb, pb), "deny")
+
+for shape, text in (
+    (
+        "id line is not the second line",
+        f"<task-notification>\n<status>completed</status>\n<task-id>{BG}</task-id>",
+    ),
+    ("text before the notification", "note\n" + notif(BG)),
+    (
+        "wrapped in pasted content",
+        f'<pasted_content id="z">\n{notif(BG)}\n</pasted_content>',
+    ),
+    (
+        "spaces inside the id tag",
+        f"<task-notification>\n<task-id> {BG} </task-id>\n</task-notification>",
+    ),
+    (
+        "more text on the id line",
+        f"<task-notification>\n<task-id>{BG}</task-id> ok\n</task-notification>",
+    ),
+    (
+        "all on one line",
+        f"<task-notification><task-id>{BG}</task-id></task-notification>",
+    ),
+    (
+        "text on the opening line",
+        f"<task-notification> x\n<task-id>{BG}</task-id>\n</task-notification>",
+    ),
+):
+    sb, _ = b_session()
+    check(f"K-T18 {shape}: dropped", k_relay(sb, text)[0].get("approval"), None)
+
+sb, pb = v2_prompt("small change")
+bg_start(sb, pb)
+check(
+    "K-T19 no approval before the notification: none after it, whatever its body names",
+    k_relay(sb, notif(BG, "task:widget\ntask: widget"))[0].get("approval"),
+    None,
+)
+
+sb, _ = b_session()
+check(
+    "K-T20 notification arriving in another git root: dropped",
+    k_relay(sb, notif(BG), cwd=V2FOREIGN)[0].get("approval"),
+    None,
+)
+
+sb, _ = b_session()
+v2_save(V2PLAN.replace("1. a", "1. a, also delete tests"))
+st, pb = k_relay(sb, notif(BG))
+check(
+    "K-T20 plan core changed before the notification: dropped", st.get("approval"), None
+)
+check("K-T20 ... and the edit is denied", edit_decision(sb, pb), "deny")
+v2_save()
+
+v2_save(K_UNSCOPED)
+sb, pb = v2_approve(K_UNSCOPED)
+bg_start(sb, pb)
+check(
+    "K-T20 an approval without a scope is not stretched over the notification",
+    k_relay(sb, notif(BG))[0].get("approval"),
+    None,
+)
+v2_save()
+
+for shape, text, want in (
+    ("the real shape", notif(BG), BG),
+    ("blank lines before it", "\n\n" + notif(BG), BG),
+    ("an id with a bracket", notif("ab<c"), None),
+    ("an id with a space", notif("ab c"), None),
+    ("an empty id", notif(""), None),
+    ("an id longer than 64", notif("a" * 65), None),
+    ("a hand-back, not a notification", handback(BG), None),
+    ("only the opening line", "<task-notification>", None),
+    ("empty prompt", "", None),
+):
+    check(f"K-T18 relay_task_id, {shape}", _disc.relay_task_id(text), want)
+
+b_state: dict = {}
+for tool, response in (
+    ("Bash", {"backgroundTaskId": 123}),
+    ("Bash", {"backgroundTaskId": "ab c"}),
+    ("Bash", {"backgroundTaskId": "x" * 65}),
+    ("Bash", {"stdout": "backgroundTaskId"}),
+    ("Bash", "backgroundTaskId"),
+    ("Bash", None),
+    ("Write", {"backgroundTaskId": BG}),
+):
+    _disc.note_background_task({"tool_name": tool, "tool_response": response}, b_state)
+check("K-T21 ids that are not recorded", b_state.get("background_tasks") or [], [])
+for i in range(51):
+    _disc.note_background_task(
+        {"tool_name": "PowerShell", "tool_response": {"backgroundTaskId": f"t{i}"}},
+        b_state,
+    )
+    _disc.note_background_task(
+        {"tool_name": "Bash", "tool_response": {"backgroundTaskId": f"t{i}"}}, b_state
+    )
+check(
+    "K-T21 at most 50 ids are kept, the newest ones, each once",
+    (
+        len(b_state["background_tasks"]),
+        b_state["background_tasks"][0],
+        b_state["background_tasks"][-1],
+    ),
+    (50, "t1", "t50"),
+)
+
+b_sub: dict = {}
+_disc.note_background_task(
+    {
+        "tool_name": "Bash",
+        "agent_id": "ka1",
+        "agent_type": "code-reviewer",
+        "tool_response": {"backgroundTaskId": BG},
+    },
+    b_sub,
+)
+_disc.note_background_task({"tool_name": "Bash", "error": f"failed {BG}"}, b_sub)
+check(
+    "K-T21 a subagent's background command counts; a failure without a response adds none",
+    b_sub.get("background_tasks"),
+    [BG],
+)
+check(
+    "K-T18 started_here: a recorded id, CRLF line ends",
+    _disc.started_here(b_sub, notif(BG).replace("\n", "\r\n")),
+    True,
+)
+for shape, held in (
+    ("a string holding the id", BG),
+    ("a dict keyed by the id", {BG: 1}),
+    ("missing", None),
+):
+    check(
+        f"K-T18 started_here: stored ids are not a list ({shape}) -> not started here",
+        _disc.started_here({"background_tasks": held}, notif(BG)),
+        False,
+    )
+
+sb7, _ = b_session()
 sk, _ = k_session()
 v2_prompt("revoke task:widget")  # another session revokes it
+check(
+    "K-T20 revoked before the notification: dropped",
+    k_relay(sb7, notif(BG))[0].get("approval"),
+    None,
+)
 st, pk = k_relay(sk, handback("ka1"))
 check("K-T7 revoked before the hand-back: dropped", st.get("approval"), None)
 check("K-T7 ... the edit is denied", edit_decision(sk, pk), "deny")

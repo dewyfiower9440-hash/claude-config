@@ -241,6 +241,9 @@ def default_state() -> dict[str, Any]:
         # actor label -> {started, stopped, runs}: subagents seen starting (SubagentStart)
         # and ending (SubagentStop); shown in reasons only
         "agents": {},
+        # ids of the background shell commands this session started, as PostToolUse saw
+        # them (newest last, at most MAX_BACKGROUND_TASKS); see v2_keep_on_relay
+        "background_tasks": [],
         # repositories already described to this session; seeded (1) by its first user
         # prompt, which records where the session is without announcing it
         "context_roots": [],
@@ -1089,6 +1092,7 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
     elif tool in ("Bash", "PowerShell"):
         note_shell_touch(data, state, after=True)  # also when no PreToolUse was seen
         record_evidence(data, state, failed=False)
+        note_background_task(data, state)
         if v2_active():  # a shell may have changed a plan: record what is seen now
             try:
                 v2_write_check(state, str(data.get("cwd") or os.getcwd()))
@@ -2231,7 +2235,57 @@ def on_fail(data: dict[str, Any], state: dict[str, Any]) -> None:
     if data.get("tool_name") in ("Bash", "PowerShell"):
         note_shell_touch(data, state, after=True)  # also when no PreToolUse was seen
         record_evidence(data, state, failed=True)
+        note_background_task(data, state)
         note_output_size(data, state, failed=True)
+
+
+MAX_BACKGROUND_TASKS = 50
+TASK_ID = re.compile(r"[A-Za-z0-9_-]{1,64}", re.ASCII)
+TASK_ID_LINE = re.compile(r"<task-id>([A-Za-z0-9_-]{1,64})</task-id>", re.ASCII)
+
+
+def note_background_task(data: dict[str, Any], state: dict[str, Any]) -> None:
+    """Remember the id of a background shell command this session started: the
+    `backgroundTaskId` of a Bash/PowerShell result. Only the hook's own view of the start
+    counts later (v2_keep_on_relay); the id is never taken from a prompt. A command a
+    subagent of this session put in the background counts too (the session started it).
+    A failure event that carries no `tool_response` records nothing."""
+    if data.get("tool_name") not in ("Bash", "PowerShell"):
+        return
+    response = data.get("tool_response")
+    task_id = response.get("backgroundTaskId") if isinstance(response, dict) else None
+    if not isinstance(task_id, str) or not TASK_ID.fullmatch(task_id):
+        return
+    known = state.get("background_tasks")
+    tasks = [t for t in known if t != task_id] if isinstance(known, list) else []
+    state["background_tasks"] = [*tasks, task_id][-MAX_BACKGROUND_TASKS:]
+
+
+def relay_task_id(prompt: str) -> str | None:
+    """The task id of a completion notification: `<task-notification>` alone on the first
+    non-blank line and `<task-id>ID</task-id>` alone on the very next one. Any other shape
+    gives None."""
+    lines = [ln.strip() for ln in prompt.splitlines() if ln.strip()]
+    if len(lines) < 2 or lines[0] != "<task-notification>":
+        return None
+    found = TASK_ID_LINE.fullmatch(lines[1])
+    return found.group(1) if found else None
+
+
+def started_here(state: dict[str, Any], prompt: str) -> bool:
+    """True when the relayed prompt reports on something this session itself started, by
+    the hook's own record of the start: the hand-back of a subagent (SubagentStart), or the
+    completion notification of a subagent or of a background shell command (PostToolUse)."""
+    agent_id = relay_agent_id(prompt)
+    if agent_id is not None:
+        return started_agent(state, agent_id)
+    task_id = relay_task_id(prompt)
+    if task_id is None:
+        return False
+    tasks = state.get("background_tasks")
+    return (isinstance(tasks, list) and task_id in tasks) or started_agent(
+        state, task_id
+    )
 
 
 def relay_shaped(prompt: str) -> bool:
@@ -2275,16 +2329,16 @@ def started_agent(state: dict[str, Any], agent_id: str) -> bool:
 def v2_keep_on_relay(
     state: dict[str, Any], cwd: str, prompt: str
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """(pointer, warning) for a relayed prompt under v2 (R1). The pointer survives only the
-    hand-back of a subagent this session started, in the approval's own git root, and only
-    if the approval verifies right now; every later write is verified again. Anything else
+    """(pointer, warning) for a relayed prompt under v2 (R1). The pointer survives only a
+    report on something this session started (see started_here: a subagent's hand-back, or
+    the completion notification of a subagent or a background shell command), in the
+    approval's own git root, and only if the approval verifies right now; every later write is verified again. Anything else
     drops it as before. A relay never creates an approval: no pointer in, no pointer out."""
     ptr = state.get("approval")
     dropped = (None, RELAY_NOTE if ptr else None)
     if not (isinstance(ptr, dict) and ptr.get("v") == 2 and ptr.get("approval_id")):
         return dropped
-    agent_id = relay_agent_id(prompt)
-    if agent_id is None or not started_agent(state, agent_id):
+    if not started_here(state, prompt):
         return dropped
     if _v2_root(cwd) != str(ptr.get("base")):
         return dropped
