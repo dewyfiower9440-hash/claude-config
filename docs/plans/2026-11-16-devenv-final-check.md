@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 task: devenv-final-check
 ---
 
@@ -179,3 +179,6 @@ C:\\dev 아래에 새 프로젝트 memo-board 를 만들어 줘. 개인용 메�
 
 ### 권한 확인 창에 대해
 테스트 세션은 auto mode였다. playwright의 조작 도구(오늘 ask로 바꾼 것) 54회는 모두 실행됐고 거부 기록이 없다. **auto mode에서 MCP 도구의 ask 규칙이 확인 창을 띄우는지는 공식 문서에 일반 문장이 없어 미확인이었고, 이 기록으로도 알 수 없다**(사용자가 창을 보았는지가 유일한 근거다). 창이 뜨지 않았다면 P4-07의 ask 규칙은 auto mode에서 효력이 없다는 뜻이고 별도 대응이 필요하다.
+
+## 진행 기록
+- 2026-11-16 정리(사용자 결정 "옛 계획 5개 … done으로 닫는다"): 단계 1~4가 모두 체크돼 있다. 드러난 결함의 개선은 `2026-11-16-devenv-final-check-fixes.md`가 이어받았다. status를 done으로 바꾼다.
