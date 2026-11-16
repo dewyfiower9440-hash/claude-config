@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 task: devenv-gate-workers
 ---
 
@@ -44,9 +44,9 @@ P4-02의 변경을 검증하려고 게이트 `python -I tests/run_all.py`를 두
 - [x] 1. 이 본문을 `docs/plans/2026-11-16-devenv-gate-workers.md`에 저장한다(첫 편집 전에).
 - [x] 2. `tests/test_run_all.py`에 검사를 더하고 실패를 확인한다.
 - [x] 3. `tests/run_all.py`를 고친다.
-- [ ] 4. 게이트를 포그라운드에서 실행한다. 600초 안에 끝나는지와 찍힌 전체 시간을 기록한다. 이 실행은 P4-02의 미커밋 변경도 함께 검증한다.
-- [ ] 5. code-reviewer 1회(작은 변경이라 P4-02의 커밋 전 확인과 묶지 않고 이 변경만), 반영, 게이트.
-- [ ] 6. 커밋(이 변경과 P4-02를 따로), push, CI 확인, 마감 기록. CI의 실행 시간도 기록한다(러너는 코어가 적다: 4로 느려지지 않는지).
+- [x] 4. 게이트를 포그라운드에서 실행한다. 600초 안에 끝나는지와 찍힌 전체 시간을 기록한다. 이 실행은 P4-02의 미커밋 변경도 함께 검증한다.
+- [x] 5. code-reviewer 1회(작은 변경이라 P4-02의 커밋 전 확인과 묶지 않고 이 변경만), 반영, 게이트.
+- [x] 6. 커밋(이 변경과 P4-02를 따로), push, CI 확인, 마감 기록. CI의 실행 시간도 기록한다(러너는 코어가 적다: 4로 느려지지 않는지).
 
 ## 검증
 - 게이트가 포그라운드에서 600초 안에 통과한다(상태: LOCALLY_VERIFIED). CI 성공(run id)과 CI의 게이트 시간.
@@ -62,3 +62,4 @@ P4-02의 변경을 검증하려고 게이트 `python -I tests/run_all.py`를 두
 - 2026-11-16 단계 1~3: `tests/test_run_all.py`에 검사를 더해 실패를 확인하고(3건), `tests/run_all.py`를 고쳤다(`DEFAULT_WORKERS = 4`, `SLOW_FIRST` 7개, 끝줄 `gate: N modules, sum Ns, wall Ns, workers N`). 출력 문구로 게이트를 판정하는 코드는 없다(hook은 종료 코드, `tests/final_check.py`는 "GATE PASSED" 문구).
 - 측정 추가: 두 번째 백그라운드 실행은 718초(모듈 합 2,139초)였다. PC가 실행마다 느려지고 있었다(원인 미확인).
 - 단계 4: 게이트 **exit 1**. `gate: 37 modules, sum 1719s, wall 435s, workers 4`. 시간은 풀렸지만 `test_project_switch`(3건)와 `test_task_switch`(FileNotFoundError)가 실패했다. 원인은 이 변경이 아니라 숨어 있던 테스트 격리 결함이었다(두 모듈이 같은 작업 폴더를 씀). 고칠 파일이 이 계획의 범위 밖이라 **이 계획의 단계 4~6은 `docs/plans/2026-11-16-devenv-gate-isolation.md`가 이어받았다.** 이 계획은 거기서 함께 닫는다.
+- 2026-11-16 단계 4~6(이어받은 계획에서 수행): 포그라운드 게이트 통과 두 번(489초, 433초). 커밋 `3bf86a1`. CI run 43786492603 성공(CI의 게이트: `gate: 37 modules, sum 2054s, wall 517s, workers 4`, 작업 전체 약 11분). 상태: CI_VERIFIED.
