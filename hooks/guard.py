@@ -329,6 +329,105 @@ def git_subcommand(args: list[str]) -> list[str]:
     return args[i:]
 
 
+# git queries that can name a file but never print its content: sub-command -> (flags
+# allowed as they are, prefixes of `--flag=value` forms, flags that take the next word).
+# An allow-list: any other flag (-p, -S, -G, -L, --cc, --word-diff, --output, ...) keeps
+# the ordinary secret-file check.
+GIT_NAME_QUERIES: dict[str, tuple[set[str], tuple[str, ...], set[str]]] = {
+    "log": (
+        {
+            "--all",
+            "--oneline",
+            "--follow",
+            "--name-only",
+            "--name-status",
+            "--stat",
+            "--reverse",
+            "--no-merges",
+            "--full-history",
+        },
+        (
+            "--diff-filter=",
+            "--format=",
+            "--pretty=",
+            "--date=",
+            "--since=",
+            "--until=",
+            "--after=",
+            "--before=",
+            "--max-count=",
+        ),
+        {"-n"},
+    ),
+    "ls-files": (
+        {
+            "--error-unmatch",
+            "-c",
+            "--cached",
+            "-o",
+            "--others",
+            "-i",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+        },
+        (),
+        set(),
+    ),
+    "check-ignore": (
+        {"-v", "--verbose", "-q", "--quiet", "-n", "--non-matching", "--no-index"},
+        (),
+        set(),
+    ),
+}
+
+
+def git_names_only(cmd: object, args: list[str]) -> bool:
+    """True for one plain `git log` / `git ls-files` / `git check-ignore` whose arguments
+    may name a secret file without the command being able to print it: git called directly
+    (no VAR=value prefix, no wrapper), no global option but `-C <dir>`, only allow-listed
+    flags, nothing substituted or redirected, not nested, and its output not piped on."""
+    words = getattr(cmd, "words", None) or []
+    if (
+        getattr(cmd, "nested", True)
+        or getattr(cmd, "heredoc", None) is not None
+        or getattr(cmd, "op_after", None) in ("|", "|&")
+        or len(words) != len(args) + 1
+        or any(re.search(r"[<>$`]", a) or a in REDIRECTS for a in args)
+    ):
+        return False
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        if args[i] != "-C" or i + 1 >= len(args):
+            return False
+        i += 2
+    sub = args[i:]
+    if not sub or sub[0] not in GIT_NAME_QUERIES:
+        return False
+    exact, prefixes, valued = GIT_NAME_QUERIES[sub[0]]
+    j = 1
+    while j < len(sub):
+        a = sub[j]
+        if a == "--":
+            # only paths follow; a `rev:path` word there is still not a plain name
+            return not any(":" in rest for rest in sub[j + 1 :])
+        if not a.startswith("-") and ":" in a:
+            return False  # `rev:path`: left to the ordinary check
+        if a.startswith("-"):
+            if a in valued and sub[0] == "log":
+                if j + 1 >= len(sub) or not sub[j + 1].isdigit():
+                    return False
+                j += 1
+            elif not (
+                a in exact
+                or a.startswith(prefixes)
+                or (sub[0] == "log" and re.fullmatch(r"-\d+", a))
+            ):
+                return False
+        j += 1
+    return True
+
+
 def message_value_indexes(program: str, args: list[str]) -> set[int]:
     """Argument indexes that are free text (commit messages, PR bodies, echo output)."""
     if program in DATA_ARG_PROGRAMS:
@@ -479,12 +578,18 @@ def check_parsed(command: str, dialect: Dialect, depth: int = 0) -> None:
 
         data = message_value_indexes(program, args)
         data |= {k - 1 for k in search_patterns([program, *args]) if k >= 1}
+        if program == "git" and git_names_only(cmd, args):
+            data = set(range(len(args)))  # names a file, cannot print it
         for k, arg in enumerate(args):
             if k in data:
                 continue
             for tok in re.split(r"[\s'\"<>|;&()=,]+", arg):
                 if tok and is_secret_path(tok):
                     block(f"command touches a secret file ({tok})")
+                # git's `<revision>:<path>` and `-L<range>:<path>` name a file too
+                path = tok.rpartition(":")[2] if program == "git" else ""
+                if path and path != tok and is_secret_path(path):
+                    block(f"command touches a secret file ({path})")
         if is_secret_path(cmd.words[0]) if cmd.words else False:
             block(f"command touches a secret file ({cmd.words[0]})")
 
