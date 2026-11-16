@@ -615,6 +615,105 @@ check(
     [2, 2, 2],
 )
 
+# ---------------------------------------------------------------- commands (P5-02)
+FORMS = [
+    ("bash", "uv run pytest -q --cov", ["uv run pytest"]),
+    ("bash", "uv run --project C:/dev/tools/db-mcp db-mcp sqlite", ["uv run <other>"]),
+    (
+        "bash",
+        "uv run --no-project --python 3.13 --with pytest pytest tests -q",
+        ["uv run pytest"],
+    ),
+    ("bash", "uv sync --locked && uv run ruff check .", ["uv sync", "uv run ruff"]),
+    ("bash", "uv run python -c 'print(1)'", ["uv run python"]),
+    ("bash", "uv run ./scripts/x.py", ["uv run <other>"]),
+    ("bash", "uv run --refresh-package secrettoken123 pytest", ["uv run pytest"]),
+    ("bash", "uv run --unknown-option myhost.corp python x", ["uv run <other>"]),
+    ("bash", "uv run -w requests python -c 1", ["uv run python"]),
+    ("bash", "uv --directory C:/x run pytest", ["uv <other>"]),
+    ("bash", "pnpm --filter sk-ABCDEF123456 build", ["pnpm <other>"]),
+    ("bash", "uvx --from evil ruff check", ["uvx <other>"]),
+    ("bash", "uv run", ["uv run <none>"]),
+    ("bash", "node scripts/build.js --watch", ["node <script>"]),
+    ("bash", "node -e 'console.log(1)'", ["node <inline>"]),
+    ("bash", "pnpm exec tsc && pnpm dlx create-x", ["pnpm exec", "pnpm dlx"]),
+    ("bash", "uvx ruff check . ; npx tsc --noEmit", ["uvx ruff", "npx tsc"]),
+    ("powershell", "uv run pyright; pnpm test", ["uv run pyright", "pnpm test"]),
+    ("bash", "git status && ls", []),
+    ("bash", "echo 'unterminated", []),
+    ("bash", "pnpm $(cat secret.txt)", ["pnpm <other>"]),
+]
+forms_of = getattr(ur, "command_forms", lambda command, dialect: None)
+check(
+    "U12 command_forms: the program and its sub-command or tool, nothing more",
+    [
+        (command, forms_of(command, dialect))
+        for dialect, command, want in FORMS
+        if forms_of(command, dialect) != want
+    ],
+    [],
+)
+FPROJ = ROOT / "forms-projects"
+(FPROJ / "C--dev-app").mkdir(parents=True)
+(FPROJ / "C--dev-quant-research").mkdir(parents=True)
+
+
+def shell_row(block_id: str, tool: str, command: str) -> str:
+    return json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": block_id,
+                        "name": tool,
+                        "input": {"command": command},
+                    }
+                ]
+            },
+        }
+    )
+
+
+(FPROJ / "C--dev-app" / "s1.jsonl").write_text(
+    "\n".join(
+        [
+            shell_row("a1", "Bash", "uv run pytest -q C:/dev/app/tests/secret_case.py"),
+            shell_row("a1", "Bash", "uv run pytest -q C:/dev/app/tests/secret_case.py"),
+            shell_row(
+                "a2", "Bash", "uv run pytest && node tools/gen.js --token abc123"
+            ),
+            shell_row("a3", "PowerShell", "pnpm exec vitest"),
+            "not json",
+            json.dumps({"type": "user", "message": {"content": "uv run python"}}),
+        ]
+    )
+    + "\n",
+    encoding="utf-8",
+)
+(FPROJ / "C--dev-quant-research" / "s2.jsonl").write_text(
+    shell_row("q1", "Bash", "uv run python model.py") + "\n", encoding="utf-8"
+)
+before = digest()
+rc, out = run("commands", "--projects", str(FPROJ), "--since", "1970-01-02")
+shown = out.decode("utf-8", "replace") if isinstance(out, bytes) else str(out)
+check(
+    "U13 commands: forms counted once per block, out-of-scope folders skipped, and no "
+    "argument, path or prompt text in the output",
+    (
+        rc,
+        "     2  Bash: uv run pytest" in shown,
+        "     1  Bash: node <script>" in shown,
+        "     1  PowerShell: pnpm exec" in shown,
+        "uv run python" in shown,
+        any(word in shown for word in ("secret_case", "abc123", "gen.js", "model.py")),
+        "1 out-of-scope folders skipped" in shown,
+    ),
+    (0, True, True, True, False, False, True),
+)
+check("U13 the commands run wrote and touched nothing", digest() == before, True)
+
 shutil.rmtree(ROOT, ignore_errors=True)
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

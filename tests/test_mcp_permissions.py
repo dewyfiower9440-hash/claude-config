@@ -272,5 +272,142 @@ check(
     [True, True, True],
 )
 
+# ---------------------------------------------------------------- shell rules (P5-02)
+# A command that runs code of the caller's choice (`uv run python -c ...`, `node -e ...`,
+# `pnpm dlx`, `pnpm exec`) writes files past the Edit rules and past the approval hook, so
+# it is never allowed wholesale. Rules are evaluated deny, then ask, then allow: a broad
+# `uv` ask rule would also catch the narrow forms allowed here, so `uv` gets no broad rule
+# at all and only its code-running forms are asked about.
+ALLOWED_FORMS = (
+    "uv run ruff",
+    "uv run pytest",
+    "uv run pyright",
+    "uv sync",
+    "uv lock",
+    "uv export",
+    "uv python",
+    "uvx ruff",
+    "uvx pyright",
+    "uv run --no-project --python 3.13 --with pytest pytest",
+    "uv run --frozen --with pip-audit pip-audit",
+    "pnpm install",
+    "pnpm run",
+    "pnpm test",
+    "pnpm build",
+    "pnpm lint",
+    "npx tsc",
+    "npx vitest",
+    "npx eslint",
+    "npx prettier",
+)
+ASKED_FORMS = (
+    "node",
+    "pnpm dlx",
+    "pnpm exec",
+    "pnpm add",
+    "uv run python",
+    "uv run python3",
+    "uv tool",
+    "uv pip",
+    "uv add",
+    "uv build",
+)
+RUNS_CODE = ("uv", "uvx", "node", "pnpm", "npx")
+NEVER_WHOLESALE = (
+    *RUNS_CODE,
+    "python",
+    "python3",
+    "py",
+    "bash",
+    "sh",
+    "cmd",
+    "pwsh",
+    "powershell",
+)
+
+
+def shell_rule(rule: object) -> tuple[str, tuple[str, ...], bool] | None:
+    """(tool, words, wildcard) of a Bash/PowerShell rule in either wildcard spelling
+    (`cmd:*`, `cmd *`); None for any other rule."""
+    if not isinstance(rule, str) or "(" not in rule or not rule.endswith(")"):
+        return None
+    tool, _, inner = rule[:-1].partition("(")
+    if tool not in ("Bash", "PowerShell"):
+        return None
+    wildcard = inner.endswith((":*", " *")) or inner == "*"
+    text = (
+        inner[:-2] if inner.endswith((":*", " *")) else ("" if inner == "*" else inner)
+    )
+    return tool, tuple(text.split()), wildcard
+
+
+def forms_of(kind: str, programs: tuple[str, ...]) -> dict[str, list[str]]:
+    """tool -> sorted command texts of the rules of `kind` that start with one of `programs`."""
+    out: dict[str, list[str]] = {"Bash": [], "PowerShell": []}
+    for rule in permissions.get(kind, []):
+        parsed = shell_rule(rule)
+        if parsed and parsed[1][:1] and parsed[1][0] in programs:
+            out[parsed[0]].append(" ".join(parsed[1]))
+    return {tool: sorted(forms) for tool, forms in out.items()}
+
+
+check(
+    "M8 shell_rule reads both wildcard spellings and leaves other rules alone",
+    [
+        shell_rule("Bash(uv run pytest:*)"),
+        shell_rule("PowerShell(uv *)"),
+        shell_rule("Bash(uv run python)"),
+        shell_rule("Bash(*)"),
+        shell_rule("Read(**/.env)"),
+        shell_rule("mcp__github__get_me"),
+    ],
+    [
+        ("Bash", ("uv", "run", "pytest"), True),
+        ("PowerShell", ("uv",), True),
+        ("Bash", ("uv", "run", "python"), False),
+        ("Bash", (), True),
+        None,
+        None,
+    ],
+)
+check(
+    "M8 the allowed rules for uv, uvx, node, pnpm and npx are exactly the named-tool forms, "
+    "for both shells (a broader rule such as `uv run` or `uv *` fails here)",
+    forms_of("allow", RUNS_CODE),
+    {"Bash": sorted(ALLOWED_FORMS), "PowerShell": sorted(ALLOWED_FORMS)},
+)
+check(
+    "M8 no rule allows an interpreter, a shell or one of those programs wholesale",
+    sorted(
+        rule
+        for rule in permissions.get("allow", [])
+        if (parsed := shell_rule(rule))
+        and parsed[2]
+        and (not parsed[1] or (len(parsed[1]) == 1 and parsed[1][0] in NEVER_WHOLESALE))
+    ),
+    [],
+)
+asked = forms_of("ask", RUNS_CODE)
+check(
+    "M8 the forms that run code of the caller's choice are asked about, for both shells",
+    {tool: sorted(set(ASKED_FORMS) - set(forms)) for tool, forms in asked.items()},
+    {"Bash": [], "PowerShell": []},
+)
+check(
+    "M8 no ask rule swallows an allowed rule (ask is evaluated before allow): no ask rule's "
+    "words are a prefix of an allowed rule's words",
+    sorted(
+        (ask, allow)
+        for ask in permissions.get("ask", [])
+        for allow in permissions.get("allow", [])
+        if (a := shell_rule(ask))
+        and (b := shell_rule(allow))
+        and a[0] == b[0]
+        and a[2]
+        and b[1][: len(a[1])] == a[1]
+    ),
+    [],
+)
+
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

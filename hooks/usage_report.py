@@ -2,6 +2,7 @@
 
     python -I hooks/usage_report.py calls   [--since YYYY-MM-DD] [--projects DIR] [--config DIR]
     python -I hooks/usage_report.py observe [--since YYYY-MM-DD] [--home DIR] [--failures DIR]
+    python -I hooks/usage_report.py commands [--since YYYY-MM-DD] [--projects DIR]
 
 `calls` reads the session transcripts (`~/.claude/projects/<folder>/*.jsonl`) once and counts
 the Skill, subagent and MCP calls by name. Installed skills and subagents that were never
@@ -20,6 +21,14 @@ a block id is counted once and the repeats are reported.
 score, test gap, review, output size) and the failure kinds under `state/failures`. The
 approval home is not read by Claude's tools: the user runs `observe` in their own terminal
 (as with authz_report.py, which covers the fifth file, authz-observe.jsonl).
+
+`commands` counts the forms of the shell commands that can run code of the caller's choice
+(uv, uvx, node, pnpm, npx): the program and the sub-command or tool it was given, such as
+`uv run pytest` or `node <script>`. It is the one report that looks into a tool input, and
+it prints nothing of it beyond those one or two words, and only words from a fixed list in
+this file (FORM_WORDS): anything else on the command line, an option's value, a path, a
+project's own script name, prints as `<other>`. So an unusual spelling is counted under
+`<other>`, never shown. It exists to decide which forms a permission rule may allow.
 
 Counts say whether something is used, not whether it is any good. The transcript format is
 not a documented contract: "lines read" and "tool_use blocks" are printed so that a format
@@ -135,6 +144,158 @@ def count_calls(lines: Iterable[str], seen: set[str] | None = None) -> Calls:
                     "(default)" if kind in (None, "") else clean_name(kind)
                 ] += 1
     return found
+
+
+FORM_PROGRAMS = ("uv", "uvx", "node", "pnpm", "npx")
+# The only words a form may print. A word that is not here prints as `<other>`: an option's
+# value, a path, a project's own script name or anything else from the command line never
+# reaches the report.
+FORM_WORDS = {
+    "uv": {
+        "run", "sync", "lock", "add", "remove", "export", "python", "tool", "pip", "build",
+        "publish", "init", "tree", "venv", "version", "cache", "self",
+    },
+    "uv run": {
+        "pytest", "ruff", "pyright", "python", "python3", "mypy", "pip-audit", "coverage",
+    },
+    "uvx": {"ruff", "pyright", "pytest", "pip-audit", "mypy"},
+    "pnpm": {
+        "install", "add", "remove", "run", "test", "exec", "dlx", "build", "lint", "audit",
+        "view", "ls", "typecheck", "publish", "format", "dev", "start",
+    },
+    "npx": {"tsc", "vitest", "eslint", "prettier", "tsx", "playwright"},
+}  # fmt: skip
+# options of `uv run` whose next word is a value, not the program to run
+UV_RUN_VALUED = {
+    "--project", "--python", "-p", "--with", "-w", "--with-requirements", "--with-editable",
+    "--group", "--extra", "--directory", "--env-file", "--package", "--index",
+    "--default-index", "--index-url", "--extra-index-url", "--find-links", "-f",
+    "--refresh-package", "--allow-insecure-host", "--cache-dir", "--exclude-newer",
+    "--config-file", "--color", "--script", "--only-group", "--no-group",
+}  # fmt: skip
+
+
+def _known(group: str, value: str) -> str:
+    return value if value in FORM_WORDS.get(group, ()) else "<other>"
+
+
+def command_forms(command: str, dialect: str) -> list[str]:
+    """The forms of the watched programs in one shell command: `uv run pytest`, `uv sync`,
+    `node <script>`, `node <inline>`, `pnpm exec`. One entry per simple command; a command
+    that does not parse gives none. A form is the program and at most two words, each taken
+    from FORM_WORDS or shown as `<other>` / `<none>`."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from shellparse import ParseError, parse, program_and_args
+
+    try:
+        parsed = parse(command, "powershell" if dialect == "powershell" else "bash")
+    except (ParseError, ValueError, RecursionError):
+        return []
+    forms: list[str] = []
+    for cmd in parsed:
+        program, args = program_and_args(cmd)
+        if program not in FORM_PROGRAMS:
+            continue
+        words = [a for a in args if not a.startswith("-")]
+        if program == "node":
+            inline = not words or any(
+                a in ("-e", "--eval", "-p", "--print") for a in args
+            )
+            forms.append("node <inline>" if inline else "node <script>")
+        elif program == "uv" and "run" in args and _known("uv", words[0]) == "run":
+            tool, skip = "<none>", False
+            for a in args[args.index("run") + 1 :]:
+                if skip:
+                    skip = False
+                elif a in UV_RUN_VALUED:
+                    skip = True
+                elif not a.startswith("-"):
+                    tool = _known("uv run", a)
+                    break
+            forms.append(f"uv run {tool}")
+        else:
+            forms.append(
+                f"{program} {_known(program, words[0])}"
+                if words
+                else f"{program} <none>"
+            )
+    return forms
+
+
+def count_forms(lines: Iterable[str], seen: set[str]) -> Counter[str]:
+    """`<tool>: <form>` counts of one transcript's shell calls (a block id counts once)."""
+    found: Counter[str] = Counter()
+    for line in lines:
+        if '"tool_use"' not in line:
+            continue
+        try:
+            row = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        message = row.get("message") if isinstance(row, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name = block.get("name")
+            if name not in ("Bash", "PowerShell"):
+                continue
+            block_id = block.get("id")
+            if isinstance(block_id, str) and block_id:
+                if block_id in seen:
+                    continue
+                seen.add(block_id)
+            given = block.get("input")
+            command = given.get("command") if isinstance(given, dict) else None
+            if not isinstance(command, str):
+                continue
+            dialect = "powershell" if name == "PowerShell" else "bash"
+            for form in command_forms(command, dialect):
+                found[f"{name}: {form}"] += 1
+    return found
+
+
+def commands_report(projects: Path, since: float) -> list[str]:
+    total: Counter[str] = Counter()
+    seen: set[str] = set()
+    files = skipped = 0
+    try:
+        folders = sorted(p for p in projects.iterdir() if p.is_dir())
+    except OSError:
+        return [f"commands: cannot read {projects.name or 'the projects folder'}"]
+    for folder in folders:
+        if OUT_OF_SCOPE.search(folder.name):
+            skipped += 1
+            continue
+        try:
+            recent = sorted(
+                p
+                for p in folder.rglob("*.jsonl")
+                if p.is_file() and p.stat().st_mtime >= since
+            )
+        except OSError:
+            continue
+        for path in recent:
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    total.update(count_forms(f, seen))
+                files += 1
+            except OSError:
+                continue
+    title = (
+        f"shell command forms of {', '.join(FORM_PROGRAMS)} "
+        f"({files} transcript files, {skipped} out-of-scope folders skipped)"
+    )
+    lines = [title]
+    lines += [
+        f"{n:6d}  {form}"
+        for form, n in sorted(total.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+    if not total:
+        lines.append("     0  (none)")
+    return lines
 
 
 def percentile(values: Sequence[float], q: float) -> float | None:
@@ -432,6 +593,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     calls.add_argument(
         "--config", type=Path, default=Path(__file__).resolve().parent.parent
     )
+    forms = commands.add_parser(
+        "commands", help="forms of uv/node/pnpm commands in the transcripts"
+    )
+    forms.add_argument("--since", type=_day)
+    forms.add_argument("--projects", type=Path)
     observe = commands.add_parser(
         "observe", help="what the hooks' observation files hold"
     )
@@ -441,7 +607,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     since = args.since if args.since is not None else time.time() - DEFAULT_DAYS * 86400
     user = _home_dir()
-    if args.command == "calls":
+    if args.command == "commands":
+        projects = args.projects or (user / ".claude" / "projects" if user else None)
+        if projects is None:
+            print("usage_report: no home folder; give --projects", file=sys.stderr)
+            return 2
+        lines = commands_report(projects, since)
+    elif args.command == "calls":
         projects = args.projects or (user / ".claude" / "projects" if user else None)
         if projects is None:
             print("usage_report: no home folder; give --projects", file=sys.stderr)
