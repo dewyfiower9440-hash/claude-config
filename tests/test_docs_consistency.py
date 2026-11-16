@@ -9,7 +9,9 @@ gone, a stale copy of the rules next to them) fails here instead of misleading a
 
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -227,6 +229,45 @@ check(
     "D6 /debug says what to do when the layer has no test harness",
     "no test harness" in skill["debug"] and "회귀 테스트 없음" in skill["debug"],
     True,
+)
+
+# ---------------------------------------------------------------- agents vs hooks (fix-e)
+# The security auditor is told commands that work here: a dependency audit that writes no
+# temp file, and a history query the guard lets through (and its unsafe variant blocked).
+auditor = (REPO / "agents" / "security-auditor.md").read_text(encoding="utf-8")
+HISTORY_QUERY = "git log --all --oneline -- "
+
+
+def guard_says(command: str) -> str:
+    done = subprocess.run(
+        [sys.executable, str(HOOKS / "guard.py")],
+        input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return {0: "allowed", 2: "blocked"}.get(done.returncode, f"exit {done.returncode}")
+
+
+check(
+    "D7 the auditor's dependency audit writes no temp file, and its history query is named",
+    (
+        "uv run --frozen --with pip-audit pip-audit" in auditor,
+        "uv export" in auditor,
+        "writes no file" in auditor,
+        HISTORY_QUERY in auditor,
+        "실행하지 못함" in auditor,
+    ),
+    (True, False, False, True, True),
+)
+check(
+    "D7 the guard lets that history query name a secret file, and blocks it with -p or a pipe",
+    (
+        guard_says(HISTORY_QUERY + ".env"),
+        guard_says("git log --all --oneline -p -- .env"),
+        guard_says(HISTORY_QUERY + ".env | cat"),
+    ),
+    ("allowed", "blocked", "blocked"),
 )
 
 print("FAILURES:", fails)

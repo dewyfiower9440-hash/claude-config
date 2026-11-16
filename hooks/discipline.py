@@ -3527,17 +3527,32 @@ def note_test_gap(state: dict[str, Any]) -> None:
 RISK_OBSERVE_FILE = APPROVALS_HOME / "risk-observe.jsonl"
 RISK_NOTE = (
     "[discipline] 지난 턴의 변경은 위험 점수 {score}입니다({parts}; 안내 기준 {at}). "
-    "진행 중인 계획에 대안 비교가 없습니다. 되돌리기 어려운 변경이면 대안 2~3개와 "
-    "trade-off를 계획에 적고 진행하세요. (알림이며 차단이 아닙니다.)"
+    "승인된 계획에 제목이나 표로 된 대안 비교가 없습니다. 되돌리기 어려운 변경이면 "
+    "대안 2~3개와 trade-off를 계획에 적고 진행하세요. (알림이며 차단이 아닙니다.)"
+)
+RISK_NOTE_NO_PLAN = (
+    "[discipline] 지난 턴의 변경은 위험 점수 {score}입니다({parts}; 안내 기준 {at}). "
+    "승인된 계획 없이 한 변경입니다. 되돌리기 어려운 변경이면 /plan으로 대안 2~3개와 "
+    "trade-off를 적고 승인받으세요. (알림이며 차단이 아닙니다.)"
+)
+RISK_NOTE_NO_TEXT = (
+    "[discipline] 지난 턴의 변경은 위험 점수 {score}입니다({parts}; 안내 기준 {at}). "
+    "승인된 작업의 계획 글을 docs/plans에서 찾지 못해 대안 비교를 확인하지 못했습니다. "
+    "되돌리기 어려운 변경이면 대안 2~3개와 trade-off를 계획에 적고 진행하세요. "
+    "(알림이며 차단이 아닙니다.)"
 )
 RISK_NOTE_CHARS = 300
 
 
-def _approved_plan_texts(state: dict[str, Any]) -> list[str]:
+def _approved_plan_texts(state: dict[str, Any], held: object = None) -> list[str]:
     """The plan files of the task the current approval is for (read at a Stop, only when a
     score is high). Reading them gives nothing but the answer to "does one compare
-    alternatives"."""
+    alternatives". `held` is the approval the turn worked under as the Stop found it,
+    before its re-check: the Stop of the turn that closes a plan as done has cleared the
+    approval by now, and its plan is still the one to judge by."""
     approval = state.get("approval")
+    if not isinstance(approval, dict):
+        approval = held
     if not isinstance(approval, dict):
         return []
     base, task = approval.get("base"), approval.get("task_id")
@@ -3555,7 +3570,7 @@ def _approved_plan_texts(state: dict[str, Any]) -> list[str]:
     return texts
 
 
-def note_risk(state: dict[str, Any]) -> None:
+def note_risk(state: dict[str, Any], held: object = None) -> None:
     """Stop: score what the turn changed (P2-01), count it once in the observation file
     (numbers and kinds, no path) and prepare the note for the next prompt when the score is
     high and no plan of the approved task compares alternatives (P2-03). Never changes the
@@ -3599,12 +3614,19 @@ def note_risk(state: dict[str, Any]) -> None:
         )
         at = risk.threshold(os.environ.get("CLAUDE_RISK_ADVICE_AT"))
         # plan files are read only for a score that is high enough to ask
-        advised = risk.advice_needed(found.score, at, []) and risk.advice_needed(
-            found.score, at, _approved_plan_texts(state)
+        plans = (
+            _approved_plan_texts(state, held)
+            if risk.advice_needed(found.score, at, [])
+            else []
         )
+        advised = risk.advice_needed(found.score, at, plans)
         parts = ", ".join(f"{k} {n}" for k, n in sorted(found.kinds.items()))
+        approved = isinstance(state.get("approval"), dict) or isinstance(held, dict)
+        wording = (
+            RISK_NOTE if plans else RISK_NOTE_NO_TEXT if approved else RISK_NOTE_NO_PLAN
+        )
         state["risk_note"] = (
-            RISK_NOTE.format(score=found.score, parts=parts, at=at)[:RISK_NOTE_CHARS]
+            wording.format(score=found.score, parts=parts, at=at)[:RISK_NOTE_CHARS]
             if advised
             else ""
         )
@@ -3767,8 +3789,9 @@ def on_stop(data: dict[str, Any], state: dict[str, Any]) -> None:
     import worktree
 
     state["stop_prompt_id"] = data.get("prompt_id") or state.get("prompt_id")
+    worked_under = active_approval(state, state["stop_prompt_id"])
     if v2_active():
-        held = active_approval(state, state["stop_prompt_id"])
+        held = worked_under
         try:
             refused = v2_write_check(state, str(data.get("cwd") or os.getcwd()))
         except Exception as e:  # hook boundary: block with the failure, never crash
@@ -3812,7 +3835,7 @@ def on_stop(data: dict[str, Any], state: dict[str, Any]) -> None:
         log.exception("discipline.ledger_failed")
     observe_reviews(state)
     note_test_gap(state)
-    note_risk(state)
+    note_risk(state, worked_under)
     note_ci_failures(state, data.get("session_id"))
     damaged = state_reset_active(state)
     decision = _stop_decision(state)

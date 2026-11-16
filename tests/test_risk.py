@@ -523,6 +523,134 @@ check(
     [[], [], [], [], []],
 )
 
+# ---- devenv-fix-e: the note judges the plan of the approval the turn worked under, also
+# when the Stop has just cleared that approval (plan closed as done), and says what is true
+HELD_T1 = {"base": str(PROJ), "task_id": "t1"}  # its plan compares alternatives
+HELD_T2 = {"base": str(PROJ), "task_id": "t2"}  # its plan does not
+
+
+def found(state: dict, held: object) -> list:
+    return [
+        call("compares_alternatives", text)
+        for text in disc._approved_plan_texts(state, held)
+    ]
+
+
+check(
+    "R21 without a live approval the plans of the one held before the re-check are read; "
+    "a live approval comes first",
+    [
+        found({"approval": None}, HELD_T1),
+        found({"approval": HELD_T2}, HELD_T1),
+        found({}, None),
+        found({}, "x"),
+    ],
+    [[True], [False], [], []],
+)
+
+
+def noted(held: object, approval: object = None) -> str:
+    state = {
+        "repos": {os.path.normcase(str(PROJ)): {}},
+        "turn_changes": [os.path.normcase(str(PROJ / rel)) for rel in RISKY],
+        "dirty": {},
+        "approval": approval,
+        "turn": 99,
+    }
+    disc.note_risk(state, held)
+    return str(state.get("risk_note"))
+
+
+check(
+    "R22 a high score, the plan just closed compares alternatives: no note",
+    noted(HELD_T1),
+    "",
+)
+n_plan, n_none = noted(HELD_T2), noted(None)
+check(
+    "R22 a plan without a comparing heading or table: the note says exactly that",
+    (
+        NOTE in n_plan,
+        "제목이나 표로 된 대안 비교가 없습니다" in n_plan,
+        "승인된 계획 없이" in n_plan,
+    ),
+    (True, True, False),
+)
+check(
+    "R22 no approved plan at all: the note says so and does not speak of a plan in progress",
+    (
+        NOTE in n_none,
+        "승인된 계획 없이" in n_none,
+        "진행 중인 계획" in n_none,
+        "제목이나 표로 된" in n_none,
+    ),
+    (True, True, False, False),
+)
+check(
+    "R22 ... through the hook too (the session of R15 had no plan), within the length limit",
+    (
+        "승인된 계획 없이" in risk_part(first),
+        max(len(n_plan), len(n_none)) <= disc.RISK_NOTE_CHARS,
+    ),
+    (True, True),
+)
+
+n_text = noted({"base": str(PROJ), "task_id": "t3"})  # approved, but no plan text found
+check(
+    "R22 an approval whose plan text is not found: the note says that, not 'no plan'",
+    (
+        NOTE in n_text,
+        "계획 글을 docs/plans에서 찾지 못해" in n_text,
+        "승인된 계획 없이" in n_text,
+        len(n_text) <= disc.RISK_NOTE_CHARS,
+    ),
+    (True, True, False, True),
+)
+
+# through the Stop hook: the Stop's own re-check clears the approval (here: a step was
+# added to the plan) before the note is prepared; the plan the turn worked under is
+# still the one to judge by. (A plan closed as done covers its in-scope changes, so
+# such a turn has nothing left to score.)
+import approvals
+
+approvals.Store(HOME, ROOT / "w" / "hwm").admin_activate(lambda code: True, "test")
+
+
+def closed_turn(task: str, body: str) -> str:
+    text = (
+        f"---\nstatus: in-progress\ntask: {task}\n---\n\n# {task}\n\n{body}"
+        "## 변경 범위\n- hooks/**\n- .github/**\n- uv.lock\n\n## 단계\n- [ ] 1. a\n"
+    )
+    file = PLANS / f"2026-11-16-{task}.md"
+    file.write_text(text, encoding="utf-8")
+    s = uuid.uuid4().hex
+    hook("prompt", s, prompt="work")
+    hook(
+        "post",
+        s,
+        tool_name="ExitPlanMode",
+        tool_input={},
+        tool_response={"plan": text, "filePath": str(file)},
+    )
+    for rel in RISKY:
+        edit(s, rel)
+    file.write_text(text.replace("1. a", "1. a, and more"), encoding="utf-8")
+    hook("stop", s)
+    return risk_part(hook("prompt", s, prompt_id="p2", prompt="next"))
+
+
+check(
+    "R23 through the hook, the approval cleared by the Stop itself: with a comparison no note, "
+    "without one the note about the plan (not 'no plan')",
+    (
+        closed_turn(
+            "r23a", "## 대안 비교\n| 선택지 | 판단 |\n|---|---|\n| A | x |\n\n"
+        ),
+        "제목이나 표로 된 대안 비교가 없습니다" in closed_turn("r23b", ""),
+    ),
+    ("", True),
+)
+
 for p in (ROOT, PROJ):
     shutil.rmtree(p, ignore_errors=True)
 print("FAILURES:", fails)
