@@ -827,6 +827,100 @@ check(
     (True, None),
 )
 
+# devenv-fix-g: one user turn, two plans one after the other. The first plan's approval is
+# lost to a relayed prompt this session did not start, so its file is still listed when the
+# second plan is closed. It was done under an approval valid at the time: the closed task
+# is recorded all the same. A file nobody approved still keeps the record away.
+LOST = "<task-notification>\n<task-id>zz9unknown</task-id>\n</task-notification>"
+
+
+def two_plans(stray: bool) -> int:
+    before_n = len(gadget())
+    PLAN3FILE.write_text(PLAN3, encoding="utf-8")
+    s = start2(PLAN3, PLAN3FILE)  # hobbit approved
+    edit(s, "hb.py", f"hb = {uuid.uuid4().hex!r}\n", CENV)
+    hook("prompt", s, CENV, prompt=LOST, prompt_id="r1")  # hobbit's approval is dropped
+    PLAN2FILE.write_text(PLAN2, encoding="utf-8")
+    hook(
+        "post",
+        s,
+        CENV,
+        tool_name="ExitPlanMode",
+        tool_input={},
+        tool_response={"plan": PLAN2, "filePath": str(PLAN2FILE)},
+        prompt_id="r1",
+    )
+    names = ["gd.py", "stray.txt"] if stray else ["gd.py"]
+    for name in names:
+        f = PROJ / ("src" if name.endswith(".py") else "docs") / name
+        body = f"v = {uuid.uuid4().hex!r}\n"
+        f.write_text(body, encoding="utf-8")
+        hook(
+            "post",
+            s,
+            CENV,
+            tool_name="Write",
+            tool_input={"file_path": str(f), "content": body},
+            tool_use_id=uuid.uuid4().hex,
+            prompt_id="r1",
+        )
+    PLAN2FILE.write_text(PLAN2.replace("in-progress", "done"), encoding="utf-8")
+    gate2(s, "r1")
+    hook("stop", s, CENV, prompt_id="r1")
+    PLAN3FILE.write_text(PLAN3.replace("in-progress", "done"), encoding="utf-8")
+    return len(gadget()) - before_n
+
+
+check(
+    "G-T6 two plans in one turn, the first one's file still listed at the second's close: "
+    "the closed task is recorded; with a file outside every scope it is not",
+    (two_plans(stray=False), two_plans(stray=True)),
+    (1, 0),
+)
+
+READS_ONLY = [
+    ("bash", "git status", True),
+    ("bash", "ls -la", True),
+    ("bash", "git log --oneline -3 && git status -sb", True),
+    ("bash", "cat a.txt | grep b", True),
+    ("bash", "gh run view 123 --json status", True),
+    ("bash", "cd sub && git diff --stat", True),
+    ("powershell", "Get-Content a.txt | Select-String b", True),
+    ("bash", "python x.py", False),
+    ("bash", "uv run pytest -q", False),
+    ("bash", "git commit -m x", False),
+    ("bash", "git branch -D x", False),
+    ("bash", "git -C other status", False),
+    ("bash", "echo a > f.txt", False),
+    ("bash", "sed -i s/a/b/ f.txt", False),
+    ("bash", "git status; rm x", False),
+    ("bash", "bash -c 'ls'", False),
+    ("bash", "cat $(python x.py)", False),
+    ("bash", "", False),
+    ("bash", "cat <<EOF\nx\nEOF", False),
+    ("bash", "find . -delete", False),
+    ("bash", "gh pr create --fill", False),
+    ("bash", "echo 'unterminated", False),
+    ("powershell", "Set-Content a.txt b", False),
+    ("bash", "git diff --output=out.txt", False),
+    ("bash", "git log -3 --output=out.txt", False),
+    ("bash", "sort -o out.txt in.txt", False),
+    ("bash", "uniq in.txt out.txt", False),
+    ("bash", "rg --pre ./x.sh pattern", False),
+    ("bash", "(" * 3000 + "ls" + ")" * 3000, False),
+    ("powershell", "Get-ChildItem | ForEach-Object { Remove-Item $_ }", False),
+]
+check(
+    "G-T9 shell_reads_only: only commands made of listed read-only programs, with nothing "
+    "redirected, substituted or unparsed; anything else is looked at",
+    [
+        (dialect, command)
+        for dialect, command, want in READS_ONLY
+        if disc.shell_reads_only(command, dialect, str(PROJ)) != want
+    ],
+    [],
+)
+
 check(
     "R-T28 the cap ignores only the notice of this task's own close",
     (

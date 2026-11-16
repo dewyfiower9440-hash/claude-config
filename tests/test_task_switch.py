@@ -325,6 +325,186 @@ check(
     (True, True, "beta"),
 )
 
+# ---- devenv-fix-g: what was changed inside the scope while the approval was valid is
+# recorded as covered at that moment, so losing the approval later (here: a relayed prompt
+# the session did not start) does not turn that work into unapproved or out-of-scope work.
+LOST = "<task-notification>\n<task-id>zz9unknown</task-id>\n</task-notification>"
+NO_PLAN = "승인된 계획 없이"
+
+
+def lose(s: str, prompt_id: str = "r1") -> None:
+    hook("prompt", s, prompt_id, prompt=LOST)
+
+
+def edit_at(s: str, rel: str, prompt_id: str) -> None:
+    edit(s, rel, prompt_id)
+
+
+def open_after(s: str, prompt_id: str = "r1") -> tuple[list[str], str]:
+    """After a Stop: (the listed changes the Stop still asks about, the Stop's reason). A
+    change made inside the scope of an approval valid at that moment stays listed (the risk
+    score and the test-gap note still see it) but is answered."""
+    _listed, why = stop(s, prompt_id)
+    state = json.loads(
+        (TMPD / "claude-discipline" / f"{s}.json").read_text(encoding="utf-8")
+    )
+    answered = set(state.get("turn_answered") or [])
+    return sorted(
+        Path(f).name for f in state.get("turn_changes", []) if f not in answered
+    ), why
+
+
+reopen_alpha()
+
+
+s = start()
+approve(s, "alpha")
+for n in range(6):
+    edit(s, f"src/g{n}.py")
+lose(s)
+names, why = open_after(s)
+check(
+    "G-T1 six in-scope edits under a valid approval, the approval lost afterwards: "
+    "none of them is counted as unapproved",
+    (task_of(s), names, NO_PLAN in why),
+    (None, [], False),
+)
+edit_at(s, "src/g0.py", "r1")
+edit_at(s, "src/late.py", "r1")
+names, why = open_after(s)
+check(
+    "G-T2 after the loss: the same file edited again and a new file are both counted",
+    names,
+    ["g0.py", "late.py"],
+)
+
+s = start()
+approve(s, "alpha")
+edit(s, "src/h.py")
+lose(s)
+approve(s, "beta", "r1")
+edit_at(s, "lib/h2.py", "r1")
+names, why = open_after(s)
+check(
+    "G-T3 alpha's work, alpha lost, beta approved and worked on in the same turn: "
+    "alpha's file is not out of beta's scope",
+    (names, OUT in why),
+    ([], False),  # h.py was done under alpha, h2.py under beta: neither is asked about
+)
+
+s = start()
+approve(s, "alpha")
+edit(s, "other/z.py")
+edit(s, "src/in.py")
+lose(s)
+names, why = open_after(s)
+check(
+    "G-T4 an edit outside the scope is not covered, the one inside is",
+    names,
+    ["z.py"],
+)
+
+s = start()
+approve(s, "alpha")
+FILE["alpha"].write_text(TEXT["alpha"].replace("1. a", "1. a, and b"), encoding="utf-8")
+edit(s, "src/k.py")
+lose(s)
+names, why = open_after(s)
+check(
+    "G-T5 an edit made after the plan text changed (approval no longer valid): not covered",
+    "k.py" in names,
+    True,
+)
+FILE["alpha"].unlink()
+s = start()
+approve(s, "alpha")  # approved, plan file not saved: unbound
+edit(s, "src/u.py")
+lose(s)
+names, why = open_after(s)
+check(
+    "G-T5 an edit under an approval whose plan file is not saved yet: not covered",
+    "u.py" in names,
+    True,
+)
+FILE["alpha"].write_text(TEXT["alpha"], encoding="utf-8")
+
+
+def write_call(s: str, rel: str, tool_use_id: str, pre: bool) -> None:
+    """One Write as the harness sends it: PreToolUse (optional), the write, PostToolUse."""
+    f = PROJ / rel
+    ti = {"file_path": str(f), "content": f"v = {uuid.uuid4().hex!r}\n"}
+    if pre:
+        hook("pre", s, "p1", tool_name="Write", tool_input=ti, tool_use_id=tool_use_id)
+    f.write_text(str(ti["content"]), encoding="utf-8")
+    hook("post", s, "p1", tool_name="Write", tool_input=ti, tool_use_id=tool_use_id)
+
+
+def shell_call(s: str, command: str) -> None:
+    hook(
+        "post",
+        s,
+        "p1",
+        tool_name="Bash",
+        tool_input={"command": command},
+        tool_response={"stdout": ""},
+        tool_use_id=uuid.uuid4().hex,
+    )
+
+
+s = start()
+approve(s, "alpha")
+f1 = PROJ / "src" / "r1.py"
+ti1 = {"file_path": str(f1), "content": "r = 1\n"}
+hook("pre", s, "p1", tool_name="Write", tool_input=ti1, tool_use_id="call-A")
+f1.write_text("r = 1\n", encoding="utf-8")
+FILE["alpha"].write_text(TEXT["alpha"].replace("1. a", "1. a, and c"), encoding="utf-8")
+hook("post", s, "p1", tool_name="Write", tool_input=ti1, tool_use_id="call-A")
+write_call(s, "src/r2.py", "call-C", pre=False)  # no PreToolUse of this call was seen
+lose(s)
+names, why = open_after(s)
+check(
+    "G-T7 the check PreToolUse made is reused for the same tool call only: the call checked "
+    "before the plan changed is covered, another call is checked again and is not",
+    ("r1.py" in names, "r2.py" in names),
+    (False, True),
+)
+FILE["alpha"].write_text(TEXT["alpha"], encoding="utf-8")
+
+
+def cover_state(s: str) -> tuple[object, list[str]]:
+    state = json.loads(
+        (TMPD / "claude-discipline" / f"{s}.json").read_text(encoding="utf-8")
+    )
+    return (state.get("cover_last") or {}).get("at"), sorted(
+        Path(f).name for f in state.get("turn_done_under") or {}
+    )
+
+
+s = start()
+approve(s, "alpha")
+edit(s, "src/first.py")
+at0, done0 = cover_state(s)
+(PROJ / "src" / "sh.py").write_text(
+    "sh = 1\n", encoding="utf-8"
+)  # by no tool the hook saw
+shell_call(s, "git status")
+at1, done1 = cover_state(s)
+shell_call(s, "python gen.py")
+at2, done2 = cover_state(s)
+check(
+    "G-T8 after a read-only shell command the repository is not looked at; after one that "
+    "may write it is, and what changed inside the scope is recorded",
+    (done0, at1 == at0, done1, at2 != at1, done2),
+    (["first.py"], True, ["first.py"], True, ["first.py", "sh.py"]),
+)
+lose(s)
+check(
+    "G-T8 ... and a change a read-only command was skipped over is still recorded before a "
+    "relayed prompt decides about the approval",
+    "sh.py" in open_after(s)[0],
+    False,
+)
+
 for p in (ROOT, PROJ):
     shutil.rmtree(p, ignore_errors=True)
 print("FAILURES:", fails)

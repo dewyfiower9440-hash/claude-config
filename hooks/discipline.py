@@ -274,6 +274,16 @@ def default_state() -> dict[str, Any]:
         "failures_noted": [],
         "output_advice_turn": 0,  # P1-04: the turn that already got the delegation hint
         "turn_cover_off": 0,  # 1: not known what an approval started from; cover nothing
+        # the last cover_valid: {at, n, why}; for diagnosis, never read to decide
+        "cover_last": None,
+        # path -> content hash of what was changed inside the scope of an approval valid at
+        # that moment (cover_valid), and the listed changes of the last Stop it answers
+        "turn_done_under": {},
+        "turn_answered": [],
+        # {id, approval}: the tool call that was just checked against the approval (by
+        # PreToolUse for an Edit/Write, by PostToolUse for a shell command); cover_valid
+        # need not check the same call again
+        "pre_valid": None,
     }
 
 
@@ -838,6 +848,15 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
             denial = v2_failure(e)
         if denial:
             emit_pre("deny", denial)
+        checked = state.get("approval")
+        state["pre_valid"] = (
+            {"id": data.get("tool_use_id"), "approval": checked.get("approval_id")}
+            if isinstance(checked, dict)
+            and checked.get("approval_id")
+            and data.get("tool_use_id")
+            and not _passed_unbound
+            else None
+        )
 
     # 1) Large change without an approved plan covering it.
     approval = active_approval(state, data.get("prompt_id"))
@@ -1017,6 +1036,7 @@ def cover_changes(
     state: dict[str, Any],
     approval: dict[str, Any],
     changed: dict[str, str] | None = None,
+    into: str = "turn_covered",
 ) -> None:
     """Remember which of this turn's changes `approval` covers, with their content as it is
     now: the Stop of this turn does not hold them against the scope of a later approval
@@ -1030,7 +1050,7 @@ def cover_changes(
     if changed is None:
         return
     began = state.get("turn_approval_from") or {}
-    covered = state.setdefault("turn_covered", {})
+    covered = state.setdefault(into, {})
     for full, digest in changed.items():
         if began.get(full) == digest:
             continue  # as it was when this approval began: not made under it
@@ -1038,6 +1058,219 @@ def cover_changes(
             continue  # there, but no regular file: a later change could not be told apart
         if in_approved_scope(approval, full):
             covered[full] = digest
+
+
+READ_ONLY_PROGRAMS = {
+    "cd",
+    "pwd",
+    "ls",
+    "dir",
+    "cat",
+    "type",
+    "head",
+    "tail",
+    "wc",
+    "grep",
+    "egrep",
+    "fgrep",
+    "findstr",
+    "which",
+    "where",
+    "echo",
+    "printf",
+    "true",
+    "test",
+    "sleep",
+    "ping",
+    "date",
+    "cut",
+    "get-content",
+    "gc",
+    "get-childitem",
+    "gci",
+    "get-item",
+    "test-path",
+    "select-string",
+    "sls",
+    "get-command",
+    "get-date",
+    "measure-object",
+    "select-object",
+    "sort-object",
+    "format-table",
+    "out-string",
+    "write-output",
+}
+READ_ONLY_GIT = {
+    "status",
+    "log",
+    "diff",
+    "show",
+    "rev-parse",
+    "ls-files",
+    "describe",
+    "blame",
+    "check-ignore",
+    "cat-file",
+    "shortlog",
+    "rev-list",
+}
+READ_ONLY_GH = {
+    ("run", "view"),
+    ("run", "list"),
+    ("run", "watch"),
+    ("pr", "view"),
+    ("pr", "list"),
+    ("issue", "view"),
+    ("issue", "list"),
+    ("repo", "view"),
+}
+
+
+def shell_reads_only(command: str, dialect: str, cwd: str) -> bool:
+    """True only when every part of a shell command is on a short list of programs that
+    change no file, nothing is redirected and nothing is fed to an interpreter. Anything
+    that does not parse, is not on the list or looks unusual is False: the caller then
+    looks at the repository (fail-closed)."""
+    from shellparse import ParseError, parse, program_and_args
+    from shellwrites import write_targets
+
+    try:
+        cmds = parse(command, dialect)
+        if not cmds or write_targets(command, dialect, cwd) != ([], 0):
+            return False
+        for cmd in cmds:
+            program, args = program_and_args(cmd)
+            if cmd.heredoc is not None or any(
+                re.search(r"[<>`]|\$\(", a) for a in args
+            ):
+                return False
+            subs = [a.lower() for a in args if not a.startswith("-")]
+            if program == "git":
+                if any(a in ("-c", "-C") or a.startswith("--") for a in args[:1]):
+                    return False
+                if any(a == "-o" or a.startswith("--output") for a in args):
+                    return False  # `git diff --output=file` writes
+                if subs[:1] and subs[0] in READ_ONLY_GIT:
+                    continue
+                return False
+            if program == "gh":
+                if tuple(subs[:2]) in READ_ONLY_GH:
+                    continue
+                return False
+            if program not in READ_ONLY_PROGRAMS:
+                return False
+        return True
+    except (
+        ParseError,
+        ValueError,
+        TypeError,
+        AttributeError,
+        IndexError,
+        RecursionError,
+    ):
+        return False
+
+
+def _one_change(state: dict[str, Any], path: str) -> dict[str, str] | None:
+    """{path: content hash now} for one file, spelled and hashed as turn_changed_now does it
+    ("" when it is no regular file now); None when it lies in no tracked repository or git
+    does not answer (the caller then looks at the whole turn)."""
+    import subprocess
+
+    tops = [top for top in (state.get("repos") or {}) if _inside(path, top)]
+    if not tops:
+        return None
+    top = max(tops, key=len)
+    rel = os.path.relpath(path, top).replace(os.sep, "/")
+    full = os.path.normcase(os.path.join(top, rel))
+    if not os.path.isfile(path):
+        return {full: ""}
+    try:
+        done = subprocess.run(
+            ["git", "hash-object", "--", rel],
+            cwd=top,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    digest = done.stdout.strip() if done.returncode == 0 else ""
+    return {full: digest} if digest else None
+
+
+def cover_valid(
+    data: dict[str, Any],
+    state: dict[str, Any],
+    held: object = None,
+    only: str | None = None,
+) -> None:
+    """Record, now, which of this turn's changes the approval in force covers (cover_changes):
+    called after every write, before a Stop re-checks the approval and before a relayed
+    prompt decides whether it survives. What was done inside the scope while the approval
+    was valid then stays covered whatever happens to the approval later; a file changed
+    again afterwards no longer matches its recorded content. Nothing is covered unless the
+    approval is valid at this very moment (the same check every write goes through, run on
+    a copy of the state so that it decides nothing here). `held` names the approval when the
+    prompt binding cannot (a relayed prompt has a new prompt id). `only` is the one file an
+    Edit/Write just wrote: only that file is hashed. The approval is not checked again when
+    it was already checked for this very tool call (same tool_use_id, same approval: by
+    PreToolUse for an Edit/Write, by this PostToolUse for a shell command); any other call
+    is checked now. `cover_last` keeps the outcome for diagnosis only."""
+    n, why = 0, "ok"
+    try:
+        ptr = (
+            held
+            if isinstance(held, dict)
+            else active_approval(state, data.get("prompt_id") or state.get("prompt_id"))
+        )
+        if not ptr:
+            why = "no-approval"
+        elif not v2_active():
+            why = "v1"
+        elif state.get("turn_cover_off"):
+            why = "cover-off"
+        else:
+            # its own record: `turn_covered` takes a file out of the turn's change list
+            # (the work of an approval that was replaced); this one only answers the Stop's
+            # "was this approved" for a change that stays listed
+            covered = state.setdefault("turn_done_under", {})  # shared with the copy
+            probe = dict(state)
+            pre = state.get("pre_valid")
+            checked_before = (
+                isinstance(pre, dict)
+                and bool(pre.get("id"))
+                and pre.get("id") == data.get("tool_use_id")
+                and pre.get("approval") == ptr.get("approval_id")
+            )
+            if not checked_before and v2_write_check(
+                probe, str(data.get("cwd") or os.getcwd())
+            ):
+                why = "not-valid"
+            else:
+                changed = _one_change(state, only) if only else None
+                if changed is None:
+                    # the whole turn is looked at: the check made for one tool call does
+                    # not speak for everything else that changed, so check now
+                    if checked_before and v2_write_check(
+                        probe, str(data.get("cwd") or os.getcwd())
+                    ):
+                        changed, why = {}, "not-valid"
+                    else:
+                        changed = turn_changed_now(state)
+                if why == "not-valid":
+                    pass
+                elif changed is None:
+                    why = "unknown"
+                else:
+                    cover_changes(state, ptr, changed, into="turn_done_under")
+                    n = len(covered)
+    except Exception:  # hook boundary: nothing covered rather than a crash
+        log.exception("discipline.cover_failed")
+        why = "error"
+    state["cover_last"] = {"at": time.time(), "n": n, "why": why}
 
 
 def keep_covered_changes(
@@ -1097,8 +1330,21 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
         record_evidence(data, state, failed=False)
         note_background_task(data, state)
         if v2_active():  # a shell may have changed a plan: record what is seen now
+            state["pre_valid"] = None
             try:
-                v2_write_check(state, str(data.get("cwd") or os.getcwd()))
+                refused_now = v2_write_check(state, str(data.get("cwd") or os.getcwd()))
+                checked = state.get("approval")
+                if (
+                    refused_now is None
+                    and isinstance(checked, dict)
+                    and checked.get("approval_id")
+                    and data.get("tool_use_id")
+                ):
+                    # this very tool call was just checked: cover_valid below need not
+                    state["pre_valid"] = {
+                        "id": data.get("tool_use_id"),
+                        "approval": checked.get("approval_id"),
+                    }
             except Exception as e:  # hook boundary: the approval is lost, not ignored
                 log.exception("approvals.v2_hook_failure")
                 state["approval"] = None
@@ -1114,6 +1360,18 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
         state["turn_approval_from"] = changed or {}
         if changed is None:
             state["turn_cover_off"] = 1
+    if tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+        target = edit_target(ti)
+        here = str(data.get("cwd") or os.getcwd())
+        cover_valid(data, state, only=absolute(target, here) if target else None)
+    elif tool in ("Bash", "PowerShell") and not shell_reads_only(
+        str(ti.get("command") or ""),
+        "powershell" if tool == "PowerShell" else "bash",
+        str(data.get("cwd") or os.getcwd()),
+    ):
+        # a command that may have written: look at the whole turn (a read-only one cannot
+        # have changed what the last look recorded)
+        cover_valid(data, state)
 
 
 # ---------------------------------------------------------------- plan approval scope
@@ -1918,6 +2176,9 @@ def v2_rearm(
 # approval has no plan file bound yet (never kept in the session state: one event, one
 # process). Unbound is not invalid: saving the approved plan binds it.
 _refused_unbound = False
+# ... and whether it let a write into docs/plans through for such an approval: that pass
+# says nothing about the approval being valid for other files.
+_passed_unbound = False
 
 
 def v2_write_check(
@@ -1930,8 +2191,8 @@ def v2_write_check(
     a plan that cannot be judged right now refuses this write only."""
     import approvals as ap
 
-    global _refused_unbound
-    _refused_unbound = False
+    global _refused_unbound, _passed_unbound
+    _refused_unbound = _passed_unbound = False
     ptr = state.get("approval")
     has_ptr = isinstance(ptr, dict) and bool(ptr.get("approval_id"))
     root = str(ptr.get("base")) if has_ptr and isinstance(ptr, dict) else _v2_root(cwd)
@@ -1953,6 +2214,7 @@ def v2_write_check(
         if rec and rec.get("state") == ap.ACTIVE and unreadable:
             plans = os.path.normcase(os.path.join(root, "docs", "plans"))
             if unreadable == UNBOUND and path and _inside(path, plans):
+                _passed_unbound = True
                 return None  # writing the approved plan file itself is what binds it
             if unreadable == UNBOUND:
                 _refused_unbound = True
@@ -2482,6 +2744,8 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
     state["v2_block"] = None
     if relay and v2_active():
         had = bool(state.get("approval"))
+        # what was done under the approval so far is recorded before the relay decides
+        cover_valid(data, state, state.get("approval"))
         try:
             state["approval"], state["approval_warning"] = v2_keep_on_relay(
                 state, cwd, prompt
@@ -2533,6 +2797,7 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
     if not relay:
         refresh_turn_baselines(state)
         state["turn_covered"] = {}
+        state["turn_done_under"] = {}
         state["turn_approval_from"] = {}
         state["turn_cover_off"] = 0
 
@@ -2816,6 +3081,9 @@ def refresh_content(state: dict[str, Any]) -> None:
     too_large: list[str] = []
     late: list[str] = []
     turn_changes: set[str] = set()
+    turn_answered: set[str] = set()
+    done_under = state.get("turn_done_under")
+    done_under = done_under if isinstance(done_under, dict) else {}
     visible: set[str] = set()
     kept = state.setdefault("repos_removed", {})
     for top in [t for t in kept if is_repo_root(t)]:
@@ -2888,6 +3156,12 @@ def refresh_content(state: dict[str, Any]) -> None:
                 != (now.get(p) or "")
             }
         turn_changes |= {os.path.join(top, p) for p in moved}
+        turn_answered |= {
+            os.path.join(top, p)
+            for p in moved
+            if done_under.get(os.path.normcase(os.path.join(top, p)), None)
+            == (now.get(p) or "")
+        }
         changed_roots: dict[str, Any] = {}
         for p in worktree.changed(base["session"], now):
             if worktree.relevant(p):
@@ -2932,6 +3206,9 @@ def refresh_content(state: dict[str, Any]) -> None:
         status[top] = "clean" if verified else "unverified"
     state["touched_tops"] = []
     state["turn_changes"] = sorted(turn_changes)
+    # listed changes that were made inside the scope of an approval valid at that moment and
+    # not touched since (cover_valid): the scope decision does not ask about them again
+    state["turn_answered"] = sorted(turn_answered)
     # Edit-tracked roots whose files are all visible to git: content decides, not timestamps.
     state["content_tracked_roots"] = [
         root
@@ -3163,7 +3440,8 @@ def _first_stop_problem(state: dict[str, Any]) -> tuple[str, str | None] | None:
 
 def _scope_decision(state: dict[str, Any]) -> tuple[str, str] | None:
     """Changes made this turn by any tool must fit the approved plan's scope (or the 5-file limit)."""
-    changes = state.get("turn_changes") or []
+    answered = set(state.get("turn_answered") or [])
+    changes = [f for f in state.get("turn_changes") or [] if f not in answered]
     if not changes:
         return None
     prompt_id = state.get("stop_prompt_id")
@@ -3703,9 +3981,13 @@ def closed_as_done(state: dict[str, Any], held: dict[str, Any]) -> bool:
         return False  # git cannot say what the turn changed
     covered = state.get("turn_covered")
     covered = covered if isinstance(covered, dict) else {}
+    done = state.get("turn_done_under")
+    done = done if isinstance(done, dict) else {}
     plans = os.path.normcase(os.path.join(str(held["base"]), "docs", "plans"))
     return all(
-        covered.get(full) == digest or _inside(full, plans)
+        covered.get(full) == digest
+        or done.get(full, None) == digest
+        or _inside(full, plans)
         for full, digest in changed.items()
     )
 
@@ -3790,6 +4072,7 @@ def on_stop(data: dict[str, Any], state: dict[str, Any]) -> None:
 
     state["stop_prompt_id"] = data.get("prompt_id") or state.get("prompt_id")
     worked_under = active_approval(state, state["stop_prompt_id"])
+    cover_valid(data, state, worked_under)
     if v2_active():
         held = worked_under
         try:
