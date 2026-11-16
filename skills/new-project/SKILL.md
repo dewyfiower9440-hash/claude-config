@@ -21,6 +21,6 @@ Arguments: `$ARGUMENTS`
 4. GitHub: ask whether to create the remote. If yes: `gh repo create <name> --private --source . --remote origin --push` (this pushes, so confirm first).
 5. If `mssql` was chosen: tell the user to store the connection string once, in a separate terminal window (it prompts with hidden input, so it does not work through `!`; the value goes to Credential Manager):
    `uv run --project C:/dev/tools/db-mcp db-mcp set-mssql <profile>` (profile = name in snake_case, as written in the project's CLAUDE.md).
-   The project `.mcp.json` is read-only for MSSQL; the local SQLite server allows writes.
+   The project `.mcp.json` is read-only for both servers (the scaffold leaves an empty `data/app.db` so the read-only SQLite server can start); a project that needs the SQLite server to write adds `--allow-write` to its args itself, and says so in its CLAUDE.md.
 6. Remind the user that a new Claude Code session in `C:\dev\<name>` picks up the project `.mcp.json` (approve it on first launch).
 7. Then customize CLAUDE.md for the real purpose of the project once the user describes it.
