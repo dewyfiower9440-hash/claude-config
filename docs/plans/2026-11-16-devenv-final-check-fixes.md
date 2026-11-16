@@ -100,3 +100,4 @@ task: devenv-final-check-fixes
   4. `tests/run_all.py:103`이 cp949로 찍지 못하는 글자에서 러너째 죽는다.
   5. `test_handoff` H-T8이 느린 CI 러너에서 한 번 실패했다(재실행 통과, 원인 미확정).
   6. `C:\dev\memo-board`에 대해 Stop hook이 "push되지 않음"을 한 번 안내했다(저장소는 origin과 일치, 원인 미확인).
+- 2026-11-16 묶음 A2 완료(위 "새로 드러난 결함 1"): 계획·기록 `docs/plans/2026-11-16-devenv-fix-a2.md`, 커밋 `885d250`, CI run 43850049103 성공. 묶음 D의 문서 커밋 `61ae43b`는 CI run 43840895705 성공.
