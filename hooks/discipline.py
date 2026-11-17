@@ -284,6 +284,8 @@ def default_state() -> dict[str, Any]:
         # PreToolUse for an Edit/Write, by PostToolUse for a shell command); cover_valid
         # need not check the same call again
         "pre_valid": None,
+        # the last prompts as the hook was handed them (note_prompt_seen): diagnosis only
+        "prompt_seen": [],
     }
 
 
@@ -1372,6 +1374,31 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
         # a command that may have written: look at the whole turn (a read-only one cannot
         # have changed what the last look recorded)
         cover_valid(data, state)
+    closing = state.get("ledger_closed")
+    if isinstance(closing, dict) and closing.get("pin"):
+        # This tool call closed the plan as done: write the task's state to the ledger now,
+        # on the content of this moment, before the Stop takes the approval away.
+        try:
+            state["stop_prompt_id"] = data.get("prompt_id") or state.get("prompt_id")
+            track_repo(state, str(data.get("cwd") or os.getcwd()))
+            refresh_content(state)
+            record_ledger(data, state)
+        except (
+            OSError,
+            ValueError,
+            TypeError,
+            AttributeError,
+            ImportError,
+            RecursionError,
+            KeyError,
+        ):
+            log.exception("discipline.ledger_failed")
+        finally:
+            # one try: a close whose record failed is not retried on every later tool call
+            # (without a pinned content the Stop forgets it, see record_ledger)
+            left = state.get("ledger_closed")
+            if isinstance(left, dict):
+                left.pop("pin", None)
 
 
 # ---------------------------------------------------------------- plan approval scope
@@ -2234,6 +2261,25 @@ def v2_write_check(
         # The plan was closed as done: the ordinary end of a task. What it changed inside
         # its scope stays covered for this turn's Stop; any other loss covers nothing.
         cover_changes(state, ptr)
+        known = state.get("ledger_closed")
+        if (
+            ptr.get("task_id")
+            and ptr.get("base")
+            and not (
+                isinstance(known, dict)
+                and known.get("approval_id") == ptr.get("approval_id")
+            )
+        ):
+            # ... and the ledger records the task's last state before the approval goes
+            # (on_post / on_stop write it, pinned to the content of this moment). A record
+            # only: nothing is approved by it.
+            state["ledger_closed"] = {
+                "task_id": ptr.get("task_id"),
+                "approval_id": ptr.get("approval_id"),
+                "base": ptr.get("base"),
+                "note": why,
+                "pin": True,
+            }
     state["approval_invalid"] = why
     state["v2_block"] = why
     return REASON_V2_INVALID.format(task=ptr.get("task_id"), why=why)
@@ -2584,11 +2630,11 @@ def relay_task_id(prompt: str) -> str | None:
     return found.group(1) if found else None
 
 
-def started_here(state: dict[str, Any], prompt: str) -> bool:
+def started_here(state: dict[str, Any], prompt: str, bare: bool = False) -> bool:
     """True when the relayed prompt reports on something this session itself started, by
     the hook's own record of the start: the hand-back of a subagent (SubagentStart), or the
     completion notification of a subagent or of a background shell command (PostToolUse)."""
-    agent_id = relay_agent_id(prompt)
+    agent_id = relay_agent_id(prompt, bare)
     if agent_id is not None:
         return started_agent(state, agent_id)
     task_id = relay_task_id(prompt)
@@ -2616,10 +2662,18 @@ RELAY_NOTE = (
 AGENT_HANDBACK = re.compile(r'<agent-message from="([A-Za-z0-9_.-]+)">', re.ASCII)
 
 
-def relay_agent_id(prompt: str) -> str | None:
+def relay_agent_id(prompt: str, bare: bool = False) -> str | None:
     """The sender id of a subagent hand-back: the relay header, then `<agent-message
-    from="ID">` alone on the very next line. Any other relay shape gives None."""
+    from="ID">` alone on the very next line. A hand-back that arrives while the session is
+    working is handed to the hook without the header line (observed 2026-11-17): that form,
+    the tag alone on the first line, counts only when `bare` says the prompt continues the
+    prompt in progress (same prompt id), never for a prompt of its own. Any other shape
+    gives None."""
     lines = [ln.strip() for ln in prompt.splitlines() if ln.strip()]
+    if bare and lines:
+        found = AGENT_HANDBACK.fullmatch(lines[0])
+        if found:
+            return found.group(1)
     if len(lines) < 2 or not lines[0].lower().startswith(RELAY_HEADERS[0]):
         return None
     found = AGENT_HANDBACK.fullmatch(lines[1])
@@ -2639,7 +2693,7 @@ def started_agent(state: dict[str, Any], agent_id: str) -> bool:
 
 
 def v2_keep_on_relay(
-    state: dict[str, Any], cwd: str, prompt: str
+    state: dict[str, Any], cwd: str, prompt: str, bare: bool = False
 ) -> tuple[dict[str, Any] | None, str | None]:
     """(pointer, warning) for a relayed prompt under v2 (R1). The pointer survives only a
     report on something this session started (see started_here: a subagent's hand-back, or
@@ -2653,7 +2707,7 @@ def v2_keep_on_relay(
     dropped = (None, RELAY_NOTE if ptr else None)
     if not (isinstance(ptr, dict) and ptr.get("v") == 2 and ptr.get("approval_id")):
         return dropped
-    if not started_here(state, prompt):
+    if not started_here(state, prompt, bare):
         return dropped
     if _v2_root(cwd) != str(ptr.get("base")):
         return dropped
@@ -2729,12 +2783,149 @@ def project_switch_context(top: str) -> str:
         return switch_notice(top, None, [], plans_read=False)
 
 
+LOST_NOTE = (
+    "[discipline] 승인(task: {task})이 이 프롬프트에서 끊겼습니다({why}). 계속하려면 "
+    "사용자에게 프롬프트 첫 줄 task:{task} 를 요청하세요. 그 전에는 범위 안의 파일도 "
+    "고치지 마세요."
+)
+CLOSED_NOTE = (
+    "[discipline] 작업(task: {task})의 계획이 done으로 닫혀 승인이 끝났습니다. 이어서 할 "
+    "일이 있으면 새 계획을 세워 승인받으세요."
+)
+
+
+def already_closed(state: dict[str, Any], held: object) -> bool:
+    """True when `held` is the approval of the task this session has just closed as done
+    (remembered for the ledger): an approval that ended in the ordinary way."""
+    closed = state.get("ledger_closed")
+    return (
+        isinstance(held, dict)
+        and isinstance(closed, dict)
+        and bool(closed.get("approval_id"))
+        and closed.get("approval_id") == held.get("approval_id")
+    )
+
+
+def approval_lost_note(
+    state: dict[str, Any], task_before: object, relay: bool, mid_work: bool = False
+) -> str | None:
+    """What to say, in this very prompt, when the session held an approval coming in and
+    does not hold it (or holds another task's) going out. The decision is made elsewhere;
+    this only makes sure it is never silent. None when nothing was lost. `mid_work`: the
+    prompt carried the id of the prompt in progress without looking like a relay (a message
+    that arrived while the session was working), which cannot continue an approval."""
+    if not isinstance(task_before, str) or not task_before:
+        return None
+    after = state.get("approval")
+    task_after = after.get("task_id") if isinstance(after, dict) else None
+    if task_after == task_before:
+        return None
+    warning = state.get("approval_warning")
+    ended = " ".join(
+        str(x)
+        for x in (warning, state.get("v2_block"), state.get("approval_invalid"))
+        if x
+    )
+    closed = state.get("ledger_closed")
+    if (
+        isinstance(closed, dict) and closed.get("task_id") == task_before
+    ) or "plan_status:done" in ended:
+        return CLOSED_NOTE.format(
+            task=task_before
+        )  # the ordinary end: nothing to resume
+    if isinstance(task_after, str) and task_after:
+        why = f"프롬프트가 다른 작업(task: {task_after})을 이름함"
+    elif isinstance(warning, str) and warning and warning != RELAY_NOTE:
+        why = warning[:160]
+    elif mid_work:
+        why = (
+            "작업 중에 도착한 메시지로는 승인을 이을 수 없음: 이 턴이 끝난 뒤 새 프롬프트의 "
+            "첫 줄에 적어야 함"
+        )
+    elif relay:
+        why = "이 세션이 시작하지 않은 알림이거나 승인을 유지할 조건이 맞지 않음"
+    else:
+        why = "프롬프트가 작업을 이름하지 않음"
+    return LOST_NOTE.format(task=task_before, why=why)
+
+
+MAX_PROMPTS_SEEN = 12
+_TAG_LINE = re.compile(r"<([a-z][a-z_-]{0,30})[\s>]", re.ASCII)
+
+
+def line_kind(line: str) -> str:
+    """What kind of line a prompt starts with, as one of a few fixed labels. The label is
+    all that is kept of the line: nothing of its text."""
+    if not line:
+        return "none"
+    low = line.lower()
+    if low.startswith(RELAY_HEADERS[0]):
+        return "relay-header"
+    if low.startswith(RELAY_HEADERS[1]):
+        return "system-notification"
+    if line == "<task-notification>":
+        return "task-notification"
+    if TASK_ID_LINE.fullmatch(line):
+        return "task-id"
+    if AGENT_HANDBACK.fullmatch(line):
+        return "agent-message"
+    if re.match(r"task:\s*\S", line):
+        return "task-line"
+    if line.startswith("/"):
+        return "slash"
+    tag = _TAG_LINE.match(line)
+    if tag:
+        return f"tag:{tag.group(1)}"
+    return "bracket" if line.startswith("[") else "text"
+
+
+def note_prompt_seen(
+    data: dict[str, Any], state: dict[str, Any], kind: str, before: object
+) -> None:
+    """Diagnosis only (never read to decide): the shape of what the prompt hook was handed.
+    The names of the payload's keys, the prompt id, the length of the text, a short hash of
+    it (to tell a re-sent prompt), the kind of its first two non-blank lines (line_kind),
+    how the hook classified it and which task was approved before and after. Nothing of the
+    prompt's text is kept: telling prompts apart needs their shape only."""
+    try:
+        import hashlib
+
+        prompt = data.get("prompt")
+        text = prompt if isinstance(prompt, str) else ""
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()][:2]
+        after = state.get("approval")
+        entry = {
+            "at": time.time(),
+            "keys": sorted(str(k)[:40] for k in data)[:30],
+            "prompt_id": str(data.get("prompt_id"))[:64],
+            "chars": len(text),
+            "sha": hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12],
+            "lines": [line_kind(ln) for ln in lines],
+            "kind": kind,
+            "before": before,
+            "after": after.get("task_id") if isinstance(after, dict) else None,
+        }
+        seen = state.get("prompt_seen")
+        seen = seen if isinstance(seen, list) else []
+        state["prompt_seen"] = [*seen, entry][-MAX_PROMPTS_SEEN:]
+    except Exception:  # hook boundary: a diagnosis that fails changes nothing
+        log.exception("discipline.prompt_seen_failed")
+
+
 def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
     state["turn"] = int(state.get("turn", 0)) + 1
     prompt = data.get("prompt")
     prompt = prompt if isinstance(prompt, str) else ""
     cwd = str(data.get("cwd") or os.getcwd())
-    relay = relay_shaped(prompt)
+    # Structure before shape: a prompt that carries the id of the prompt in progress was not
+    # typed as a new prompt by the user (a result or notification delivered mid-work keeps
+    # that id; observed 2026-11-17). It is handled as a relay whatever its text looks like.
+    continues = bool(data.get("prompt_id")) and data.get("prompt_id") == state.get(
+        "prompt_id"
+    )
+    relay = relay_shaped(prompt) or continues
+    held_before = state.get("approval")
+    task_before = held_before.get("task_id") if isinstance(held_before, dict) else None
     if not relay:  # a relay continues the user's turn: its counts and baselines stay
         state["turn_files"] = []
         state["turn_shell_tops"] = []
@@ -2748,7 +2939,7 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
         cover_valid(data, state, state.get("approval"))
         try:
             state["approval"], state["approval_warning"] = v2_keep_on_relay(
-                state, cwd, prompt
+                state, cwd, prompt, continues
             )
         except Exception as e:  # hook boundary: the approval is dropped, never a crash
             log.exception("approvals.v2_hook_failure")
@@ -2766,12 +2957,22 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
             state["approval"], state["approval_warning"] = None, v2_failure(e)
     else:
         state["approval"], state["approval_warning"] = rearm_approval(cwd, prompt)
+    if not state["approval"] and already_closed(state, held_before):
+        # the plan of that task had been closed as done: its approval ended there, so this
+        # prompt lost nothing and leaves no warning behind
+        state["approval_warning"] = None
     state["prompt_id"] = data.get("prompt_id")
     if state["approval"]:
         # Bound to this prompt: if a later prompt's hook never runs (killed, timed out), the
         # stale approval does not carry over to it.
         state["approval"]["prompt_id"] = data.get("prompt_id")
+    note_prompt_seen(data, state, "relay" if relay else "user", task_before)
     told = ack_missing(data, state)  # the user's `ack-missing <path>`, if this is one
+    lost = approval_lost_note(
+        state, task_before, relay, continues and not relay_shaped(prompt)
+    )
+    if lost:
+        told = "\n\n".join(x for x in (told, lost) if x)
     if not relay and state.get("test_gap_note"):
         # P1-03: said once, to the user's own next prompt (a relayed one leaves it)
         told = "\n\n".join(x for x in (told, str(state["test_gap_note"])) if x)
@@ -3960,44 +4161,19 @@ def ledger_capped(state: dict[str, Any], base: str, closed_note: object = None) 
     return False
 
 
-def closed_as_done(state: dict[str, Any], held: dict[str, Any]) -> bool:
-    """True when the approval `held` just ended because its plan was closed as done (the
-    refusal in force is that one, not a store failure or another loss) and everything this
-    turn changed is what the approval covered when the close was first seen, or a plan file
-    of its repository. An edit made after the close, or outside the scope, is not the
-    task's: then nothing is remembered for the ledger."""
-    why = state.get("approval_invalid")
-    if not (
-        held.get("task_id")
-        and held.get("base")
-        and isinstance(why, str)
-        and "plan_status:done" in why
-        and state.get("v2_block") == why
-        and not state.get("turn_cover_off")
-    ):
-        return False
-    changed = turn_changed_now(state)
-    if changed is None:
-        return False  # git cannot say what the turn changed
-    covered = state.get("turn_covered")
-    covered = covered if isinstance(covered, dict) else {}
-    done = state.get("turn_done_under")
-    done = done if isinstance(done, dict) else {}
-    plans = os.path.normcase(os.path.join(str(held["base"]), "docs", "plans"))
-    return all(
-        covered.get(full) == digest
-        or done.get(full, None) == digest
-        or _inside(full, plans)
-        for full, digest in changed.items()
-    )
-
-
 def record_ledger(data: dict[str, Any], state: dict[str, Any]) -> None:
     """P1-01: note in the repository's task ledger how far the approved task is, from what
     refresh_content just computed. A record only: nothing here or elsewhere reads it to
     decide, and a ledger that cannot be written changes nothing about this Stop."""
     # the approval this prompt works under (one of an earlier prompt names no task now)
     ptr = active_approval(state, state.get("stop_prompt_id"))
+    closing = state.get("ledger_closed")
+    if (
+        ptr
+        and isinstance(closing, dict)
+        and closing.get("approval_id") == ptr.get("approval_id")
+    ):
+        ptr = None  # this very task was just closed as done: recorded as closed below
     closed: dict[str, Any] | None = None
     if ptr:
         state["ledger_closed"] = None  # another task is being worked on now
@@ -4074,23 +4250,11 @@ def on_stop(data: dict[str, Any], state: dict[str, Any]) -> None:
     worked_under = active_approval(state, state["stop_prompt_id"])
     cover_valid(data, state, worked_under)
     if v2_active():
-        held = worked_under
         try:
             refused = v2_write_check(state, str(data.get("cwd") or os.getcwd()))
         except Exception as e:  # hook boundary: block with the failure, never crash
             log.exception("approvals.v2_hook_failure")
             refused, state["v2_block"] = v2_failure(e), v2_failure(e)
-            held = None  # a failed check says nothing about how the task ended
-        if refused and held and closed_as_done(state, held):
-            # the plan was closed as done: the ledger may still record how far this
-            # task's content is verified (record_ledger); nothing is approved by it
-            state["ledger_closed"] = {
-                "task_id": held.get("task_id"),
-                "approval_id": held.get("approval_id"),
-                "base": held.get("base"),
-                "note": state.get("v2_block"),
-                "pin": True,
-            }
         if refused:
             # A revoked/invalid approval (or an untrusted store) covers nothing this turn did.
             state["approval"] = None

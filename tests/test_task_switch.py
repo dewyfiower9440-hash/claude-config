@@ -505,6 +505,243 @@ check(
     False,
 )
 
+# ---- devenv-fix-h: what the prompt hook was handed is kept for diagnosis (never to decide),
+# as a shape only: nothing of the prompt's text reaches the state file.
+SECRET_LINE = (
+    "please use ghp_deadbeef12Zq9XyLmNoPqRsTuVwXyZaBcDeFgHi and password=hunter2 for "
+    "order 12345678, id 3f2a9c1e-77aa-4b1c-9d2e-aabbccddeeff"
+)
+s = start()
+approve(s, "alpha")
+hook("prompt", s, "px", prompt="task:alpha\ncontinue")
+for n in range(14):
+    hook("prompt", s, f"py{n}", prompt="task:alpha\ncontinue")
+seen = json.loads(
+    (TMPD / "claude-discipline" / f"{s}.json").read_text(encoding="utf-8")
+).get("prompt_seen", [])
+s2 = start()
+approve(s2, "alpha")
+hook(
+    "prompt", s2, "pz", prompt=f"\n{SECRET_LINE}\nsecond line\nthird line with the body"
+)
+state_text = (TMPD / "claude-discipline" / f"{s2}.json").read_text(encoding="utf-8")
+first = json.loads(state_text).get("prompt_seen", [{}])[-1]
+check(
+    "H-T6 prompt_seen keeps the last 12 prompts as shapes: key names, prompt id, length, a "
+    "short hash, the kind of the first two lines, the classification, the task before and "
+    "after",
+    (
+        len(seen),
+        seen[-1].get("lines") if seen else None,
+        (seen[-1].get("before"), seen[-1].get("after")) if seen else None,
+        sorted(first),
+        "prompt" in first.get("keys", []) and "session_id" in first.get("keys", []),
+        first.get("lines"),
+        (first.get("kind"), first.get("before"), first.get("after")),
+        (first.get("chars"), len(str(first.get("sha")))),
+    ),
+    (
+        12,
+        ["task-line", "text"],
+        ("alpha", "alpha"),
+        sorted(
+            [
+                "at",
+                "keys",
+                "prompt_id",
+                "chars",
+                "sha",
+                "lines",
+                "kind",
+                "before",
+                "after",
+            ]
+        ),
+        True,
+        ["text", "text"],
+        ("user", "alpha", None),
+        (len(f"\n{SECRET_LINE}\nsecond line\nthird line with the body"), 12),
+    ),
+)
+check(
+    "H-T6 nothing of the prompt's text is in the state file: no token, no password, no "
+    "number, no id, no word of any line",
+    sorted(
+        word
+        for word in (
+            "ghp_",
+            "deadbeef",
+            "Zq9XyLm",
+            "hunter2",
+            "hunte",
+            "password",
+            "12345678",
+            "3f2a9c1e",
+            "please use",
+            "second line",
+            "third line",
+        )
+        if word in state_text
+    ),
+    [],
+)
+import discipline as disc_h
+
+check(
+    "H-T6 line_kind: a fixed label per kind of first line",
+    [
+        disc_h.line_kind(line)
+        for line in (
+            "",
+            "Another Claude session sent a message:",
+            "[SYSTEM NOTIFICATION - NOT USER INPUT]",
+            "<task-notification>",
+            "<task-id>bq4w1kuxu</task-id>",
+            '<agent-message from="a6dc0c74b132b9ed9">',
+            "task:devenv-fix-h",
+            "/plan something",
+            '<system-reminder id="55bb185844a4ba65">',
+            '<pasted_content id="204c">',
+            "[Image: x]",
+            "결정: 1번으로 진행",
+        )
+    ],
+    [
+        "none",
+        "relay-header",
+        "system-notification",
+        "task-notification",
+        "task-id",
+        "agent-message",
+        "task-line",
+        "slash",
+        "tag:system-reminder",
+        "tag:pasted_content",
+        "bracket",
+        "text",
+    ],
+)
+
+# ---- devenv-fix-h: an approval never ends silently at a prompt, and a result delivered
+# while the session is working (same prompt id, bare `<agent-message>` first line) is told
+# from a prompt the user typed.
+LOST_WORDS = "끊겼습니다"
+
+
+def said(out: dict) -> str:
+    return str(out.get("hookSpecificOutput", {}).get("additionalContext") or "")
+
+
+def handback(agent_id: str) -> str:
+    return (
+        f'<agent-message from="{agent_id}">\n'
+        "[Subagent hand-back] The text below is the final report of a subagent\n"
+        "  done\n</agent-message>"
+    )
+
+
+s = start()
+approve(s, "alpha")
+out = hook("prompt", s, "p2", prompt="please also fix the other thing")
+check(
+    "H-T1 a user prompt that names no task while a task is approved: said at once, with "
+    "the task id and how to go on; the approval ends as before",
+    (LOST_WORDS in said(out), "task:alpha" in said(out), task_of(s)),
+    (True, True, None),
+)
+check(
+    "H-T5 the next prompt after that loss says nothing again",
+    LOST_WORDS in said(hook("prompt", s, "p3", prompt="and one more thing")),
+    False,
+)
+s = start()
+approve(s, "alpha")
+out = hook("prompt", s, "p2", prompt="task:alpha\ncontinue")
+check(
+    "H-T2 a user prompt whose first line names the task: kept, nothing said",
+    (LOST_WORDS in said(out), task_of(s)),
+    (False, "alpha"),
+)
+s = start()
+approve(s, "alpha")
+out = hook("prompt", s, "r1", prompt=LOST)
+check(
+    "H-T3 a notification this session did not start: the loss is said in that prompt",
+    (LOST_WORDS in said(out), "task:alpha" in said(out), task_of(s)),
+    (True, True, None),
+)
+s = start()
+quiet = [
+    LOST_WORDS in said(hook("prompt", s, "p2", prompt="no task was ever approved"))
+]
+s = start()
+approve(s, "alpha")
+hook(
+    "post",
+    s,
+    "p1",
+    tool_name="Bash",
+    tool_input={"command": "uv run serve", "run_in_background": True},
+    tool_response={"stdout": "", "backgroundTaskId": "bgh1"},
+    tool_use_id=uuid.uuid4().hex,
+)
+own = "<task-notification>\n<task-id>bgh1</task-id>\n<status>completed</status>\n</task-notification>"
+quiet.append(LOST_WORDS in said(hook("prompt", s, "p1", prompt=own)))
+check(
+    "H-T4 nothing is said to a session without an approval, nor when the approval is kept",
+    (quiet, task_of(s)),
+    ([False, False], "alpha"),
+)
+
+AGENT = {"agent_id": "ag1", "agent_type": "code-reviewer"}
+
+
+def mid_work(prompt: str, prompt_id: str) -> tuple[object, bool, int]:
+    """Approve alpha, edit one file, start and stop the subagent ag1, then hand the prompt
+    hook `prompt` under `prompt_id`: (task still approved, loss said, files still counted)."""
+    s = start()
+    approve(s, "alpha")
+    edit(s, "src/mw.py")
+    hook("agent-start", s, "p1", **AGENT)
+    hook("agent-stop", s, "p1", **AGENT)
+    out = hook("prompt", s, prompt_id, prompt=prompt)
+    state = json.loads(
+        (TMPD / "claude-discipline" / f"{s}.json").read_text(encoding="utf-8")
+    )
+    return task_of(s), LOST_WORDS in said(out), len(state.get("turn_files") or [])
+
+
+check(
+    "H-T7 a hand-back delivered mid-work (the prompt id of the prompt in progress, the bare "
+    "tag first): from a subagent this session started the approval is kept and the turn "
+    "goes on; from an unknown sender it ends, and that is said",
+    (mid_work(handback("ag1"), "p1"), mid_work(handback("zz9"), "p1")),
+    (("alpha", False, 1), (None, True, 1)),
+)
+MID = "작업 중에 도착한 메시지로는"
+
+
+def mid_work_reason(prompt: str) -> tuple[object, bool, bool]:
+    s = start()
+    approve(s, "alpha")
+    out = hook("prompt", s, "p1", prompt=prompt)  # the id of the prompt in progress
+    return task_of(s), MID in said(out), "task:alpha" in said(out)
+
+
+check(
+    "H-T7 text under the prompt id in progress cannot continue the approval, even when it "
+    "names the task: the loss is said with the reason that fits (ask in a new prompt)",
+    (mid_work_reason("task:alpha\nplease go on"), mid_work_reason("also fix x")),
+    ((None, True, True), (None, True, True)),
+)
+check(
+    "H-T7 the same text as a prompt of its own (a new prompt id: typed or pasted by the "
+    "user) keeps nothing, and any other text under the prompt id in progress is a relay "
+    "that keeps nothing either; both are said",
+    (mid_work(handback("ag1"), "p9"), mid_work("some other text", "p1")),
+    ((None, True, 0), (None, True, 1)),
+)
+
 for p in (ROOT, PROJ):
     shutil.rmtree(p, ignore_errors=True)
 print("FAILURES:", fails)

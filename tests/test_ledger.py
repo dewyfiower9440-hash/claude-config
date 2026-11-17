@@ -821,10 +821,10 @@ after = json.loads(
     (TMPD / "claude-discipline" / f"{s}.json").read_text(encoding="utf-8")
 )
 check(
-    "R-T27 a file edited in the same turn after the close was seen: the task is not "
-    "recorded and not remembered",
-    (gadget() == closed2, after.get("ledger_closed")),
-    (True, None),
+    "R-T27 the close is recorded the moment it is seen; a file edited afterwards in the "
+    "same turn adds nothing under the closed task, which is then forgotten",
+    (len(gadget()) - len(closed2), gadget()[-1][0], after.get("ledger_closed")),
+    (1, "LOCALLY_VERIFIED", None),
 )
 
 # devenv-fix-g: one user turn, two plans one after the other. The first plan's approval is
@@ -873,9 +873,10 @@ def two_plans(stray: bool) -> int:
 
 check(
     "G-T6 two plans in one turn, the first one's file still listed at the second's close: "
-    "the closed task is recorded; with a file outside every scope it is not",
+    "the closed task is recorded, also when a file outside every scope was changed (the "
+    "Stop reports that file; the ledger only records)",
     (two_plans(stray=False), two_plans(stray=True)),
-    (1, 0),
+    (1, 1),
 )
 
 READS_ONLY = [
@@ -931,24 +932,90 @@ check(
     ),
     (False, True, True, True),
 )
-DONE_WHY = "x plan_status:done"
-held_ok = {"task_id": "gadget", "base": str(PROJ)}
-closed_fn = disc.closed_as_done
+
+
+# devenv-fix-h: the close is remembered when it is seen, on the content of that moment, and
+# the closing command may change more than the plan file (as real closing scripts do: a
+# second document here). The verification that follows is recorded under the closed task.
+def close_with_notes() -> tuple[object, ...]:
+    s = start2()
+    edit(s, "hx.py", f"hx = {uuid.uuid4().hex!r}\n", CENV)
+    hook("stop", s, CENV)  # worked on, not verified yet
+    at_work = gadget()
+    # one shell command closes the plan and writes another document next to it
+    PLAN2FILE.write_text(PLAN2.replace("in-progress", "done"), encoding="utf-8")
+    (PROJ / "docs" / "notes.md").write_text(f"n {uuid.uuid4().hex}\n", encoding="utf-8")
+    common = {
+        "tool_name": "Bash",
+        "tool_input": {"command": "python close_plan.py"},
+        "tool_use_id": uuid.uuid4().hex,
+    }
+    hook("pre", s, CENV, **common)
+    hook("post", s, CENV, tool_response={}, **common)
+    state = json.loads(
+        (TMPD / "claude-discipline" / f"{s}.json").read_text(encoding="utf-8")
+    )
+    remembered = state.get("ledger_closed") or {}
+    # a relayed prompt in the same turn (it clears the turn's "already seen" marks): the
+    # close must not be remembered afresh, its pinned content stays, and the notice speaks
+    # of a finished task, not of a lost approval
+    relayed = hook("prompt", s, CENV, prompt=LOST, prompt_id="p")[1]
+    state = json.loads(
+        (TMPD / "claude-discipline" / f"{s}.json").read_text(encoding="utf-8")
+    )
+    again = state.get("ledger_closed") or {}
+    told = str(relayed.get("hookSpecificOutput", {}).get("additionalContext") or "")
+    kept = (
+        again.get("content") == remembered.get("content"),
+        "pin" in again,
+        "done으로 닫혀" in told,
+        "끊겼습니다" in told,
+    )
+    gate2(s)
+    hook("stop", s, CENV)
+    after_gate = gadget()
+    hook("prompt", s, CENV, prompt="thanks", prompt_id="p2")
+    hook("stop", s, CENV, prompt_id="p2")
+    later = gadget()
+    edit(s, "hx.py", "hx = 'changed after the close'\n", CENV)
+    hook("stop", s, CENV, prompt_id="p2")
+    state = json.loads(
+        (TMPD / "claude-discipline" / f"{s}.json").read_text(encoding="utf-8")
+    )
+    return (
+        at_work[-1][0],
+        remembered.get("task_id"),
+        bool(remembered.get("content")),
+        len(after_gate) - len(at_work),
+        after_gate[-1][0],
+        after_gate[-1][1] == at_work[-1][1],
+        len(later) - len(after_gate),
+        len(gadget()) - len(later),
+        state.get("ledger_closed"),
+        kept,
+    )
+
+
 check(
-    "R-T29 closed_as_done: another reason, a store failure over an old done reason, "
-    "unknown turn coverage, an approval without task or base",
+    "H-T8 a command that closes the plan and writes another document: the closed task is "
+    "remembered at that call with its content pinned, and the gate that follows is "
+    "recorded under it on the same content; H-T9 a later prompt adds nothing, a code change "
+    "after the close is not recorded under the task and ends the memory",
+    close_with_notes(),
     (
-        closed_fn({"approval_invalid": "revoked", "v2_block": "revoked"}, held_ok),
-        closed_fn({"approval_invalid": DONE_WHY, "v2_block": "store broken"}, held_ok),
-        closed_fn(
-            {"approval_invalid": DONE_WHY, "v2_block": DONE_WHY, "turn_cover_off": 1},
-            held_ok,
-        ),
-        closed_fn({"approval_invalid": DONE_WHY, "v2_block": DONE_WHY}, {"base": "b"}),
-        closed_fn({"approval_invalid": DONE_WHY, "v2_block": DONE_WHY}, held_ok),
+        "IMPLEMENTED",
+        "gadget",
+        True,
+        1,
+        "LOCALLY_VERIFIED",
+        True,
+        0,
+        0,
+        None,
+        (True, False, True, False),
     ),
-    (False, False, False, False, True),
 )
+
 for shape, held_state in (
     ("no key (state of an older version)", {"stop_prompt_id": "p"}),
     ("not a dict", {"stop_prompt_id": "p", "ledger_closed": "gadget"}),
