@@ -28,17 +28,26 @@ ROOT = Path(__file__).resolve().parent.parent
 # to the background and is then no evidence). With 4 it is 458-535 s at best. The last line
 # of a run gives the sum and the wall time of the modules (the two ruff steps before them,
 # a few seconds, are not in it): re-tune when the wall time nears 600 s again.
-DEFAULT_WORKERS = 4
-# Longest first (measured 2026-11-16: 343, 285, 268, 150, 147, 117, 109 s), so that the end
-# of a run is not one worker finishing a long module alone.
+# Measured 2026-11-17: the sum had grown to 2,059 s and 4 workers took 549-566 s. The wall
+# time followed the sum divided by the workers, not the longest module, so 6 workers (16
+# logical CPUs here) took 470 s with a sum of 2,336 s, and that run ended on test_approvals
+# alone (469 s): it was split in two (test_approvals, test_approvals_v2).
+DEFAULT_WORKERS = 6
+# Longest first (measured 2026-11-17 with 6 workers: 367, 309, 287, 176, 171, 168, 135, 126,
+# 119, 96 s), so that the end of a run is not one worker finishing a long module alone: with
+# test_task_switch missing from this list it started at about 300 s and the run took 471 s
+# where this order takes about 400 s. A module that grows past 90 s belongs here.
 SLOW_FIRST = [
-    "test_approvals",
+    "test_approvals_v2",
     "test_discipline_d3",
     "test_discipline",
     "test_guard_corpus",
     "test_worktree",
+    "test_task_switch",
     "test_session_store",
+    "test_approvals",
     "test_ci_status",
+    "test_ledger",
 ]
 TESTS = [
     "test_shellparse",
@@ -48,6 +57,7 @@ TESTS = [
     "test_ci_classify",
     "test_worktree",
     "test_approvals",
+    "test_approvals_v2",
     "test_approvals_store",
     "test_scope",
     "test_authz",
