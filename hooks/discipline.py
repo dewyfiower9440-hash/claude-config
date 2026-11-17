@@ -2716,6 +2716,107 @@ def finished_agent(state: dict[str, Any], agent_id: str) -> bool:
     )
 
 
+HANDBACK_WAIT_S = (
+    3.0  # observed 2026-11-17: a stop record up to 0.97 s after its hand-back
+)
+HANDBACK_POLL_S = 0.1
+# What this run waited for a stop record (await_agent_stop), kept in prompt_seen so that the
+# limit can be tuned from what was measured.
+_handback_wait: dict[str, Any] = {}
+
+
+def handback_wait_limit(env: Any) -> float:
+    """How long a hand-back prompt may wait for its subagent's stop record, in seconds:
+    CLAUDE_DISCIPLINE_HANDBACK_WAIT_S when it is a number that is finite and not negative,
+    else the default."""
+    raw = env.get("CLAUDE_DISCIPLINE_HANDBACK_WAIT_S")
+    try:
+        seconds = float(raw) if raw else HANDBACK_WAIT_S
+    except ValueError:  # malformed override: use the default
+        return HANDBACK_WAIT_S
+    return seconds if math.isfinite(seconds) and seconds >= 0 else HANDBACK_WAIT_S
+
+
+def peek_state(path: Path) -> dict[str, Any] | None:
+    """The saved session state read without the session lock and without touching the file
+    (session_store.load moves an unreadable one aside: that needs the lock). None when it
+    is missing, being replaced right now, or not an object. For looking only: nothing read
+    this way is decided on."""
+    import session_store
+
+    try:
+        if path.stat().st_size > session_store.MAX_FILE_BYTES:
+            return None  # the store refuses it too; and a long read would be in its way
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def running_agent(state: dict[str, Any], agent_id: str) -> bool:
+    """True when this session recorded a subagent with exactly this id starting and has no
+    end recorded for it yet."""
+    agents = state.get("agents")
+    if not isinstance(agents, dict) or finished_agent(state, agent_id):
+        return False
+    return any(
+        isinstance(label, str)
+        and label.rpartition(":")[2] == agent_id
+        and isinstance(entry, dict)
+        and isinstance(entry.get("started"), float)
+        for label, entry in agents.items()
+    )
+
+
+def await_agent_stop(
+    data: dict[str, Any],
+    path: Path,
+    *,
+    read: Any = peek_state,
+    clock: Any = time.monotonic,
+    sleep: Any = time.sleep,
+    limit: float | None = None,
+) -> dict[str, Any] | None:
+    """Before the session lock is taken: when the prompt gives the id of a subagent this
+    session started and no end is recorded for it yet, wait for that record (SubagentStop
+    runs in another process and needs the lock itself; the two arrive in either order),
+    looking every HANDBACK_POLL_S up to the limit. Returns how long it waited and whether
+    the record came, None when there was nothing to wait for. It decides nothing: on_prompt
+    reads the state again under the lock. Never raises."""
+    try:
+        prompt = data.get("prompt")
+        sender = relay_agent_id(prompt) if isinstance(prompt, str) else None
+        if sender is None:
+            return None
+        try:
+            state = read(path)
+        except OSError:  # cannot be looked at: nothing is known to wait for
+            return None
+        if not isinstance(state, dict) or not running_agent(state, sender):
+            return None
+        if limit is None:
+            # never more than half of what the hook has left: the lock and git need the rest
+            limit = min(
+                handback_wait_limit(os.environ),
+                hook_time_left("prompt", time.monotonic() - _T0) / 2,
+            )
+        began = clock()
+        seen = False
+        while (left := limit - (clock() - began)) > 1e-9:
+            sleep(min(HANDBACK_POLL_S, left))
+            try:
+                state = read(path)
+            except OSError:  # being replaced right now: not yet
+                continue
+            if isinstance(state, dict) and finished_agent(state, sender):
+                seen = True
+                break
+        return {"waited": round(clock() - began, 3), "stop_seen": seen}
+    except Exception:  # hook boundary: a wait that fails is no wait
+        log.exception("discipline.handback_wait_failed")
+        return None
+
+
 def v2_keep_on_relay(
     state: dict[str, Any], cwd: str, prompt: str
 ) -> tuple[dict[str, Any] | None, str | None]:
@@ -2920,8 +3021,9 @@ def note_prompt_seen(
     """Diagnosis only (never read to decide): the shape of what the prompt hook was handed.
     The names of the payload's keys, the prompt id, the length of the text, a short hash of
     it (to tell a re-sent prompt), the kind of its first two non-blank lines (line_kind),
-    how the hook classified it and which task was approved before and after. Nothing of the
-    prompt's text is kept: telling prompts apart needs their shape only."""
+    how the hook classified it, which task was approved before and after, and what the run
+    waited for a subagent's stop record. Nothing of the prompt's text is kept: telling
+    prompts apart needs their shape only."""
     try:
         import hashlib
 
@@ -2939,6 +3041,9 @@ def note_prompt_seen(
             "kind": kind,
             "before": before,
             "after": after.get("task_id") if isinstance(after, dict) else None,
+            # how long this prompt waited for a subagent's stop record, and whether it came
+            "waited": _handback_wait.get("waited"),
+            "stop_seen": _handback_wait.get("stop_seen"),
         }
         seen = state.get("prompt_seen")
         # entries an earlier version wrote may hold the start of a prompt's text
@@ -4476,6 +4581,9 @@ def run_hook(mode: str, data: dict[str, Any], handler: Any, path: Path) -> None:
         )
     except ValueError:  # malformed override: use the default
         configured = session_store.LOCK_BUDGET_S
+    if mode == "prompt":
+        # outside the lock: the stop record this may wait for is written under it
+        _handback_wait.update(await_agent_stop(data, path) or {})
     lock_budget = lock_budget_s(mode, time.monotonic() - _T0, configured)
     try:
         # One exclusive lock per session for the whole run: main and subagent hooks of the

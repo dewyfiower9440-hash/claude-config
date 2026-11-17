@@ -555,6 +555,8 @@ check(
                 "kind",
                 "before",
                 "after",
+                "waited",  # devenv-fix-j2: numbers and a flag, still no text
+                "stop_seen",
             ]
         ),
         True,
@@ -1021,6 +1023,189 @@ check(
     ("alpha", None, True, "p7", ["x.py"], True, None, None),
 )
 
+
+# ---- devenv-fix-j2: the stop record of a subagent and its hand-back prompt come from two hook
+# processes started at almost the same time, in either order (observed 2026-11-17: the stop
+# record 0.150 s and 0.900 s before the prompt, then 0.97 s after it). The prompt hook waits
+# for the stop record of a subagent this session started, outside the session lock, up to a
+# limit; the rule itself ("only after it ended") is unchanged.
+def hook_with(env: dict, mode: str, s: str, prompt_id: str, **payload: object) -> dict:
+    p = subprocess.run(
+        [sys.executable, "-I", str(HOOKS / "discipline.py"), mode],
+        input=json.dumps(
+            {"session_id": s, "cwd": str(PROJ), "prompt_id": prompt_id, **payload}
+        ),
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert p.returncode == 0, (mode, p.returncode, p.stderr[-300:])
+    return json.loads(p.stdout) if p.stdout.strip() else {}
+
+
+def no_stop(
+    prompt: str, started: bool = True, stopped: bool = False
+) -> tuple[object, ...]:
+    s = start()
+    approve(s, "alpha")
+    if started:
+        hook("agent-start", s, "p1", **AGENT)
+    if stopped:
+        hook("agent-stop", s, "p1", **AGENT)
+    brief = dict(ENV, CLAUDE_DISCIPLINE_HANDBACK_WAIT_S="0.4")
+    out = hook_with(brief, "prompt", s, "p9", prompt=prompt)
+    seen = state_of(s).get("prompt_seen", [{}])[-1]
+    waited = seen.get("waited")
+    return (
+        task_of(s),
+        NOT_HANDBACK in said(out),
+        seen.get("stop_seen"),
+        "none" if waited is None else 0.3 <= waited < 5,
+    )
+
+
+check(
+    "J2-T2 the stop record does not arrive within the limit: handled as a user prompt as "
+    "before, told at once with the reason, the wait is recorded",
+    no_stop(handback("ag1")),
+    (None, True, False, True),
+)
+check(
+    "J2-T3 nothing is waited for when the subagent has already ended, when the id is not "
+    "one this session started, or for ordinary text; the decisions are as before",
+    (
+        no_stop(handback("ag1"), stopped=True),
+        no_stop(handback("zz9")),
+        no_stop(handback("ag1"), started=False),
+        no_stop("just some text"),
+    ),
+    (
+        ("alpha", False, None, "none"),
+        (None, True, None, "none"),
+        (None, True, None, "none"),
+        (None, False, None, "none"),
+    ),
+)
+
+
+def unit_wait(
+    states: list[object], limit: object = 3.0, prompt: str = ""
+) -> tuple[object, ...]:
+    """await_agent_stop with a fake clock: each sleep advances it, each read takes the next
+    of `states` (the last one repeats). (result, number of reads, seconds slept)."""
+    now = [0.0]
+    reads = [0]
+
+    def read(_path: object) -> object:
+        reads[0] += 1
+        state = states[min(reads[0], len(states)) - 1]
+        if isinstance(state, Exception):
+            raise state
+        return state
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    got = disc_h.await_agent_stop(
+        {"prompt": prompt or handback("ag1")},
+        Path("unused"),
+        read=read,
+        clock=lambda: now[0],
+        sleep=sleep,
+        limit=limit,
+    )
+    return got, reads[0], round(now[0], 3)
+
+
+RUNNING = {
+    "agents": {"code-reviewer:ag1": {"started": 5.0, "stopped": None, "runs": 1}}
+}
+ENDED = {"agents": {"code-reviewer:ag1": {"started": 5.0, "stopped": 6.0, "runs": 1}}}
+RESUMED = {
+    "agents": {"code-reviewer:ag1": {"started": 7.0, "stopped": None, "runs": 2}}
+}
+check(
+    "J2-T4 await_agent_stop: found at the first look after a pause, at the third, never "
+    "(the limit); no wait without a state, with one that cannot be read or is no object, "
+    "for an id not started here, for one already ended, for a prompt without the tag; a "
+    "read that fails while waiting counts as 'not yet'; a limit of zero or below looks no "
+    "further; a subagent that was resumed (its end cleared again) is waited for like a "
+    "running one",
+    (
+        unit_wait([RUNNING, ENDED]),
+        unit_wait([RUNNING, RUNNING, RUNNING, ENDED]),
+        unit_wait([RUNNING], limit=0.35),
+        unit_wait([None]),
+        unit_wait([OSError("busy")]),
+        unit_wait([["not", "an", "object"]]),
+        unit_wait(
+            [{"agents": {"code-reviewer:other": {"started": 5.0, "stopped": None}}}]
+        ),
+        unit_wait([ENDED]),
+        unit_wait([RUNNING], prompt="no tag here"),
+        unit_wait([RUNNING, OSError("busy"), ENDED]),
+        unit_wait([RUNNING], limit=0.0),
+        unit_wait([RUNNING], limit=-1.0),
+        unit_wait([RESUMED, RESUMED], limit=0.2),
+    ),
+    (
+        ({"waited": 0.1, "stop_seen": True}, 2, 0.1),
+        ({"waited": 0.3, "stop_seen": True}, 4, 0.3),
+        ({"waited": 0.35, "stop_seen": False}, 5, 0.35),
+        (None, 1, 0.0),
+        (None, 1, 0.0),
+        (None, 1, 0.0),
+        (None, 1, 0.0),
+        (None, 1, 0.0),
+        (None, 0, 0.0),
+        ({"waited": 0.2, "stop_seen": True}, 3, 0.2),
+        ({"waited": 0.0, "stop_seen": False}, 1, 0.0),
+        ({"waited": 0.0, "stop_seen": False}, 1, 0.0),
+        ({"waited": 0.2, "stop_seen": False}, 3, 0.2),
+    ),
+)
+check(
+    "J2-T4 the limit from the environment: a number of seconds, anything else (not a "
+    "number, negative, not finite) is the default",
+    [
+        disc_h.handback_wait_limit({"CLAUDE_DISCIPLINE_HANDBACK_WAIT_S": raw})
+        for raw in ("0.4", "0", "-1", "abc", "nan", "inf", "")
+    ]
+    + [disc_h.handback_wait_limit({})],
+    [0.4, 0.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0],
+)
+s = start()
+state_file = TMPD / "claude-discipline" / f"{s}.json"
+state = json.loads(state_file.read_text(encoding="utf-8"))
+state["prompt_seen"] = [
+    {
+        "at": 1.0,
+        "keys": ["prompt"],
+        "prompt_id": "old",
+        "chars": 9,
+        "sha": "abc",
+        "lines": ["text"],
+        "kind": "user",
+        "before": None,
+        "after": None,
+    },
+]
+state_file.write_text(json.dumps(state), encoding="utf-8")
+hook("prompt", s, "p2", prompt="next prompt")
+seen = state_of(s).get("prompt_seen", [])
+check(
+    "J2-T6 an entry written before the two fields existed stays as it is; a new entry "
+    "carries them (None when nothing was waited for)",
+    (
+        sorted(seen[0]) == sorted(state["prompt_seen"][0]),
+        ("waited" in seen[-1], seen[-1].get("waited"), seen[-1].get("stop_seen")),
+    ),
+    (True, (True, None, None)),
+)
+
 # The failures above happen on on_prompt's first line. run_hook takes the handler as an
 # argument, so the other places are reached in this process without a switch in the hook:
 # before the handler, after the handler decided, after it had something to tell, and with a
@@ -1120,6 +1305,74 @@ check(
     "J-T11 a prompt hook that does not fail prints what the handler had to tell, once",
     in_process(handler=lambda d, st: disc_h._prompt_pending.append("handler text")),
     ("alpha", (False, False, False, True), 1),
+)
+
+
+def late_stop() -> tuple[object, ...]:
+    """The hand-back prompt is being handled and the stop record is not there yet: the real
+    SubagentStop hook runs (as its own process) between the prompt hook's first and second
+    look at the state. The order does not depend on how fast processes start."""
+    s = start()
+    approve(s, "alpha")
+    hook("agent-start", s, "p1", **AGENT)
+    path = TMPD / "claude-discipline" / f"{s}.json"
+    looks = [0]
+    stop_ok: list[bool] = []
+
+    def read(state_path: Path) -> object:
+        looks[0] += 1
+        if looks[0] == 2:
+            # J2-T5: the waiting prompt hook holds no lock, so this hook can record the end
+            hook("agent-stop", s, "p1", **AGENT)
+            stop_ok.append(disc_h.finished_agent(state_of(s), "ag1"))
+        return disc_h.peek_state(state_path)
+
+    real_wait, real_t0 = disc_h.await_agent_stop, disc_h._T0
+    disc_h._prompt_failure.clear()
+    disc_h._prompt_pending.clear()
+    disc_h._handback_wait.clear()
+    disc_h._prompt_told = False
+    out = io.StringIO()
+    try:
+        disc_h._T0 = disc_h.time.monotonic()  # this run starts now, like a hook process
+        disc_h.await_agent_stop = lambda data, state_path: real_wait(
+            data, state_path, read=read, limit=3.0
+        )
+        with contextlib.redirect_stdout(out):
+            disc_h.run_hook(
+                "prompt",
+                {
+                    "session_id": s,
+                    "cwd": str(PROJ),
+                    "prompt_id": "p9",
+                    "prompt": handback("ag1"),
+                },
+                disc_h.on_prompt,
+                path,
+            )
+    finally:
+        disc_h.await_agent_stop, disc_h._T0 = real_wait, real_t0
+        disc_h._handback_wait.clear()
+    printed = [ln for ln in out.getvalue().splitlines() if ln.strip()]
+    seen = state_of(s).get("prompt_seen", [{}])[-1]
+    waited = seen.get("waited")
+    return (
+        task_of(s),
+        any(LOST_WORDS in said(json.loads(ln)) for ln in printed),
+        seen.get("kind"),
+        seen.get("stop_seen"),
+        isinstance(waited, float) and 0 < waited < 3.5,
+        looks[0],
+        stop_ok,
+    )
+
+
+check(
+    "J2-T1 the stop record arrives after the hand-back prompt hook has started: the hook "
+    "waits for it (second look), the approval is kept, the wait is recorded; J2-T5 the "
+    "SubagentStop hook records the end while the prompt hook waits (no lock is held)",
+    late_stop(),
+    ("alpha", False, "relay", True, True, 2, [True]),
 )
 
 for p in (ROOT, PROJ):
