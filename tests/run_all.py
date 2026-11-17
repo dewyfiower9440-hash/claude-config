@@ -32,22 +32,29 @@ ROOT = Path(__file__).resolve().parent.parent
 # time followed the sum divided by the workers, not the longest module, so 6 workers (16
 # logical CPUs here) took 470 s with a sum of 2,336 s, and that run ended on test_approvals
 # alone (469 s): it was split in two (test_approvals, test_approvals_v2).
-DEFAULT_WORKERS = 6
-# Longest first (measured 2026-11-17 with 6 workers: 367, 309, 287, 176, 171, 168, 135, 126,
-# 119, 96 s), so that the end of a run is not one worker finishing a long module alone: with
-# test_task_switch missing from this list it started at about 300 s and the run took 471 s
-# where this order takes about 400 s. A module that grows past 90 s belongs here.
+# Measured 2026-11-18: a day of added tests brought the sum to 2,719 s and 6 workers to
+# 545 s. test_task_switch was split (test_task_switch, test_prompt_approval) and the start
+# order renewed: 475 s with 6 workers (sum 2,739 s), 422 s with 8 (sum 3,121 s, no failure).
+# With 8 the run ends on the longest module (test_approvals_v2, 421 s): more workers will
+# not shorten it further; fewer or faster cases will. CI sets its own number (ci.yml).
+DEFAULT_WORKERS = 8
+# Longest first (measured 2026-11-18 with 6 workers: 379, 314, 292, 255, 202, 186, 174, 139,
+# 127, 130, 125 s in the order below), so that the end of a run is not one worker finishing
+# a long module alone (2026-11-17: with test_task_switch missing from this list it started
+# at about 300 s and the run took 471 s instead of about 400 s). A module that grows past
+# 90 s belongs here.
 SLOW_FIRST = [
     "test_approvals_v2",
     "test_discipline_d3",
     "test_discipline",
+    "test_ledger",
+    "test_prompt_approval",
     "test_guard_corpus",
     "test_worktree",
-    "test_task_switch",
     "test_session_store",
+    "test_task_switch",
     "test_approvals",
     "test_ci_status",
-    "test_ledger",
 ]
 TESTS = [
     "test_shellparse",
@@ -75,6 +82,7 @@ TESTS = [
     "test_redact",
     "test_ledger",
     "test_task_switch",
+    "test_prompt_approval",
     "test_review_binding",
     "test_test_gap",
     "test_output_size",

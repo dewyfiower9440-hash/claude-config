@@ -300,6 +300,9 @@ check(
 )
 
 old = ROOT / "store" / f"{handoff.key(TOP)}.json"
+# The folder is there only when the session end above wrote its record. When it did not (a
+# slow machine: its git calls have a 3 s budget) D-T8 has failed; this case still runs.
+old.parent.mkdir(parents=True, exist_ok=True)
 old.write_text(
     json.dumps(
         {
