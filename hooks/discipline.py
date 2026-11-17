@@ -3039,10 +3039,11 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
         if not relay and new_context_root(state, top) and top:
             told = "\n\n".join(x for x in (told, project_switch_context(top)) if x)
     finally:
-        # One JSON object per hook run; an ack-missing answer already recorded in the
-        # state is delivered even if tracking the repository fails.
+        # One JSON object per hook run, printed by run_hook: an ack-missing answer already
+        # recorded in the state is delivered even if tracking the repository fails, and a
+        # failure after this point is told in the same object.
         if told:
-            emit_prompt_context(told)
+            _prompt_pending.append(told)
     if not relay:
         refresh_turn_baselines(state)
         state["turn_covered"] = {}
@@ -3508,6 +3509,10 @@ REASON_APPROVAL_INVALID = (
     "[discipline] 저장된 계획 승인 기록을 신뢰할 수 없어 자동 재승인하지 않았습니다({why}). "
     "이 작업을 계속하려면 계획을 다시 제시해 사용자 승인을 받으세요. 이 사실을 보고에 적으세요."
 )
+REASON_PROMPT_FAILED = (
+    "[discipline] {why}. 그 프롬프트가 승인을 이을 수 있는지 판정하지 못했습니다. 계속하려면 "
+    "사용자에게 프롬프트 첫 줄 task:<id> 를 요청하세요. 이 사실을 보고에 적으세요."
+)
 REASON_APPROVAL_AMBIGUOUS = (
     "[discipline] 프롬프트가 승인된 진행 중 계획 여러 개를 가리켜 어느 것도 재무장하지 않았습니다({why}). "
     "승인 기록은 유효합니다. 프롬프트 첫 줄에 task:<id> 하나만 적어 다시 요청해 달라고 사용자에게 알리세요."
@@ -3611,6 +3616,8 @@ def _first_stop_problem(state: dict[str, Any]) -> tuple[str, str | None] | None:
                 if warning == RELAY_NOTE  # nothing approved continues after a relay
                 else REASON_APPROVAL_NOTE
                 if str(warning).startswith(NOTE)
+                else REASON_PROMPT_FAILED
+                if str(warning).startswith(PROMPT_FAILED_PREFIX)
                 else REASON_APPROVAL_INVALID
             )
             return template.format(why=warning), key
@@ -4380,6 +4387,85 @@ def main() -> None:
         hard_block(mode, data, REASON_HOOK_ERROR.format(why="오류 처리 중 오류"))
 
 
+PROMPT_FAILED_PREFIX = "프롬프트 hook 처리 중 오류로 승인을 폐기함"
+PROMPT_FAILED_WARNING = PROMPT_FAILED_PREFIX + "({why})"
+PROMPT_FAILED_UNSAVED = (
+    " 승인 폐기를 기록하지 못했습니다(세션 상태를 읽거나 쓰지 못함). 승인 상태를 신뢰할 수 "
+    "없으니, 편집하기 전에 사용자에게 프롬프트 첫 줄 task:<id> 를 요청하세요."
+)
+PROMPT_FAILED_NOTE = (
+    "[discipline] 프롬프트 hook 처리 중 오류({why}). 이 프롬프트가 승인을 이을 수 있는지 판정하지 "
+    "못했습니다.{dropped} 편집하기 전에 이 사실을 사용자에게 알리세요."
+)
+PROMPT_FAILED_DROPPED = (
+    " 승인(task: {task})을 폐기했습니다. 계속하려면 사용자에게 프롬프트 첫 줄 task:{task} 를 "
+    "요청하세요. 그 전에는 범위 안의 파일도 고치지 마세요."
+)
+PROMPT_BUSY_NOTE = (
+    "[discipline] 이 프롬프트를 hook이 처리하지 못했습니다(세션 상태 잠금: {why}). 승인 상태를 "
+    "확인할 수 없으니, 편집하기 전에 사용자에게 프롬프트 첫 줄 task:<id> 를 요청하세요."
+)
+# What the failure path of this run tells the prompt: set by note_prompt_failure ("task":
+# the task it dropped, "" for none) and by run_locked ("unsaved": the state with the dropped
+# approval did not reach the disk), read by run_hook.
+_prompt_failure: dict[str, str] = {}
+_prompt_pending: list[str] = []  # what on_prompt has to tell: printed once, by run_hook
+_prompt_told = (
+    False  # emit_prompt_context ran: a prompt hook's output is one JSON object
+)
+
+
+def prompt_failed(state: dict[str, Any], data: dict[str, Any], why: str) -> str | None:
+    """A prompt handler ended in an exception: it decided nothing, so the approval it should
+    have decided on does not stay (fail-closed), and the prompt it failed on becomes the
+    prompt in progress (a later one is not read as its continuation). Everything else is
+    left as it is. Returns the task whose approval was dropped, or None."""
+    held = state.get("approval")
+    task = held.get("task_id") if isinstance(held, dict) else None
+    state["approval"] = None
+    state["prompt_id"] = data.get("prompt_id")
+    if held:
+        state["approval_warning"] = PROMPT_FAILED_WARNING.format(why=why)
+    return task if isinstance(task, str) and task else None
+
+
+def note_prompt_failure(state: dict[str, Any], data: dict[str, Any], why: str) -> None:
+    """prompt_failed on the failure path: never raises (the handler's own exception is the
+    one to report), and keeps what run_hook tells the prompt."""
+    try:
+        _prompt_failure["task"] = prompt_failed(state, data, why) or ""
+    except Exception:  # hook boundary: the failure being handled is reported, not this
+        log.exception("discipline.prompt_failed_failed")
+        state["approval"] = None
+        _prompt_failure["task"] = ""
+
+
+def tell_prompt_failure(text: str) -> None:
+    """Tell the failed prompt, once, together with what on_prompt already had to tell, and
+    never raise on the failure path."""
+    if _prompt_told:
+        return
+    try:
+        emit_prompt_context("\n\n".join([*_prompt_pending, text]))
+    except Exception:  # hook boundary: nothing more can be said
+        log.exception("discipline.prompt_failure_output_failed")
+
+
+def prompt_failure_text(why: str) -> str:
+    """What a prompt whose hook ended in an exception is told: whether an approval was
+    dropped, or that dropping it could not be recorded."""
+    task = _prompt_failure.get("task")
+    if "task" not in _prompt_failure or _prompt_failure.get("unsaved"):
+        dropped = (
+            PROMPT_FAILED_UNSAVED  # failed before the state was read, or not saved
+        )
+    elif task:
+        dropped = PROMPT_FAILED_DROPPED.format(task=task)
+    else:
+        dropped = ""
+    return PROMPT_FAILED_NOTE.format(why=why, dropped=dropped)
+
+
 def run_hook(mode: str, data: dict[str, Any], handler: Any, path: Path) -> None:
     import session_store
 
@@ -4399,6 +4485,8 @@ def run_hook(mode: str, data: dict[str, Any], handler: Any, path: Path) -> None:
                 recover_locked(data, path)
             else:
                 run_locked(mode, data, handler, path)
+        if _prompt_pending and not _prompt_told:
+            emit_prompt_context("\n\n".join(_prompt_pending))
     except session_store.StateBusy as e:
         if mode in LIFECYCLE_MODES:
             # No message text: it is not ASCII, and stderr here is not UTF-8.
@@ -4406,6 +4494,10 @@ def run_hook(mode: str, data: dict[str, Any], handler: Any, path: Path) -> None:
             return
         # Nothing can be recorded: refuse what needs the state, remember that it was missed.
         note_safely(path, f"{event_label(mode, data)}: {e}")
+        if mode == "prompt":
+            # a prompt cannot be refused and its approval cannot be changed without the
+            # state: it is at least not silent
+            tell_prompt_failure(PROMPT_BUSY_NOTE.format(why=str(e)[:200]))
         fail_closed(mode, data, REASON_STATE_BUSY.format(why=e))
     except (
         Exception
@@ -4414,6 +4506,8 @@ def run_hook(mode: str, data: dict[str, Any], handler: Any, path: Path) -> None:
         why = f"{type(e).__name__}: {e}"[:200]
         # What was known is saved (run_locked's finally); this event may be half applied.
         note_safely(path, f"{event_label(mode, data)}: 처리 중 오류({why})")
+        if mode == "prompt":
+            tell_prompt_failure(prompt_failure_text(why))
         fail_closed(mode, data, REASON_HOOK_ERROR.format(why=why))
 
 
@@ -4867,6 +4961,8 @@ def recovered_state(
 
 
 def emit_prompt_context(text: str) -> None:
+    global _prompt_told
+    _prompt_told = True
     print(
         json.dumps(
             {
@@ -4892,19 +4988,27 @@ def run_locked(mode: str, data: dict[str, Any], handler: Any, path: Path) -> Non
     state = default_state()
     why: list[str] = []
     try:
-        saved = session_store.load(path)
-    except session_store.StateCorrupt as e:
-        saved = None
-        why.append(f"{e}, 보존: {e.preserved.name if e.preserved else '이동 실패'}")
-    problem = state_shape_problem(saved) if saved else None
-    if problem:  # well-formed JSON the code cannot use: as damaged as unreadable JSON
-        kept = session_store.preserve(path)
-        saved = None
-        why.append(
-            f"세션 추적 상태 손상(형식: {problem}), 보존: {kept.name if kept else '이동 실패'}"
-        )
-    if saved:
-        state.update(saved)
+        try:
+            saved = session_store.load(path)
+        except session_store.StateCorrupt as e:
+            saved = None
+            why.append(f"{e}, 보존: {e.preserved.name if e.preserved else '이동 실패'}")
+        problem = state_shape_problem(saved) if saved else None
+        if (
+            problem
+        ):  # well-formed JSON the code cannot use: as damaged as unreadable JSON
+            kept = session_store.preserve(path)
+            saved = None
+            why.append(
+                f"세션 추적 상태 손상(형식: {problem}), 보존: {kept.name if kept else '이동 실패'}"
+            )
+        if saved:
+            state.update(saved)
+    except Exception:
+        # the state was not read: nothing is saved over it, so nothing can be dropped in it
+        if mode == "prompt":
+            _prompt_failure["unsaved"] = "1"
+        raise
     # From here on every step runs under the save below: an exception anywhere (notes
     # already taken, marker half computed, handler) still persists what is known, and the
     # loaded state is never replaced by defaults.
@@ -4936,10 +5040,18 @@ def run_locked(mode: str, data: dict[str, Any], handler: Any, path: Path) -> Non
             seen.append(event)
             del seen[:-SEEN_EVENTS]
         handler(data, state)
+    except Exception as e:
+        # Anywhere in a prompt hook's run (the notes, the marker, the budget, the handler):
+        # it did not decide whether the approval continues, so the approval goes.
+        if mode == "prompt":
+            note_prompt_failure(state, data, f"{type(e).__name__}: {e}"[:200])
+        raise
     finally:
         try:
             session_store.save(path, state)
         except session_store.StateWriteFailed as e:
+            if mode == "prompt":
+                _prompt_failure["unsaved"] = "1"
             note_safely(path, f"{event_label(mode, data)}: {e}")
 
 

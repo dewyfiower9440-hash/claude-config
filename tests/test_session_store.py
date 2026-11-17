@@ -293,6 +293,20 @@ check(
     (decision(out_pre), decision(out_stop)),
     ("deny", "block"),
 )
+# devenv-fix-j: the prompt hook cannot block, but it is no longer silent when it could not
+# run: the prompt is told that the approval state is unknown
+s2 = uuid.uuid4().hex
+hook("prompt", s2, prompt_id="p", prompt="work")
+fd2 = hold_lock(s2)
+out_prompt = hook("prompt", s2, env=short, prompt_id="p2", prompt="next") or {}
+release_lock(fd2)
+told_busy = str(out_prompt.get("hookSpecificOutput", {}).get("additionalContext") or "")
+check(
+    "J-T6 session lock busy at a prompt: the prompt is told the hook could not handle it "
+    "and to ask for the task line before editing",
+    ("잠금" in told_busy, "task:<id>" in told_busy),
+    (True, True),
+)
 check(
     "S-T5 ... reason names the lock",
     ("잠금" in reason(out_pre), "잠금" in reason(out_stop)),

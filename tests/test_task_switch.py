@@ -883,6 +883,245 @@ check(
     (False, False, ["old", "p2"], True),
 )
 
+# ---- devenv-fix-j: a prompt hook that ends in an exception decided nothing, so the approval
+# it should have decided on goes (fail-closed) and the prompt is told at once. The failure is
+# brought about by a state the shape check accepts and on_prompt cannot use (`turn` is
+# infinite: int() raises OverflowError on its first line).
+FAILED_WORDS = "프롬프트 hook 처리 중 오류"
+
+
+def state_of(s: str) -> dict:
+    return json.loads(
+        (TMPD / "claude-discipline" / f"{s}.json").read_text(encoding="utf-8")
+    )
+
+
+def set_turn(s: str, value: float) -> None:
+    f = TMPD / "claude-discipline" / f"{s}.json"
+    state = json.loads(f.read_text(encoding="utf-8"))
+    state["turn"] = value
+    f.write_text(json.dumps(state), encoding="utf-8")
+
+
+def failing_prompt(prompt_id: str, approved: bool = True) -> tuple[object, ...]:
+    s = start()
+    if approved:
+        approve(s, "alpha")
+        edit(s, "src/jf.py")
+    in_force = bool(disc_h.active_approval(state_of(s), "p1"))
+    set_turn(s, float("inf"))
+    out = hook("prompt", s, prompt_id, prompt="task:alpha\ngo on")
+    told = said(out)
+    after = state_of(s)
+    # the state is still one on_prompt cannot use: the Stop of that turn must block too
+    broken_stop = hook("stop", s, prompt_id).get("decision")
+    set_turn(s, 1)
+    stopped = hook("stop", s, prompt_id)
+    why = str(stopped.get("reason"))
+    return (
+        in_force,
+        (after.get("approval") or {}).get("task_id"),
+        # what a write under that prompt id would be decided on: no approval
+        disc_h.active_approval(after, prompt_id),
+        FAILED_WORDS in told,
+        "task:alpha" in told,
+        "폐기했습니다" in told,
+        after.get("prompt_id") == prompt_id,
+        len(after.get("turn_files") or []),
+        broken_stop,
+        stopped.get("decision"),
+        "처리 중 오류" in why,
+        ("폐기함" in why, "task:<id>" in why, "다시 제시" in why),
+    )
+
+
+check(
+    "J-T1 a prompt of its own whose hook fails: the approval is dropped, the prompt is told "
+    "at once with the task and how to go on, the failed prompt's id is recorded; J-T4 the "
+    "Stop after it is blocked (also while the state is still unusable) and its reason names "
+    "the dropped approval and asks for the task line, not for a new plan",
+    failing_prompt("p2"),
+    (
+        True,
+        None,
+        None,
+        True,
+        True,
+        True,
+        True,
+        1,
+        "block",
+        "block",
+        True,
+        (True, True, False),
+    ),
+)
+check(
+    "J-T2 the same under the prompt id in progress (a message delivered mid-work), where "
+    "the approval left behind was still in force: a write under that id finds no approval",
+    failing_prompt("p1"),
+    (
+        True,
+        None,
+        None,
+        True,
+        True,
+        True,
+        True,
+        1,
+        "block",
+        "block",
+        True,
+        (True, True, False),
+    ),
+)
+check(
+    "J-T3 without an approval: none appears, the prompt is told of the failure only; the "
+    "first Stop is blocked for the missed event, and with nothing changed and nothing "
+    "dropped the one after it has nothing left to say",
+    failing_prompt("p2", approved=False),
+    (
+        False,
+        None,
+        None,
+        True,
+        False,
+        False,
+        True,
+        0,
+        "block",
+        None,
+        False,
+        (False, False, False),
+    ),
+)
+
+kept_closed = {"task_id": "alpha", "approval_id": "a1", "content": "c1"}
+unit = {
+    "approval": {"task_id": "alpha", "approval_id": "a1", "prompt_id": "p1"},
+    "prompt_id": "p1",
+    "turn_files": ["x.py"],
+    "ledger_closed": dict(kept_closed),
+}
+dropped = disc_h.prompt_failed(unit, {"prompt_id": "p7"}, "OverflowError: x")
+check(
+    "J-T5 prompt_failed: the approval and the prompt id change, the turn's records and the "
+    "closed task's memory stay; it returns the task it dropped, and nothing for a state "
+    "without an approval or one it cannot read",
+    (
+        dropped,
+        unit["approval"],
+        "폐기" in str(unit.get("approval_warning")),
+        unit["prompt_id"],
+        unit["turn_files"],
+        unit["ledger_closed"] == kept_closed,
+        disc_h.prompt_failed({}, {}, "x"),
+        disc_h.prompt_failed({"approval": "not a dict"}, {"prompt_id": 3}, "x"),
+    ),
+    ("alpha", None, True, "p7", ["x.py"], True, None, None),
+)
+
+# The failures above happen on on_prompt's first line. run_hook takes the handler as an
+# argument, so the other places are reached in this process without a switch in the hook:
+# before the handler, after the handler decided, after it had something to tell, and with a
+# state that cannot be read or saved.
+import contextlib
+import io
+
+import session_store
+import worktree
+
+
+def in_process(
+    *,
+    handler: object = None,
+    broken: tuple[object, str] | None = None,
+    prompt_id: str = "p1",
+) -> tuple[object, ...]:
+    """Approve alpha in a session, then run the prompt hook in this process with `handler`
+    (default: the real one) while `broken` (module, name) raises: (task approved on disk
+    afterwards, what the prompt was told as (failure, dropped, not recorded, the handler's
+    own text), number of JSON objects printed)."""
+    s = start()
+    approve(s, "alpha")
+    path = TMPD / "claude-discipline" / f"{s}.json"
+    data = {
+        "session_id": s,
+        "cwd": str(PROJ),
+        "prompt_id": prompt_id,
+        "prompt": "task:alpha\ngo on",
+    }
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("broken on purpose")
+
+    original = getattr(broken[0], broken[1]) if broken else None
+    disc_h._prompt_failure.clear()
+    disc_h._prompt_pending.clear()
+    disc_h._prompt_told = False
+    out = io.StringIO()
+    # the failures are made on purpose: their logged tracebacks would be this module's last
+    # output lines, which the gate shows as its result
+    disc_h.logging.disable(disc_h.logging.CRITICAL)
+    try:
+        if broken:
+            setattr(broken[0], broken[1], boom)
+        with contextlib.redirect_stdout(out):
+            disc_h.run_hook("prompt", data, handler or disc_h.on_prompt, path)
+    finally:
+        disc_h.logging.disable(disc_h.logging.NOTSET)
+        if broken:
+            setattr(broken[0], broken[1], original)
+    printed = [ln for ln in out.getvalue().splitlines() if ln.strip()]
+    told = "\n".join(said(json.loads(ln)) for ln in printed)
+    return (
+        (state_of(s).get("approval") or {}).get("task_id"),
+        (
+            FAILED_WORDS in told,
+            "폐기했습니다" in told,
+            "기록하지 못했습니다" in told,
+            "handler text" in told,
+        ),
+        len(printed),
+    )
+
+
+def decides_then_fails(data: dict, state: dict) -> None:
+    state["approval"] = {"task_id": "alpha", "approval_id": "x", "prompt_id": "p1"}
+    disc_h._prompt_pending.append("handler text")
+    raise RuntimeError("after the decision")
+
+
+check(
+    "J-T7 a failure before the handler runs (the git budget of the run): the approval is "
+    "dropped all the same and the prompt is told",
+    in_process(broken=(worktree, "set_budget")),
+    (None, (True, True, False, False), 1),
+)
+check(
+    "J-T8 a failure after the handler decided to keep the approval and had its own text to "
+    "tell: the approval goes, and one JSON object carries both texts",
+    in_process(handler=decides_then_fails),
+    (None, (True, True, False, True), 1),
+)
+check(
+    "J-T9 the state cannot be saved: the prompt is told that dropping the approval was not "
+    "recorded, not that it was dropped",
+    in_process(broken=(session_store, "save")),
+    ("alpha", (True, False, True, False), 1),
+)
+check(
+    "J-T10 the state cannot be read: nothing is written over it, and the prompt is told "
+    "the same",
+    in_process(broken=(session_store, "load")),
+    ("alpha", (True, False, True, False), 1),
+)
+check(
+    "J-T11 a prompt hook that does not fail prints what the handler had to tell, once",
+    in_process(handler=lambda d, st: disc_h._prompt_pending.append("handler text")),
+    ("alpha", (False, False, False, True), 1),
+)
+
 for p in (ROOT, PROJ):
     shutil.rmtree(p, ignore_errors=True)
 print("FAILURES:", fails)
