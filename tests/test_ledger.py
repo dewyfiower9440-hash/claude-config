@@ -803,10 +803,15 @@ after = json.loads(
     (TMPD / "claude-discipline" / f"{s}.json").read_text(encoding="utf-8")
 )
 check(
-    "R-T26 a new approval after the close: one more closed entry before it, none after, "
-    "and the closed task is forgotten",
-    (len(closed2) - len(closed), gadget() == closed2, after.get("ledger_closed")),
-    (1, True, None),
+    "R-T26 a new approval after the close: one more closed entry before it, none after; "
+    "the closed task stays remembered while the content is the one it closed on "
+    "(devenv-fix-k: a CI result read later is still added, see K-T2)",
+    (
+        len(closed2) - len(closed),
+        gadget() == closed2,
+        (after.get("ledger_closed") or {}).get("task_id"),
+    ),
+    (1, True, "gadget"),
 )
 
 PLAN3FILE.write_text(PLAN3.replace("in-progress", "done"), encoding="utf-8")
@@ -1099,6 +1104,347 @@ for shape, held_state in (
         if isinstance(held_state.get("ledger_closed"), dict | None)
         else (0, "gadget"),
     )
+
+# ---- devenv-fix-k: the ledger through pushes and CI results, as in real use (2026-11-17).
+# A repository with a GitHub remote and `ci: required`, a fake `gh` first on PATH (the one
+# of test_ci_status) and the real order of events: work, gate, commit, push, CI read, close,
+# the push of the closing document, Stop, CI read, Stop.
+KPROJ = Path("C:/dev/_ledger_ci_proj")
+shutil.rmtree(KPROJ, ignore_errors=True)
+(KPROJ / "src").mkdir(parents=True)
+(KPROJ / "docs" / "plans").mkdir(parents=True)
+(KPROJ / ".github" / "workflows").mkdir(parents=True)
+(KPROJ / "CLAUDE.md").write_text(
+    "## Verification\n- gate: `uv run pytest -q --cov`\n- ci: required\n",
+    encoding="utf-8",
+)
+(KPROJ / ".github" / "workflows" / "ci.yml").write_text(
+    "name: ci\non: [push]\njobs: {}\n", encoding="utf-8"
+)
+(KPROJ / "src" / "keep.py").write_text("k = 0\n", encoding="utf-8")
+
+
+def kgit(*args: str) -> str:
+    return subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+        cwd=KPROJ,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+kgit("init", "-q", "-b", "main")
+kgit("remote", "add", "origin", "https://github.com/acme/kdemo.git")
+kgit("add", "-A")
+kgit("commit", "-q", "-m", "init")
+KBIN = ROOT / "kbin"
+KBIN.mkdir()
+(KBIN / "gh.cmd").write_text(
+    f'@echo off\r\n"{sys.executable}" -I "{HERE / "fake_gh.py"}" %*\r\n',
+    encoding="utf-8",
+)
+KSCENARIO = ROOT / "kscenario.json"
+KLEDGER = ROOT / "k-ledger"
+KENV = dict(
+    ENV,
+    CLAUDE_LEDGER_HOME=str(KLEDGER),
+    FAKE_GH_SCENARIO=str(KSCENARIO),
+    PATH=str(KBIN) + os.pathsep + os.environ["PATH"],
+)
+KRUN = [100]
+
+
+def k_ci(conclusion: str = "success", status: str = "completed") -> None:
+    """What GitHub says about the commit that is HEAD now: one run of ci.yml."""
+    KRUN[0] += 1
+    rid = KRUN[0]
+    KSCENARIO.write_text(
+        json.dumps(
+            {
+                "runs": [
+                    {
+                        "id": rid,
+                        "name": "ci",
+                        "path": ".github/workflows/ci.yml",
+                        "event": "push",
+                        "head_branch": "main",
+                        "head_sha": kgit("rev-parse", "HEAD"),
+                        "status": status,
+                        "conclusion": conclusion if status == "completed" else None,
+                        "run_attempt": 1,
+                        "repository": {"full_name": "acme/kdemo"},
+                    }
+                ],
+                "jobs": {str(rid): [{"name": "test", "conclusion": conclusion}]},
+                "fail": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def khook(mode: str, s: str, prompt_id: str = "p", **payload: object) -> dict:
+    return hook(mode, s, KENV, cwd=str(KPROJ), prompt_id=prompt_id, **payload)[1]
+
+
+def kbash(s: str, command: str, prompt_id: str = "p", **more: object) -> None:
+    common = {
+        "tool_name": "Bash",
+        "tool_input": {"command": command, **more},
+        "tool_use_id": uuid.uuid4().hex,
+    }
+    khook("pre", s, prompt_id, **common)
+    khook("post", s, prompt_id, tool_response={}, **common)
+
+
+def kplan(task: str, status: str = "in-progress") -> tuple[Path, str]:
+    text = (
+        f"---\nstatus: {status}\ntask: {task}\n---\n\n# {task}\n\n"
+        "## 변경 범위\n- src/**\n\n## 단계\n- [ ] 1. a\n"
+    )
+    return KPROJ / "docs" / "plans" / f"2026-11-17-{task}.md", text
+
+
+def kapprove(s: str, task: str, prompt_id: str = "p") -> None:
+    file, text = kplan(task)
+    file.write_text(text, encoding="utf-8")
+    khook(
+        "post",
+        s,
+        prompt_id,
+        tool_name="ExitPlanMode",
+        tool_input={},
+        tool_response={"plan": text, "filePath": str(file)},
+    )
+
+
+def kedit(s: str, name: str, prompt_id: str = "p") -> None:
+    f = KPROJ / "src" / name
+    body = f"v = {uuid.uuid4().hex!r}\n"
+    f.write_text(body, encoding="utf-8")
+    khook(
+        "post",
+        s,
+        prompt_id,
+        tool_name="Write",
+        tool_input={"file_path": str(f), "content": body},
+        tool_use_id=uuid.uuid4().hex,
+    )
+
+
+def kpush(s: str, prompt_id: str = "p") -> None:
+    kgit("add", "-A")
+    kgit("commit", "-q", "-m", "work")
+    kbash(s, "git add -A && git commit -q -m work", prompt_id)
+    kbash(s, "git push origin main", prompt_id)
+
+
+def kread_ci(s: str, prompt_id: str = "p") -> None:
+    kbash(s, f"gh run view {KRUN[0]} --json status,conclusion", prompt_id)
+
+
+def kclose(s: str, task: str, prompt_id: str = "p") -> None:
+    file, text = kplan(task, "done")
+    file.write_text(text, encoding="utf-8")
+    kbash(s, "python close_plan.py", prompt_id)
+
+
+def kline(task: str) -> list[tuple[object, object]]:
+    return [
+        (e.get("state"), e.get("content"))
+        for e in lines(KLEDGER)
+        if e.get("task") == task
+    ]
+
+
+def kstates(task: str) -> tuple[list[object], int]:
+    """(the task's states in the order written, how many different contents they are on)."""
+    got = kline(task)
+    return [st for st, _c in got], len({c for _st, c in got})
+
+
+def k_worked(task: str, ci: str = "success", ci_status: str = "completed") -> str:
+    """A session that worked on `task`, passed the gate, committed, pushed, and read the CI
+    result given."""
+    s = uuid.uuid4().hex
+    khook("prompt", s, prompt="work")
+    kapprove(s, task)
+    kedit(s, f"{task}.py")
+    kbash(s, GATE)
+    kpush(s)
+    k_ci(ci, ci_status)
+    kread_ci(s)
+    return s
+
+
+def k_docs_push(s: str, ci: str = "success") -> None:
+    """The closing document is committed and pushed, the turn ends, CI is read, it ends."""
+    kpush(s)
+    khook("stop", s)
+    k_ci(ci)
+    kread_ci(s)
+    khook("stop", s)
+
+
+s = k_worked("kite1")
+kclose(s, "kite1")
+at_close = kstates("kite1")
+k_docs_push(s)
+check(
+    "K-T1 closed as CI verified, then only the closing document is pushed: the content is "
+    "the same, and no line after the close says less than CI_VERIFIED",
+    (at_close, kstates("kite1")),
+    ((["CI_VERIFIED"], 1), (["CI_VERIFIED"], 1)),
+)
+
+s = k_worked("kite2", ci_status="in_progress")
+kclose(s, "kite2")
+at_close = kstates("kite2")
+khook("prompt", s, "p2", prompt="next task")
+kapprove(s, "kite2b", "p2")
+k_ci()
+kread_ci(s, "p2")
+khook("stop", s, "p2")
+after_ci = kstates("kite2")
+kedit(s, "kite2b.py", "p2")
+khook("stop", s, "p2")
+check(
+    "K-T2 closed while CI was still running, another task approved right after: the CI "
+    "result read later is added to the closed task while the content is still the one it "
+    "closed on; once the next task changes the content nothing more is added",
+    (at_close, after_ci, kstates("kite2")),
+    (
+        (["LOCALLY_VERIFIED"], 1),
+        (["LOCALLY_VERIFIED", "CI_VERIFIED"], 1),
+        (["LOCALLY_VERIFIED", "CI_VERIFIED"], 1),
+    ),
+)
+
+s = uuid.uuid4().hex
+khook("prompt", s, prompt="work")
+kapprove(s, "kite4")
+kedit(s, "kite4.py")
+kbash(s, GATE)
+khook("stop", s)
+before = kstates("kite4")
+kpush(s)
+kbash(s, "uv run sampler", run_in_background=True)  # a background command in this turn
+kbash(s, GATE)
+k_ci()
+kread_ci(s)
+kclose(s, "kite4")
+check(
+    "K-T4 a background command started in the turn, the gate passed again, CI read, then "
+    "the close: the line at the close says no less than the line before it",
+    (before, kstates("kite4")),
+    ((["LOCALLY_VERIFIED"], 1), (["LOCALLY_VERIFIED", "CI_VERIFIED"], 1)),
+)
+
+s = k_worked("kite5")
+kclose(s, "kite5")
+k_docs_push(s, ci="failure")
+failed = kstates("kite5")
+s = k_worked("kite6")
+kclose(s, "kite6")
+kedit(s, "kite6.py")
+khook("stop", s)
+check(
+    "K-T5 what still lowers the record: CI failing for the same content is written as "
+    "BLOCKED; a change of the content after the close is not this task's and adds nothing",
+    (failed, kstates("kite6")),
+    ((["CI_VERIFIED", "BLOCKED"], 1), (["CI_VERIFIED"], 1)),
+)
+s = k_worked("kite7")
+kclose(s, "kite7")
+failing = {
+    "tool_name": "Bash",
+    "tool_input": {"command": GATE},
+    "tool_use_id": uuid.uuid4().hex,
+}
+khook("pre", s, **failing)
+khook("fail", s, error="Exit code 1", **failing)
+khook("stop", s)
+check(
+    "K-T5 ... and the gate failing on that same content after the close is written too",
+    kstates("kite7"),
+    (["CI_VERIFIED", "BLOCKED"], 1),
+)
+reopened = {
+    "stop_prompt_id": "p",
+    "approval": {
+        "v": 2,
+        "task_id": "gadget",
+        "approval_id": "new",
+        "base": str(PROJ),
+        "prompt_id": "p",
+    },
+    "ledger_closed": {
+        "task_id": "gadget",
+        "approval_id": "old",
+        "base": str(PROJ),
+        "content": "c1",
+    },
+    "content": {},
+}
+other = {
+    **reopened,
+    "ledger_closed": {**reopened["ledger_closed"], "task_id": "another"},
+}
+before_n = len(lines(CLOSED))
+disc.record_ledger({"session_id": "unit"}, reopened)
+disc.record_ledger({"session_id": "unit"}, other)
+check(
+    "K-T7 the same task approved anew (its plan opened again) ends the memory of its "
+    "close: one task is not recorded under two approvals; the memory of another task's "
+    "close goes only when the content differs (here: nothing of it changed, so it goes)",
+    (reopened["ledger_closed"], other["ledger_closed"], len(lines(CLOSED)) - before_n),
+    (None, None, 0),
+)
+check(
+    "K-T6 ledger.keeps_ci_verified: only the same task content and approval, and only "
+    "from CI_VERIFIED down to LOCALLY_VERIFIED",
+    [
+        ledger.keeps_ci_verified(last, new)
+        for last, new in (
+            (
+                {"state": "CI_VERIFIED", "content": "c", "approval": "a"},
+                {"state": "LOCALLY_VERIFIED", "content": "c", "approval": "a"},
+            ),
+            (
+                {"state": "CI_VERIFIED", "content": "c", "approval": "a"},
+                {"state": "LOCALLY_VERIFIED", "content": "d", "approval": "a"},
+            ),
+            (
+                {"state": "CI_VERIFIED", "content": "c", "approval": "a"},
+                {"state": "LOCALLY_VERIFIED", "content": "c", "approval": "b"},
+            ),
+            (
+                {"state": "CI_VERIFIED", "content": "c", "approval": "a"},
+                {"state": "BLOCKED", "content": "c", "approval": "a"},
+            ),
+            (
+                {"state": "CI_VERIFIED", "content": "c", "approval": "a"},
+                {"state": "IMPLEMENTED", "content": "c", "approval": "a"},
+            ),
+            (
+                {"state": "CI_VERIFIED", "content": "c", "approval": "a"},
+                {"state": "UNKNOWN", "content": "c", "approval": "a"},
+            ),
+            (
+                {"state": "LOCALLY_VERIFIED", "content": "c", "approval": "a"},
+                {"state": "IMPLEMENTED", "content": "c", "approval": "a"},
+            ),
+            (None, {"state": "LOCALLY_VERIFIED", "content": "c", "approval": "a"}),
+            (
+                {"state": "CI_VERIFIED", "content": None, "approval": "a"},
+                {"state": "LOCALLY_VERIFIED", "content": None, "approval": "a"},
+            ),
+        )
+    ],
+    [True, False, False, False, False, False, False, False, False],
+)
+shutil.rmtree(KPROJ, ignore_errors=True)
 
 for p in (ROOT, PROJ):
     shutil.rmtree(p, ignore_errors=True)

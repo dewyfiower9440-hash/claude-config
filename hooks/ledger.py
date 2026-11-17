@@ -118,6 +118,24 @@ def task_state(states: list[str]) -> str | None:
     return min(known, key=ORDER.index) if known else None
 
 
+def keeps_ci_verified(last: dict[str, Any] | None, new: dict[str, Any]) -> bool:
+    """True when `new` would only take back what `last` already says of the same content:
+    the task's last entry is CI_VERIFIED and the new one is LOCALLY_VERIFIED, for the same
+    content and approval. That happens when something else is pushed (a document) and its CI
+    result has not been read yet (root_state gives LOCALLY_VERIFIED for a result that is
+    pending, unread or unreadable): the content that CI verified is still the content. A
+    failure (BLOCKED), evidence that is gone or unknown (IMPLEMENTED, UNKNOWN), another
+    content or another approval are always recorded."""
+    if not last or not new.get("content"):
+        return False
+    return (
+        last.get("state") == CI_VERIFIED
+        and new.get("state") == LOCALLY_VERIFIED
+        and last.get("content") == new.get("content")
+        and last.get("approval") == new.get("approval")
+    )
+
+
 def content_id(digests: dict[str, str]) -> str:
     """One short value for a set of repository content hashes."""
     joined = "\n".join(f"{top}={digest}" for top, digest in sorted(digests.items()))
@@ -312,8 +330,9 @@ def read(root: str) -> tuple[list[dict[str, Any]], str | None]:
 
 def record(root: str, fields: dict[str, Any], now: float) -> bool:
     """Append an entry for the task in `fields` unless its last entry already has this
-    state on this content. False when nothing was written (no change, lock busy, storage
-    unusable); never raises for those."""
+    state on this content, or says CI_VERIFIED of this content where the new one would say
+    LOCALLY_VERIFIED (keeps_ci_verified). False when nothing was written (no change, lock
+    busy, storage unusable); never raises for those."""
     import session_store
 
     path = repo_file(root)
@@ -334,6 +353,8 @@ def record(root: str, fields: dict[str, Any], now: float) -> bool:
                 last.get(k) == entry.get(k)
                 for k in ("state", "content", "approval", "review")
             ):
+                return False
+            if keeps_ci_verified(last, entry):
                 return False
             with open(path, "ab+") as f:
                 # an interrupted write may have left a line without its end: start a new one

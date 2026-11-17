@@ -4326,32 +4326,39 @@ def record_ledger(data: dict[str, Any], state: dict[str, Any]) -> None:
     refresh_content just computed. A record only: nothing here or elsewhere reads it to
     decide, and a ledger that cannot be written changes nothing about this Stop."""
     # the approval this prompt works under (one of an earlier prompt names no task now)
-    ptr = active_approval(state, state.get("stop_prompt_id"))
-    closing = state.get("ledger_closed")
-    if (
-        ptr
-        and isinstance(closing, dict)
-        and closing.get("approval_id") == ptr.get("approval_id")
-    ):
-        ptr = None  # this very task was just closed as done: recorded as closed below
-    closed: dict[str, Any] | None = None
-    if ptr:
-        state["ledger_closed"] = None  # another task is being worked on now
-    else:
-        # no live approval: only the task this session closed as done, and only while
-        # the content it finished on is still what the repository holds
-        held = state.get("ledger_closed")
-        closed = ptr = held if isinstance(held, dict) else None
-        if (
-            closed is not None
-            and not closed.pop("pin", False)
-            and not closed.get("content")
-        ):
-            # its content was never pinned at the Stop of the close: what the repository
-            # holds now can no longer be told from later work
+    live = active_approval(state, state.get("stop_prompt_id"))
+    held = state.get("ledger_closed")
+    held = held if isinstance(held, dict) else None
+    if live and held and held.get("approval_id") == live.get("approval_id"):
+        live = None  # this very task was just closed as done: recorded as closed below
+    elif live and held and held.get("task_id") == live.get("task_id"):
+        # the same task approved anew (its plan was opened again): it is live, not closed,
+        # and two approvals of one task would write over each other at every Stop
+        state["ledger_closed"] = held = None
+    if held is not None:
+        # The task this session closed as done, while the content it finished on is still
+        # what the repository holds: its verification may still advance (a CI result read
+        # after the close), also when another task has been approved meanwhile.
+        if not held.pop("pin", False) and not held.get("content"):
+            # its content was never pinned at the close: what the repository holds now can
+            # no longer be told from later work
             state["ledger_closed"] = None
-            return
-    if not ptr or not ptr.get("task_id") or not ptr.get("base"):
+        else:
+            _record_task(data, state, held, held)
+    if live:
+        _record_task(data, state, live, None)
+
+
+def _record_task(
+    data: dict[str, Any],
+    state: dict[str, Any],
+    ptr: dict[str, Any],
+    closed: dict[str, Any] | None,
+) -> None:
+    """One ledger entry for the task of `ptr`: a live approval, or (`closed`, the same
+    object) the remembered task this session closed as done. A closed task is recorded
+    only on the content pinned at its close; any other content ends its memory."""
+    if not ptr.get("task_id") or not ptr.get("base"):
         return
     import ledger
 
@@ -4372,7 +4379,8 @@ def record_ledger(data: dict[str, Any], state: dict[str, Any]) -> None:
             )
         )
         reviews.append(review_state(state, root))
-        digests.update(tops)
+        # by root and repository: two policy roots of one repository have one digest each
+        digests.update({f"{root}|{top}": digest for top, digest in tops.items()})
     reached = ledger.task_state(states)
     content = ledger.content_id(digests)
     if closed is not None:
