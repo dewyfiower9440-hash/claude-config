@@ -593,6 +593,7 @@ K_UNSCOPED = V2PLAN.replace("## 변경 범위\n- src/**\n\n", "")
 v2_save(K_UNSCOPED)
 sk, _ = v2_approve(K_UNSCOPED)
 call("agent-start", sk, cwd=str(V2REPO), **KAGENT)
+call("agent-stop", sk, cwd=str(V2REPO), **KAGENT)  # ended: only the scope decides now
 check(
     "K-T13 an approval without a scope exists before the hand-back",
     bool((state_of(sk).get("approval") or {}).get("approval_id")),

@@ -1016,6 +1016,68 @@ check(
     ),
 )
 
+
+# ---- devenv-fix-i: the close of a task whose approval was lost and taken up again in
+# between (seen in real use 2026-11-17: the line written at the close said less than the
+# line before it, on the same content)
+def close_after_rearm(gate_again: bool, commit: bool = False) -> tuple[object, ...]:
+    s = start2()
+    edit(s, "ix.py", f"ix = {uuid.uuid4().hex!r}\n", CENV)
+    gate2(s)
+    hook("stop", s, CENV)
+    verified = gadget()
+    hook("prompt", s, CENV, prompt="and something else", prompt_id="p2")  # lost here
+    hook("stop", s, CENV, prompt_id="p2")
+    hook("prompt", s, CENV, prompt="task:gadget\ngo on and close", prompt_id="p3")
+    if commit:
+        # as in real use: what was verified untracked is committed before the gate runs again
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        subprocess.run([*git, "add", "-A"], cwd=PROJ, check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "work"], cwd=PROJ, check=True)
+        shell = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "git add -A && git commit -q -m work"},
+            "tool_use_id": uuid.uuid4().hex,
+            "prompt_id": "p3",
+        }
+        hook("pre", s, CENV, **shell)
+        hook("post", s, CENV, tool_response={}, **shell)
+    if gate_again:
+        gate2(s, "p3")
+    PLAN2FILE.write_text(PLAN2.replace("in-progress", "done"), encoding="utf-8")
+    common = {
+        "tool_name": "Bash",
+        "tool_input": {"command": "python close_plan.py"},
+        "tool_use_id": uuid.uuid4().hex,
+        "prompt_id": "p3",
+    }
+    hook("pre", s, CENV, **common)
+    hook("post", s, CENV, tool_response={}, **common)
+    at_close = gadget()
+    state = json.loads(
+        (TMPD / "claude-discipline" / f"{s}.json").read_text(encoding="utf-8")
+    )
+    hook("stop", s, CENV, prompt_id="p3")
+    return (
+        verified[-1][0],
+        at_close[-1][0],
+        at_close[-1][1] == verified[-1][1],
+        gadget()[-1][0],
+        str(state.get("approval_warning"))[:60],
+    )
+
+
+for again, commit in ((False, False), (True, False), (True, True)):
+    check(
+        "I-T8 a task closed after its approval was lost and taken up again"
+        + (", the gate run once more before the close" if again else "")
+        + (", after a commit of what was untracked" if commit else "")
+        + ": the line at the close says no less than the line before it on the same "
+        "content, nor does the Stop after it",
+        close_after_rearm(again, commit),
+        ("LOCALLY_VERIFIED", "LOCALLY_VERIFIED", True, "LOCALLY_VERIFIED", "None"),
+    )
+
 for shape, held_state in (
     ("no key (state of an older version)", {"stop_prompt_id": "p"}),
     ("not a dict", {"stop_prompt_id": "p", "ledger_closed": "gadget"}),

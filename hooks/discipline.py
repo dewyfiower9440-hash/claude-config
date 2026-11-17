@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -1861,7 +1862,7 @@ REASON_V2_INVALID = (
 )
 
 
-# == approvals.V2_FILES (test_approvals checks it): the marker, or any v2 file, means v2, so
+# == approvals.V2_FILES (test_approvals_v2 checks it): the marker, or any v2 file, means v2, so
 # deleting the marker alone never falls back to v1.
 V2_FILES = ("v2-active", "approvals.v2.json", "hwm")
 
@@ -2630,13 +2631,14 @@ def relay_task_id(prompt: str) -> str | None:
     return found.group(1) if found else None
 
 
-def started_here(state: dict[str, Any], prompt: str, bare: bool = False) -> bool:
+def started_here(state: dict[str, Any], prompt: str) -> bool:
     """True when the relayed prompt reports on something this session itself started, by
-    the hook's own record of the start: the hand-back of a subagent (SubagentStart), or the
-    completion notification of a subagent or of a background shell command (PostToolUse)."""
-    agent_id = relay_agent_id(prompt, bare)
+    the hook's own record: the hand-back of a subagent it saw start and end (SubagentStart,
+    then SubagentStop), or the completion notification of a subagent or of a background
+    shell command (PostToolUse)."""
+    agent_id = relay_agent_id(prompt)
     if agent_id is not None:
-        return started_agent(state, agent_id)
+        return finished_agent(state, agent_id)
     task_id = relay_task_id(prompt)
     if task_id is None:
         return False
@@ -2650,7 +2652,8 @@ def relay_shaped(prompt: str) -> bool:
     """A prompt that looks like a relayed agent message or task notification. UserPromptSubmit
     also runs for those (documented) and no hook field tells them from typed text, so this may
     only make the hook stricter: such a prompt keeps the turn's counted files and baselines,
-    and never keeps or grants an approval."""
+    and by its shape alone never keeps or grants an approval (what keeps one is this
+    session's own record of having started the thing reported on, see started_here)."""
     first = next((ln for ln in prompt.splitlines() if ln.strip()), "").strip().lower()
     return first.startswith(RELAY_HEADERS) or first.startswith("<task-notification>")
 
@@ -2662,21 +2665,17 @@ RELAY_NOTE = (
 AGENT_HANDBACK = re.compile(r'<agent-message from="([A-Za-z0-9_.-]+)">', re.ASCII)
 
 
-def relay_agent_id(prompt: str, bare: bool = False) -> str | None:
-    """The sender id of a subagent hand-back: the relay header, then `<agent-message
-    from="ID">` alone on the very next line. A hand-back that arrives while the session is
-    working is handed to the hook without the header line (observed 2026-11-17): that form,
-    the tag alone on the first line, counts only when `bare` says the prompt continues the
-    prompt in progress (same prompt id), never for a prompt of its own. Any other shape
-    gives None."""
+def relay_agent_id(prompt: str) -> str | None:
+    """The sender id a prompt gives as that of a subagent hand-back: `<agent-message
+    from="ID">` alone on the first non-blank line, or on the line right after the relay
+    header. The prompt hook is handed the tag without the header line, mid-work and as a
+    prompt of its own alike (observed 2026-11-17). This only reads the id: whether it is a
+    hand-back is decided by this session's own record of that subagent (finished_agent),
+    never by the text. Any other shape gives None."""
     lines = [ln.strip() for ln in prompt.splitlines() if ln.strip()]
-    if bare and lines:
-        found = AGENT_HANDBACK.fullmatch(lines[0])
-        if found:
-            return found.group(1)
-    if len(lines) < 2 or not lines[0].lower().startswith(RELAY_HEADERS[0]):
-        return None
-    found = AGENT_HANDBACK.fullmatch(lines[1])
+    if lines and lines[0].lower().startswith(RELAY_HEADERS[0]):
+        lines = lines[1:]
+    found = AGENT_HANDBACK.fullmatch(lines[0]) if lines else None
     return found.group(1) if found else None
 
 
@@ -2692,8 +2691,33 @@ def started_agent(state: dict[str, Any], agent_id: str) -> bool:
     )
 
 
+def finished_agent(state: dict[str, Any], agent_id: str) -> bool:
+    """True when this session recorded a subagent with exactly this id starting and, after
+    that, ending (SubagentStart sets `stopped` to None again when one is resumed): only
+    then can a prompt be that subagent's hand-back."""
+    agents = state.get("agents")
+    if not isinstance(agents, dict):
+        return False
+
+    def ended(entry: object) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        began, stopped = entry.get("started"), entry.get("stopped")
+        return (
+            isinstance(began, float)
+            and isinstance(stopped, float)
+            and math.isfinite(stopped)
+            and stopped >= began > 0
+        )
+
+    return any(
+        isinstance(label, str) and label.rpartition(":")[2] == agent_id and ended(entry)
+        for label, entry in agents.items()
+    )
+
+
 def v2_keep_on_relay(
-    state: dict[str, Any], cwd: str, prompt: str, bare: bool = False
+    state: dict[str, Any], cwd: str, prompt: str
 ) -> tuple[dict[str, Any] | None, str | None]:
     """(pointer, warning) for a relayed prompt under v2 (R1). The pointer survives only a
     report on something this session started (see started_here: a subagent's hand-back, or
@@ -2707,7 +2731,7 @@ def v2_keep_on_relay(
     dropped = (None, RELAY_NOTE if ptr else None)
     if not (isinstance(ptr, dict) and ptr.get("v") == 2 and ptr.get("approval_id")):
         return dropped
-    if not started_here(state, prompt, bare):
+    if not started_here(state, prompt):
         return dropped
     if _v2_root(cwd) != str(ptr.get("base")):
         return dropped
@@ -2807,13 +2831,19 @@ def already_closed(state: dict[str, Any], held: object) -> bool:
 
 
 def approval_lost_note(
-    state: dict[str, Any], task_before: object, relay: bool, mid_work: bool = False
+    state: dict[str, Any],
+    task_before: object,
+    relay: bool,
+    mid_work: bool = False,
+    not_handback: bool = False,
 ) -> str | None:
     """What to say, in this very prompt, when the session held an approval coming in and
     does not hold it (or holds another task's) going out. The decision is made elsewhere;
     this only makes sure it is never silent. None when nothing was lost. `mid_work`: the
     prompt carried the id of the prompt in progress without looking like a relay (a message
-    that arrived while the session was working), which cannot continue an approval."""
+    that arrived while the session was working), which cannot continue an approval.
+    `not_handback`: the prompt gave a sender id that is not a subagent this session saw
+    start and end."""
     if not isinstance(task_before, str) or not task_before:
         return None
     after = state.get("approval")
@@ -2837,6 +2867,11 @@ def approval_lost_note(
         why = f"프롬프트가 다른 작업(task: {task_after})을 이름함"
     elif isinstance(warning, str) and warning and warning != RELAY_NOTE:
         why = warning[:160]
+    elif not_handback:
+        why = (
+            "이 세션이 띄워 끝난 것으로 기록된 subagent의 결과 보고가 아님(없는 id이거나 "
+            "아직 끝나지 않음)"
+        )
     elif mid_work:
         why = (
             "작업 중에 도착한 메시지로는 승인을 이을 수 없음: 이 턴이 끝난 뒤 새 프롬프트의 "
@@ -2906,8 +2941,13 @@ def note_prompt_seen(
             "after": after.get("task_id") if isinstance(after, dict) else None,
         }
         seen = state.get("prompt_seen")
-        seen = seen if isinstance(seen, list) else []
-        state["prompt_seen"] = [*seen, entry][-MAX_PROMPTS_SEEN:]
+        # entries an earlier version wrote may hold the start of a prompt's text
+        kept = [
+            {k: v for k, v in old.items() if k in entry}
+            for old in (seen if isinstance(seen, list) else [])
+            if isinstance(old, dict)
+        ]
+        state["prompt_seen"] = [*kept, entry][-MAX_PROMPTS_SEEN:]
     except Exception:  # hook boundary: a diagnosis that fails changes nothing
         log.exception("discipline.prompt_seen_failed")
 
@@ -2923,7 +2963,11 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
     continues = bool(data.get("prompt_id")) and data.get("prompt_id") == state.get(
         "prompt_id"
     )
-    relay = relay_shaped(prompt) or continues
+    # The hand-back of a subagent this session started and saw end is a relay too, by that
+    # record: it arrives as a prompt of its own with a new prompt id (observed 2026-11-17).
+    sender = relay_agent_id(prompt)
+    handback = sender is not None and finished_agent(state, sender)
+    relay = relay_shaped(prompt) or continues or handback
     held_before = state.get("approval")
     task_before = held_before.get("task_id") if isinstance(held_before, dict) else None
     if not relay:  # a relay continues the user's turn: its counts and baselines stay
@@ -2939,7 +2983,7 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
         cover_valid(data, state, state.get("approval"))
         try:
             state["approval"], state["approval_warning"] = v2_keep_on_relay(
-                state, cwd, prompt, continues
+                state, cwd, prompt
             )
         except Exception as e:  # hook boundary: the approval is dropped, never a crash
             log.exception("approvals.v2_hook_failure")
@@ -2969,7 +3013,11 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
     note_prompt_seen(data, state, "relay" if relay else "user", task_before)
     told = ack_missing(data, state)  # the user's `ack-missing <path>`, if this is one
     lost = approval_lost_note(
-        state, task_before, relay, continues and not relay_shaped(prompt)
+        state,
+        task_before,
+        relay,
+        continues and not relay_shaped(prompt) and sender is None,
+        sender is not None and not handback,
     )
     if lost:
         told = "\n\n".join(x for x in (told, lost) if x)

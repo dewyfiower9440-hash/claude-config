@@ -383,7 +383,7 @@ def corpus() -> list[dict[str, Any]]:
     alpha.unlink()
     widget = PLANS / "2026-11-02-widget.md"
     widget.write_text(plan_text("widget", "blocked"), encoding="utf-8")
-    # A status is acted on when a hook sees it (test_approvals T1 does the same): without a
+    # A status is acted on when a hook sees it (test_approvals_v2 T1 does the same): without a
     # hook run while the plan is parked, the flip leaves no trace to act on.
     rearmed("task:widget")
     widget.write_text(plan_text("widget", "in-progress"), encoding="utf-8")

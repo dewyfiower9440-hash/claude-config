@@ -735,11 +735,152 @@ check(
     ((None, True, True), (None, True, True)),
 )
 check(
-    "H-T7 the same text as a prompt of its own (a new prompt id: typed or pasted by the "
-    "user) keeps nothing, and any other text under the prompt id in progress is a relay "
-    "that keeps nothing either; both are said",
-    (mid_work(handback("ag1"), "p9"), mid_work("some other text", "p1")),
-    ((None, True, 0), (None, True, 1)),
+    "H-T7 any other text under the prompt id in progress is a relay that keeps nothing, "
+    "and that is said",
+    mid_work("some other text", "p1"),
+    (None, True, 1),
+)
+
+# ---- devenv-fix-i: a hand-back is recognised by the id of a subagent this session started
+# and saw end (SubagentStart, then SubagentStop, then the prompt), whether it arrives
+# mid-work or as a prompt of its own (observed 2026-11-17: the prompt hook is handed the bare
+# tag and a new prompt id then). The prompt id and the shape of the text only assist.
+HEADER = "Another Claude session sent a message:\n"
+FOREIGN = ROOT / "foreign"
+FOREIGN.mkdir()
+subprocess.run(["git", "init", "-q"], cwd=FOREIGN, check=True)
+
+
+def handed(
+    prompt: str,
+    prompt_id: str = "p9",
+    *,
+    started: bool = True,
+    stopped: bool = True,
+    approved: bool = True,
+    closed: bool = False,
+    cwd: Path = PROJ,
+) -> tuple[object, bool, int]:
+    """Approve alpha (unless not `approved`), edit one file, record the start and the stop
+    of the subagent ag1 as told, then hand the prompt hook `prompt` under `prompt_id`:
+    (task still approved, loss said, files still counted)."""
+    s = start()
+    if approved:
+        approve(s, "alpha")
+        edit(s, "src/hb.py")
+    if started:
+        hook("agent-start", s, "p1", **AGENT)
+    if stopped:
+        hook("agent-stop", s, "p1", **AGENT)
+    if closed:
+        close_alpha()
+    try:
+        out = hook("prompt", s, prompt_id, prompt=prompt, cwd=str(cwd))
+    finally:
+        reopen_alpha()
+    state = json.loads(
+        (TMPD / "claude-discipline" / f"{s}.json").read_text(encoding="utf-8")
+    )
+    TOLD.append(said(out))
+    return task_of(s), LOST_WORDS in said(out), len(state.get("turn_files") or [])
+
+
+TOLD: list[str] = []  # what each `handed` prompt was told, in order
+NOT_HANDBACK = "subagent의 결과 보고가 아님"
+check(
+    "I-T1 the hand-back of a subagent this session started and saw end, arriving as a "
+    "prompt of its own (new prompt id, bare tag): the approval is kept, nothing is said, "
+    "the turn's counts stay",
+    handed(handback("ag1")),
+    ("alpha", False, 1),
+)
+check(
+    "I-T2 the same text while that subagent has not ended (no SubagentStop recorded): a "
+    "user prompt, the approval ends, said at once",
+    (handed(handback("ag1"), stopped=False), NOT_HANDBACK in TOLD[-1]),
+    ((None, True, 0), True),
+)
+check(
+    "I-T3 an id this session never started: a user prompt, the approval ends, said at once",
+    (
+        handed(handback("zz9")),
+        NOT_HANDBACK in TOLD[-1],
+        handed(handback("ag1"), started=False, stopped=False),
+        NOT_HANDBACK in TOLD[-1],
+    ),
+    ((None, True, 0), True, (None, True, 0), True),
+)
+check(
+    "I-T4 mid-work (the prompt id in progress) the rule is the same: only a subagent that "
+    "ended keeps the approval",
+    (handed(handback("ag1"), "p1"), handed(handback("ag1"), "p1", stopped=False)),
+    (("alpha", False, 1), (None, True, 1)),
+)
+check(
+    "I-T5 with the relay header line too: kept after the stop, not before it",
+    (
+        handed(HEADER + handback("ag1")),
+        handed(HEADER + handback("ag1"), stopped=False),
+        handed(HEADER + handback("zz9")),
+    ),
+    (("alpha", False, 1), (None, True, 1), (None, True, 1)),
+)
+check(
+    "I-T6 the conditions for keeping are as before: not in another git root, not a plan "
+    "closed meanwhile (told as finished, not as lost), and a hand-back never creates an "
+    "approval",
+    (
+        handed(handback("ag1"), cwd=FOREIGN)[0],
+        handed(handback("ag1"), closed=True)[:2],
+        "done으로 닫혀" in TOLD[-1],
+        handed(handback("ag1"), approved=False),
+        TOLD[-1],
+    ),
+    (None, (None, False), True, (None, False, 0), ""),
+)
+check(
+    "I-T7 the tag counts only alone on the first line: after other text, with text on its "
+    "line, or with an id of other characters it is an ordinary prompt",
+    (
+        handed("see this\n" + handback("ag1")),
+        handed(handback("ag1").replace(">\n", "> and more\n", 1)),
+        handed(handback("ag 1")),
+    ),
+    ((None, True, 0), (None, True, 0), (None, True, 0)),
+)
+
+# ---- devenv-fix-i: entries an earlier version wrote into prompt_seen (they had a `head`
+# field with the masked start of the text) lose every field that is not a shape
+s = start()
+state_file = TMPD / "claude-discipline" / f"{s}.json"
+state = json.loads(state_file.read_text(encoding="utf-8"))
+state["prompt_seen"] = [
+    {
+        "at": 1.0,
+        "keys": ["prompt"],
+        "prompt_id": "old",
+        "chars": 9,
+        "kind": "user",
+        "before": None,
+        "after": None,
+        "head": ["leftover words of a prompt"],
+    },
+    "not an entry",
+]
+state_file.write_text(json.dumps(state), encoding="utf-8")
+hook("prompt", s, "p2", prompt="next prompt")
+state_text = state_file.read_text(encoding="utf-8")
+seen = json.loads(state_text).get("prompt_seen", [])
+check(
+    "I-T9 prompt_seen keeps only the fields of a shape: an old entry's text is gone with "
+    "the next prompt, the entry itself stays, and what is not an entry is dropped",
+    (
+        "leftover" in state_text,
+        '"head"' in state_text,
+        [e.get("prompt_id") for e in seen if isinstance(e, dict)][-2:],
+        all(isinstance(e, dict) for e in seen),
+    ),
+    (False, False, ["old", "p2"], True),
 )
 
 for p in (ROOT, PROJ):
