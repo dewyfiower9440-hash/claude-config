@@ -17,6 +17,10 @@ jobs:
           powershell -NoProfile -Command "Install-Module PSScriptAnalyzer -Force -Scope CurrentUser"
       - name: Quality gate (same command as the local gate in CLAUDE.md)
         shell: pwsh
+        env:
+          # The runner has few cores and no 600 s limit: fewer modules at a time keeps each
+          # one fast enough for the time budgets its tests rely on. Locally the default runs.
+          GATE_WORKERS: "4"
         run: |
           $py = uv python find 3.13
           & $py -I tests/run_all.py

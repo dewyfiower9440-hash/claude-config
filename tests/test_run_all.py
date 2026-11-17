@@ -194,6 +194,25 @@ check(
     ),
     ([], True, True),
 )
+# devenv-ci-workers: CI runs the same gate command with fewer workers (the runner has few
+# cores and no 600 s limit; time budgets in tests suffer when its modules crowd each other).
+# The value is read as text here: a typo would otherwise show only on CI (workers_from_env
+# exits on a bad value).
+WORKFLOW = (HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
+    encoding="utf-8"
+)
+ci_workers = re.findall(r'^\s*GATE_WORKERS:\s*"?([^"\s#]+)"?', WORKFLOW, re.MULTILINE)
+check(
+    "the CI workflow sets GATE_WORKERS once, to a number the runner accepts, not above "
+    "the local default, and still runs the gate command itself",
+    (
+        len(ci_workers),
+        [run_all.workers_from_env({"GATE_WORKERS": v}) for v in ci_workers],
+        all(v.isdigit() and int(v) <= run_all.DEFAULT_WORKERS for v in ci_workers),
+        "-I tests/run_all.py" in WORKFLOW,
+    ),
+    (1, [4], True, True),
+)
 reset()
 script("ok_quiet", 'print("FAILURES: 0")\n')
 script("ok_show", 'print("FAILURES: 0")\n')
