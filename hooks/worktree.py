@@ -83,21 +83,66 @@ def toplevel(path: str) -> str | None:
     return os.path.normpath(out.strip()) if out else None
 
 
+EXCLUDE_KEY = ".git/info/exclude"  # the map's entry for the repository's exclude file
+GITLINK = "160000"  # the index mode of a submodule
+
+
+def exclude_file(top: str) -> str | None:
+    """Path of the repository's info/exclude as seen from the work tree `top` (a linked
+    work tree and a submodule keep it in the repository they belong to), without a git
+    call; None when it cannot be told."""
+    dot_git = os.path.join(top, ".git")
+    if os.path.isdir(dot_git):
+        return os.path.normpath(os.path.join(dot_git, "info", "exclude"))
+    try:
+        with open(dot_git, encoding="utf-8", errors="replace") as f:
+            first = f.readline().strip()
+        if not first.startswith("gitdir:"):
+            return None
+        git_dir = os.path.normpath(os.path.join(top, first[len("gitdir:") :].strip()))
+        common = git_dir
+        pointer = os.path.join(git_dir, "commondir")
+        if os.path.isfile(pointer):
+            with open(pointer, encoding="utf-8", errors="replace") as f:
+                common = os.path.normpath(os.path.join(git_dir, f.read().strip()))
+    except OSError:  # no .git entry, or unreadable
+        return None
+    return os.path.normpath(os.path.join(common, "info", "exclude"))
+
+
+def _exclude_hash(top: str) -> str:
+    """A hash of the names the repository hides without a .gitignore ("" when it has no
+    such file): adding one changes every digest taken before."""
+    path = exclude_file(top)
+    try:
+        with open(path or "", "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return ""
+
+
 def content_map(top: str, watch: list[str] | None = None) -> dict[str, str] | None:
     global last_error
     last_error = "unavailable"  # until the map is complete
-    index = _git(top, "ls-files", "-s", "-z")
+    index = _git(top, "ls-files", "-s", "-v", "-z")
     status = _git(top, "status", "--porcelain=v1", "-z", "-uall")
     if index is None or status is None:
         return None
     files: dict[str, str] = {}
+    touched: list[str] = []
+    gitlinks: set[str] = set()
     for entry in index.split("\0"):
         if "\t" in entry:
             meta, path = entry.split("\t", 1)
-            parts = meta.split()
-            if len(parts) == 3 and parts[2] == "0":
-                files[path] = parts[1]
-    touched: list[str] = []
+            parts = meta.split()  # <tag> <mode> <object> <stage>
+            if len(parts) == 4 and parts[3] == "0":
+                files[path] = parts[2]
+                if parts[1] == GITLINK:
+                    gitlinks.add(path)
+                elif parts[0].islower() or parts[0] == "S":
+                    # assume-unchanged / skip-worktree: `git status` does not look at
+                    # this file, so its content is hashed here like a changed one's.
+                    touched.append(path)
     records = status.split("\0")
     i = 0
     while i < len(records):
@@ -116,6 +161,10 @@ def content_map(top: str, watch: list[str] | None = None) -> dict[str, str] | No
         if ignored is None:
             return None
         touched += [p for p in ignored.split("\0") if p]
+    if gitlinks & set(touched):
+        # A submodule with changes of its own (git lists it as modified): what is in it
+        # is not in this map, so the content is unknown rather than "one changed entry".
+        return None
     present = [p for p in touched if os.path.isfile(os.path.join(top, p))]
     for p in touched:
         if p not in present:
@@ -131,6 +180,9 @@ def content_map(top: str, watch: list[str] | None = None) -> dict[str, str] | No
     if len(files) > MAX_FILES:
         last_error = "too_large"
         return None
+    hidden = _exclude_hash(top)
+    if hidden:
+        files[EXCLUDE_KEY] = hidden
     last_error = ""
     return files
 
@@ -201,17 +253,32 @@ def tree_map(top: str, rev: str) -> dict[str, str] | None:
 
 
 # ---------------------------------------------------------------- pure helpers
+DOC_EXT = ("", ".md", ".txt", ".rst", ".adoc")
+
+
 def relevant(path: str) -> bool:
-    """Whether a change to `path` can change behaviour (docs/, READMEs and media cannot)."""
+    """Whether a change to `path` can change behaviour. What cannot: media, files named
+    like a document (README, LICENSE, ...) that are documents by their suffix too, and the
+    repository's top-level docs/ folder except for source in it (docs/conf.py). A folder
+    named docs deeper in the tree (src/docs/handler.py) is code like any other."""
     low = path.lower().replace("\\", "/")
     name = low.rsplit("/", 1)[-1]
-    if low.startswith("docs/") or "/docs/" in low or low.endswith(NON_CODE_EXT):
+    stem, dot, suffix = name.partition(".")
+    if low.endswith(NON_CODE_EXT):
         return False
-    return name.split(".", 1)[0] not in NON_CODE_NAMES
+    if low.startswith("docs/") and not low.endswith(SOURCE_EXT):
+        return False
+    return not (stem in NON_CODE_NAMES and (dot + suffix) in DOC_EXT)
 
 
 def under(path: str, prefix: str) -> bool:
-    return not prefix or path == prefix or path.startswith(prefix.rstrip("/") + "/")
+    # the repository's exclude file belongs to every project in it
+    return (
+        not prefix
+        or path == EXCLUDE_KEY
+        or path == prefix
+        or path.startswith(prefix.rstrip("/") + "/")
+    )
 
 
 def digest(files: dict[str, str], prefix: str = "") -> str:

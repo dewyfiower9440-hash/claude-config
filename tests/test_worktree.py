@@ -591,6 +591,128 @@ check(
     True,
 )
 
+# ---- devenv-final 13: what the content digest must not miss
+sys.path.insert(0, str(HOOK.parent))
+import worktree as wt
+
+RELEVANT = {
+    # a folder named docs inside the source tree is code
+    "src/docs/handler.py": True,
+    "app/docs/api.ts": True,
+    "packages/x/docs/guide.md": True,
+    # source below the top-level docs folder (sphinx conf, a build script) is code
+    "docs/conf.py": True,
+    "docs/build.ps1": True,
+    # a module named like a document is code
+    "readme.py": True,
+    "src/license.ts": True,
+    "authors.json": True,
+    "tools/changelog.toml": True,
+    # documents and media stay out
+    "docs/guide.md": False,
+    "docs/plans/2026-11-18-x.md": False,
+    "README.md": False,
+    "LICENSE": False,
+    "sub/CHANGELOG.txt": False,
+    "NOTICE.rst": False,
+    "logo.png": False,
+}
+check(
+    "K-T1 relevant(): named like a document only without a source suffix; docs/ only at "
+    "the top and never for source",
+    {p: wt.relevant(p) for p in RELEVANT},
+    RELEVANT,
+)
+BITS = WORK / "bits"
+(BITS / "src").mkdir(parents=True)
+
+
+def bgit(*args: str) -> str:
+    return subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+        cwd=BITS,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+bgit("init", "-q")
+for name in ("a.py", "b.py", "c.py"):
+    (BITS / "src" / name).write_text("x = 0\n", encoding="utf-8")
+bgit("add", "-A")
+bgit("commit", "-q", "-m", "base")
+base = wt.digest(wt.content_map(str(BITS)) or {})
+bgit("update-index", "--assume-unchanged", "src/a.py")
+(BITS / "src" / "a.py").write_text("x = 1\n", encoding="utf-8")
+after_a = wt.digest(wt.content_map(str(BITS)) or {})
+bgit("update-index", "--skip-worktree", "src/b.py")
+(BITS / "src" / "b.py").write_text("x = 2\n", encoding="utf-8")
+after_b = wt.digest(wt.content_map(str(BITS)) or {})
+check(
+    "K-T2 a change git is told not to look at (assume-unchanged, skip-worktree) is seen",
+    (base != after_a, after_a != after_b, bgit("status", "--porcelain")),
+    (True, True, ""),
+)
+(BITS / "src" / "b.py").unlink()
+check(
+    "K-T2 ... and so is its deletion",
+    "src/b.py" in (wt.content_map(str(BITS)) or {"src/b.py": ""}),
+    False,
+)
+# A file that is excluded before it exists is never seen by git: what can be seen is that
+# the list of hidden names changed, and a digest taken before that no longer holds.
+before_hiding = wt.digest(wt.content_map(str(BITS)) or {})
+(BITS / ".git" / "info").mkdir(exist_ok=True)
+with open(BITS / ".git" / "info" / "exclude", "a", encoding="utf-8") as f:
+    f.write("\nsrc/hidden.py\n")
+hiding = wt.digest(wt.content_map(str(BITS)) or {})
+(BITS / "src" / "hidden.py").write_text("h = 1\n", encoding="utf-8")
+check(
+    "K-T3 a name added to .git/info/exclude changes the digest; the file it hides "
+    "afterwards is the limit of what git shows",
+    (before_hiding != hiding, hiding == wt.digest(wt.content_map(str(BITS)) or {})),
+    (True, True),
+)
+LINKED = WORK / "bits-linked"
+bgit("worktree", "add", "-q", "--detach", str(LINKED))
+check(
+    "K-T3 ... also read from a linked work tree (the exclude file is the repository's)",
+    wt.exclude_file(str(LINKED)) == wt.exclude_file(str(BITS))
+    and os.path.isfile(wt.exclude_file(str(LINKED)) or ""),
+    True,
+)
+INNER = WORK / "inner-src"
+INNER.mkdir()
+subprocess.run(["git", "init", "-q"], cwd=INNER, check=True)
+(INNER / "m.py").write_text("m = 0\n", encoding="utf-8")
+subprocess.run(["git", "add", "-A"], cwd=INNER, check=True)
+subprocess.run(
+    [
+        "git",
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "m",
+    ],
+    cwd=INNER,
+    check=True,
+)
+bgit("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(INNER), "vendor")
+bgit("commit", "-q", "-m", "submodule")
+clean = wt.content_map(str(BITS))
+(BITS / "vendor" / "m.py").write_text("m = 1\n", encoding="utf-8")
+dirty = wt.content_map(str(BITS))
+check(
+    "K-T4 a clean submodule is one entry of the map; a dirty one makes the content unknown",
+    (clean is not None and "vendor" in clean, dirty, wt.last_error),
+    (True, None, "unavailable"),
+)
+
 remove_tree(WORK)
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

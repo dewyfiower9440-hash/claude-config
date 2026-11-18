@@ -1214,6 +1214,45 @@ check(
     _d.ignored_path({}, str(TMP / "plainC" / "a\0b" / "x.py"), "C:\\"),
     False,
 )
+# devenv-final 13: Claude's own folders are the ones under the home's .claude, not any
+# folder of a project that happens to be named like them.
+_HOME = _d.os.path.expanduser("~")
+check(
+    "K-T5 a project's own .claude/plans, .claude/todos or memory folder holds code like "
+    "any other folder",
+    [
+        _d.ignored_path({}, p, "C:\\")
+        for p in (
+            "C:/dev/proj/.claude/plans/tool.py",
+            "C:/dev/proj/.claude/todos/x.json",
+            "C:/dev/proj/.claude/projects/a/b.py",
+            "C:/dev/proj/src/memory/notes.md",
+            "C:/dev/proj/memory/schema.md",
+        )
+    ],
+    [False] * 5,
+)
+check(
+    "K-T5 ... the home's are still out of scope (plans, todos, transcripts, memory)",
+    [
+        _d.ignored_path({}, _d.os.path.join(_HOME, ".claude", *parts), "C:\\")
+        for parts in (
+            ("plans", "x.md"),
+            ("todos", "a.json"),
+            ("projects", "C--dev-x", "s.jsonl"),
+            ("projects", "C--dev-x", "memory", "note.md"),
+        )
+    ],
+    [True] * 4,
+)
+check(
+    "K-T5 ... and the rest of the home's .claude (hooks, settings) is code",
+    [
+        _d.ignored_path({}, _d.os.path.join(_HOME, ".claude", *parts), "C:\\")
+        for parts in (("hooks", "guard.py"), ("settings.json",), ("memory", "x.md"))
+    ],
+    [False] * 3,
+)
 WT_X = TMP / "wtX"
 subprocess.run(
     ["git", "worktree", "add", "-q", "--detach", str(WT_X)], cwd=REPO_A, check=True

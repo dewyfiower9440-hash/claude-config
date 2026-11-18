@@ -115,14 +115,19 @@ CODE_EXT = {
 # Files that never count toward the per-turn limit or the verification requirement: Claude's
 # own transcripts/plans/todos/memory, and scratch files under %TEMP% (see ignored_path: a git
 # working tree under %TEMP%, such as a scratch worktree, is code like any other repository).
+# "Claude's own" means under the home's .claude (transcripts and memory live in projects/):
+# a project's own `.claude/plans/` or `memory/` folder holds files like any other folder.
+_OWN = (
+    "^"
+    + r"[\\/]".join(
+        re.escape(part) for part in re.split(r"[\\/]+", os.path.expanduser("~")) if part
+    )
+    + r"[\\/]\.claude[\\/](projects|plans|todos)[\\/]"
+)
 IGNORED_PATH = re.compile(
-    r"([\\/]AppData[\\/]Local[\\/]Temp[\\/])|([\\/]\.claude[\\/](projects|plans|todos)[\\/])|([\\/]memory[\\/][^\\/]+\.md$)",
-    re.IGNORECASE,
+    r"([\\/]AppData[\\/]Local[\\/]Temp[\\/])|(" + _OWN + ")", re.IGNORECASE
 )
-CLAUDE_OWN_PATH = re.compile(
-    r"([\\/]\.claude[\\/](projects|plans|todos)[\\/])|([\\/]memory[\\/][^\\/]+\.md$)",
-    re.IGNORECASE,
-)
+CLAUDE_OWN_PATH = re.compile(_OWN, re.IGNORECASE)
 
 
 def absolute(path: str, cwd: str) -> str:
@@ -3652,6 +3657,9 @@ def refresh_content(state: dict[str, Any]) -> None:
                 changed_roots.setdefault(policy["root"], policy)
         push = state.get("pushes", {}).get(top)
         pushed_tree = worktree.tree_map(top, push["sha"]) if push else None
+        if pushed_tree is not None and worktree.EXCLUDE_KEY in now:
+            # not part of any commit: what the work tree hides is compared with itself
+            pushed_tree[worktree.EXCLUDE_KEY] = now[worktree.EXCLUDE_KEY]
         for root, policy in changed_roots.items():
             prefix = (worktree.rel_prefix(top, root) or "") if root else ""
             entry = content.setdefault(
