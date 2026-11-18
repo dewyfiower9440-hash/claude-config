@@ -84,7 +84,9 @@ def state_file(session: str) -> dict:
     )
 
 
-PB = Path("C:/dev/_disc_d3")  # outside %TEMP%; test_discipline.py has its own
+# Under the gate every run has a folder of its own (run_all.GATE_WORK_ROOT); alone, as before.
+WORK_ROOT = Path(os.environ.get("GATE_WORK_ROOT", "C:/dev"))
+PB = WORK_ROOT / "_disc_d3"  # outside %TEMP%; test_discipline.py has its own
 rm_tree(PB)
 PB.mkdir(parents=True)
 

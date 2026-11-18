@@ -24,9 +24,11 @@ HOOK = HERE.parent / "hooks" / "discipline.py"
 ROOT = HERE / "_tmp_sstore"
 TMPD = ROOT / "tmp"
 STATE = TMPD / "claude-discipline"
-PROJ = Path("C:/dev/_sstore_proj")  # outside %TEMP%: edits there are counted
-PROJ3 = Path("C:/dev/_sstore_proj3")  # a second project with its own gate
-NOGATE = Path("C:/dev/_sstore_nogate")  # no CLAUDE.md: no declared gate
+# Under the gate every run has a folder of its own (run_all.GATE_WORK_ROOT); alone, as before.
+WORK_ROOT = Path(os.environ.get("GATE_WORK_ROOT", "C:/dev"))
+PROJ = WORK_ROOT / "_sstore_proj"  # outside %TEMP%: edits there are counted
+PROJ3 = WORK_ROOT / "_sstore_proj3"  # a second project with its own gate
+NOGATE = WORK_ROOT / "_sstore_nogate"  # no CLAUDE.md: no declared gate
 for p in (ROOT, PROJ, PROJ3, NOGATE):
     shutil.rmtree(p, ignore_errors=True)
 TMPD.mkdir(parents=True)
@@ -905,7 +907,7 @@ check(
 bash(s, GATE, "g17")
 check("S-T17 ... gate passed after the fix: cleared", blocked_for_reset(s), False)
 
-BAD = Path("C:/dev/_sstore_badutf")  # its CLAUDE.md is not UTF-8
+BAD = WORK_ROOT / "_sstore_badutf"  # its CLAUDE.md is not UTF-8
 shutil.rmtree(BAD, ignore_errors=True)
 (BAD / "src").mkdir(parents=True)
 (BAD / "CLAUDE.md").write_bytes(b"## Verification\n- gate: `\xff\xfe broken`\n")
@@ -1085,8 +1087,8 @@ check(
 )
 
 AUDIT = ROOT / "home" / "state-recovery.jsonl"
-FIX = Path("C:/dev/_sstore_fix")  # CLAUDE.md broken first, repaired later
-GONE = Path("C:/dev/_sstore_gone")  # a repository that no longer exists
+FIX = WORK_ROOT / "_sstore_fix"  # CLAUDE.md broken first, repaired later
+GONE = WORK_ROOT / "_sstore_gone"  # a repository that no longer exists
 for p in (FIX, GONE):
     shutil.rmtree(p, ignore_errors=True)
 (FIX / "src").mkdir(parents=True)
@@ -1259,7 +1261,7 @@ check(
 # ---- S-T32 recovery keeps every place the old state knew as an unverified root of the
 # marker (no structured value is carried, so nothing malformed can come along), plus the
 # flat session-only safety records: pending revocations and the rollback witness
-MISSED = Path("C:/dev/_sstore_misseddir")
+MISSED = WORK_ROOT / "_sstore_misseddir"
 s = uuid.uuid4().hex
 hook("prompt", s, prompt_id="p", prompt="work")
 root3 = find_policy(str(PROJ3 / "_"))["root"]

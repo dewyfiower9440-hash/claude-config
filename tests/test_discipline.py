@@ -66,7 +66,9 @@ def edit(session: str, path: str, old: str, new: str, mode: str = "pre") -> dict
 
 
 # Paths outside %TEMP% so they are not ignored.
-PROJ = "C:/dev/_disc_test_project"
+# Under the gate every run has a folder of its own (run_all.GATE_WORK_ROOT); alone, as before.
+WORK_ROOT = Path(os.environ.get("GATE_WORK_ROOT", "C:/dev"))
+PROJ = (WORK_ROOT / "_disc_test_project").as_posix()
 
 # ---- weakening
 s = uuid.uuid4().hex
@@ -811,7 +813,7 @@ check(
 
 # ---- P0-04b: path classes. A git worktree under %TEMP% is code like any repository; only a
 # non-git temp folder (scratch) stays out of scope. Links never move a path into or out of it.
-PB = Path("C:/dev/_disc_p004b")  # outside %TEMP%
+PB = WORK_ROOT / "_disc_p004b"  # outside %TEMP%
 
 
 def rm_tree(p: Path) -> None:

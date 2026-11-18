@@ -21,7 +21,9 @@ sys.stdout.reconfigure(errors="backslashreplace")
 HERE = Path(__file__).resolve().parent
 HOOKS = HERE.parent / "hooks"
 ROOT = HERE / "_tmp_ledger"
-PROJ = Path("C:/dev/_ledger_proj")
+# Under the gate every run has a folder of its own (run_all.GATE_WORK_ROOT); alone, as before.
+WORK_ROOT = Path(os.environ.get("GATE_WORK_ROOT", "C:/dev"))
+PROJ = WORK_ROOT / "_ledger_proj"
 for p in (ROOT, PROJ):
     shutil.rmtree(p, ignore_errors=True)
 TMPD = ROOT / "tmp"
@@ -1109,7 +1111,7 @@ for shape, held_state in (
 # A repository with a GitHub remote and `ci: required`, a fake `gh` first on PATH (the one
 # of test_ci_status) and the real order of events: work, gate, commit, push, CI read, close,
 # the push of the closing document, Stop, CI read, Stop.
-KPROJ = Path("C:/dev/_ledger_ci_proj")
+KPROJ = WORK_ROOT / "_ledger_ci_proj"
 shutil.rmtree(KPROJ, ignore_errors=True)
 (KPROJ / "src").mkdir(parents=True)
 (KPROJ / "docs" / "plans").mkdir(parents=True)

@@ -123,6 +123,9 @@ MEASURED_S = {
     "test_risk": 58,
     "test_review_binding": 49,
 }
+WORK_PARENT = Path(
+    "C:/dev"
+)  # where a run's `_gate-<pid>-*` folder is made (see run_tests)
 VERDICT = "FAILURES: 0"  # the line every module prints last when all its checks passed
 TIMED_OUT = -9  # run_one's exit code for a module ended at its time limit
 KILL_WAIT_S = 15
@@ -246,7 +249,18 @@ def run_tests(names: list[str], workers: int, tests_dir: Path = ROOT / "tests") 
     rank = {n: i for i, n in enumerate(SLOW_FIRST)}
     order = sorted(names, key=lambda n: rank.get(n, len(SLOW_FIRST)))
     temp = tempfile.mkdtemp(prefix="claude-gate-")
-    env = {**os.environ, "TEMP": temp, "TMP": temp, "TMPDIR": temp}
+    # The project folders the modules build (outside %TEMP%, where the hooks count edits)
+    # also belong to this run alone: two gates at once do not delete each other's, and
+    # nothing is left under the projects folder (devenv-final 5).
+    WORK_PARENT.mkdir(parents=True, exist_ok=True)
+    work = tempfile.mkdtemp(prefix=f"_gate-{os.getpid()}-", dir=WORK_PARENT)
+    env = {
+        **os.environ,
+        "TEMP": temp,
+        "TMP": temp,
+        "TMPDIR": temp,
+        "GATE_WORK_ROOT": work,
+    }
     started = time.monotonic()
     try:
         with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -262,9 +276,12 @@ def run_tests(names: list[str], workers: int, tests_dir: Path = ROOT / "tests") 
             }
             results = {n: f.result() for n, f in futures.items()}
     finally:
-        shutil.rmtree(temp, onexc=_retry_writable)
-        if os.path.exists(temp):  # something still holds a file: not a test result
-            print(f"NOTICE: temp folder not fully removed: {temp}", flush=True)
+        for folder, what in ((temp, "temp"), (work, "work")):
+            shutil.rmtree(folder, onexc=_retry_writable)
+            if os.path.exists(
+                folder
+            ):  # something still holds a file: not a test result
+                print(f"NOTICE: {what} folder not fully removed: {folder}", flush=True)
     wall = time.monotonic() - started
     ok = True
     for n in names:

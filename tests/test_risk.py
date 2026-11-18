@@ -22,7 +22,9 @@ sys.stdout.reconfigure(errors="backslashreplace")
 HERE = Path(__file__).resolve().parent
 HOOKS = HERE.parent / "hooks"
 ROOT = HERE / "_tmp_risk"
-PROJ = Path("C:/dev/_risk_proj")
+# Under the gate every run has a folder of its own (run_all.GATE_WORK_ROOT); alone, as before.
+WORK_ROOT = Path(os.environ.get("GATE_WORK_ROOT", "C:/dev"))
+PROJ = WORK_ROOT / "_risk_proj"
 for p in (ROOT, PROJ):
     shutil.rmtree(p, ignore_errors=True)
 TMPD = ROOT / "tmp"

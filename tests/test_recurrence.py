@@ -22,8 +22,10 @@ sys.stdout.reconfigure(errors="backslashreplace")
 HERE = Path(__file__).resolve().parent
 HOOKS = HERE.parent / "hooks"
 ROOT = HERE / "_tmp_recurrence"
-PROJ = Path("C:/dev/_recur_proj")
-OTHER = Path("C:/dev/_recur_other")
+# Under the gate every run has a folder of its own (run_all.GATE_WORK_ROOT); alone, as before.
+WORK_ROOT = Path(os.environ.get("GATE_WORK_ROOT", "C:/dev"))
+PROJ = WORK_ROOT / "_recur_proj"
+OTHER = WORK_ROOT / "_recur_other"
 for p in (ROOT, PROJ, OTHER):
     shutil.rmtree(p, ignore_errors=True)
 TMPD = ROOT / "tmp"

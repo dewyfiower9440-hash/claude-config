@@ -21,7 +21,9 @@ HERE = Path(__file__).resolve().parent
 HOOKS = HERE.parent / "hooks"
 HOME, WITNESS = HERE / "_tmp_scope_home", HERE / "_tmp_scope_w"
 # No folder above ROOT holds a .git entry, so ROOT/data is certainly outside any repository.
-ROOT = Path("C:/dev/_scope_t")
+# Under the gate every run has a folder of its own (run_all.GATE_WORK_ROOT); alone, as before.
+WORK_ROOT = Path(os.environ.get("GATE_WORK_ROOT", "C:/dev"))
+ROOT = WORK_ROOT / "_scope_t"
 A, B, DATA = ROOT / "a", ROOT / "b", ROOT / "data"
 
 

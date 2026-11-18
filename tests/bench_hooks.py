@@ -29,7 +29,7 @@ HERE = Path(__file__).resolve().parent
 HOOKS = HERE.parent / "hooks"
 # Outside every git repository (under ~/.claude the fixtures would resolve to this repo) and
 # outside %TEMP% (discipline.IGNORED_PATH does not count edits there).
-TMP = Path("C:/dev/_bench-hooks-tmp")
+TMP = Path(os.environ.get("GATE_WORK_ROOT", "C:/dev")) / "_bench-hooks-tmp"
 HOME = TMP / "approval_home"
 OUT_DIR = HERE / "_baseline"
 RUNS = 20

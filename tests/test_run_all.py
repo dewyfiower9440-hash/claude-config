@@ -194,6 +194,36 @@ check(
     (False, True),
 )
 
+# devenv-final 5: the project folders of the modules are this run's own too
+script(
+    "work_probe",
+    "import os, sys\n"
+    "from pathlib import Path\n"
+    "root = Path(os.environ['GATE_WORK_ROOT'])\n"
+    "proj = root / '_probe_proj' / '.git' / 'objects'\n"
+    "proj.mkdir(parents=True)\n"
+    "(proj / 'ab').write_text('x')\n"
+    "os.chmod(proj / 'ab', 0o444)  # like git's object files\n"
+    "(Path(sys.argv[0]).parent / 'work.result').write_text(str(root))\n"
+    "print('FAILURES: 0')\n",
+)
+ok, out = run(["work_probe"], workers=1)
+seen_work = Path((TMP / "work.result").read_text())
+check(
+    "G-T11 a module gets a work folder made for this run, under the projects folder",
+    (
+        ok,
+        seen_work.name.startswith(f"_gate-{os.getpid()}-"),
+        os.path.normcase(seen_work.parent) == os.path.normcase(run_all.WORK_PARENT),
+    ),
+    (True, True, True),
+)
+check(
+    "G-T11 ... and it is gone afterwards, with what the module left (read-only too)",
+    (seen_work.exists(), "NOTICE" in out),
+    (False, False),
+)
+
 check(
     "GATE_WORKERS unset -> default",
     run_all.workers_from_env({}),
@@ -253,13 +283,22 @@ check(
 # Every string that names such a folder counts, however the path around it is built
 # (`HERE / "_tmp_x"`, `Path(__file__).resolve().parent / "_tmp_x"`, `"C:/dev/_x"`, ...).
 # This file is left out: it names other modules' folders as data.
-WORK_FOLDER = re.compile(r'"(_tmp[\w-]*)"|"(C:/dev/_[\w-]+)"')
+WORK_FOLDER = re.compile(r'"(_tmp[\w-]*)"|"(C:/dev/_[\w-]+)"|WORK_ROOT / "(_[\w-]+)"')
 users: dict[str, set[str]] = {}
+fixed_paths: list[str] = []
 for module in sorted(HERE.glob("test_*.py")):
     if module.name == Path(__file__).name:
         continue
-    for a, b in WORK_FOLDER.findall(module.read_text(encoding="utf-8")):
-        users.setdefault((a or b).lower(), set()).add(module.name)
+    for a, b, c in WORK_FOLDER.findall(module.read_text(encoding="utf-8")):
+        users.setdefault((a or b or c).lower(), set()).add(module.name)
+        fixed_paths += [f"{module.name}: {b}"] if b else []
+# A name only (the folder a past command is judged from): never created, nothing to isolate.
+fixed_paths.remove("test_guard_corpus.py: C:/dev/_nobody_s_folder")
+check(
+    'G-T10 no module names a fixed folder under C:/dev (WORK_ROOT / "_name" instead)',
+    fixed_paths,
+    [],
+)
 check(
     "no two test modules use the same working folder",
     {name: sorted(mods) for name, mods in users.items() if len(mods) > 1},
@@ -271,9 +310,9 @@ check(
         len(users) >= 50,
         "_tmp_switch" in users,
         "_tmp_task_switch" in users,
-        "c:/dev/_switch_proj" in users,
+        "_switch_proj" in users,
         "_tmp_discipline_approvals" in users,
-        "c:/dev/_disc_test_project" in users,
+        "_disc_test_project" in users,
     ),
     (True, True, True, True, True, True),
 )
