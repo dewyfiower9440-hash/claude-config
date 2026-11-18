@@ -1,6 +1,6 @@
 ---
 name: debug
-description: Disciplined debugging protocol - reproduce, gather evidence, form ranked hypotheses, confirm the root cause, write a failing regression test, fix minimally, verify - with symptom-specific playbooks (crash, wrong output, performance, flaky, environment) and Python/Node/PowerShell debugger recipes. Use for bugs, crashes, exceptions, wrong output, slowness, flaky tests, regressions or "it doesn't work" reports.
+description: Disciplined debugging protocol - reproduce, gather evidence, form ranked hypotheses, confirm the root cause, write a failing regression test, fix minimally, verify - with symptom-specific playbooks (crash, wrong output, performance, flaky, environment) and Python/Node/PowerShell debugger recipes. Use for bugs, crashes, exceptions, wrong output, slowness, flaky tests, regressions or "it doesn't work" reports. Not for adding a feature or for a structural clean-up with no wrong behaviour (/plan, /refactor).
 argument-hint: <symptom or error>
 ---
 

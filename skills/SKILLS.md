@@ -6,22 +6,25 @@ Single source of truth for the skills in this environment. Update it whenever a 
 
 | Skill | Purpose | Source | Added |
 |---|---|---|---|
-| `/plan` | Requirements → investigation → options → step plan saved to `docs/plans/YYYY-MM-DD-<slug>.md` (status/checkboxes) → approval (ExitPlanMode) → `in-progress` | own | 2026-11-05 (rev. 2026-11-06) |
-| `/implement` | Run an approved plan file autonomously: test → implement → gate → self-review → tick + commit per step; stops on 4 defined exceptions; review, `status: done`, Gotchas learning loop | own | 2026-11-05 (rev. 2026-11-06) |
+| `/plan` | Requirements → investigation → options → step plan saved to `docs/plans/YYYY-MM-DD-<slug>.md` (frontmatter `status`/`task`, checkboxes) → approval (ExitPlanMode) → `in-progress` | own | 2026-11-05 (rev. 2026-11-18) |
+| `/implement` | Run an approved plan file autonomously: test → implement → gate (main session, foreground) → self-review → tick + commit per step; stops on 4 defined exceptions; review, `status: done`, Gotchas learning loop | own | 2026-11-05 (rev. 2026-11-18) |
 | `/refactor` | Behavior-preserving refactor: characterization tests, small green commits | own | 2026-11-05 |
-| `/deep-review` | Parallel code-reviewer + security-auditor + test-runner, verified and ranked findings | own | 2026-11-05 |
+| `/deep-review` | Parallel code-reviewer + security-auditor, then the gate in the main session; verified and ranked findings | own | 2026-11-05 (rev. 2026-11-18) |
+| `/release-hooks` | This repository only: work tree → gate → hook latency comparison → `merge --ff-only` into `~/.claude` → push → CI | own | 2026-11-18 |
 | `/debug` | Reproduce → playbook per symptom → hypotheses → failing test → minimal fix → verify | own | 2026-11-05 |
 | `/commit` | Self-review checklist, Conventional Commits on main, push + CI diagnosis | own | 2026-11-05 |
 | `/predeploy` | Live-vs-candidate diff, drift check, all gates → GO/NO-GO | own | 2026-11-05 |
 | `/new-project` | Scaffold Python/TS/PowerShell project with layered structure, tooling, CI | own | 2026-11-05 |
 
-Related hooks (`~/.claude/hooks/`): `session_context.py` (SessionStart: git state + in-progress plan, compact resume), `discipline.py` (plan gate, test-weakening ask, Stop verification incl. failed runs), `notify.py` (toast, skipped while discipline blocks), `guard.py`, `format_lint.py`.
+Every description ends with when not to use the skill (2026-11-18): a skill that fires on the wrong request costs more than one that is missed.
+
+Related hooks (`~/.claude/hooks/`): `session_context.py` (SessionStart: git state + in-progress plan, compact resume), `discipline.py` (plan gate, test-weakening ask, Stop verification incl. failed runs; runs the formatter of `format_lint.py` inside its post step), `handoff.py` (SessionEnd), `notify.py` (toast, skipped while discipline blocks), `guard.py`.
 
 Built-in or plugin skills used as-is: `code-review`, `simplify`, `security-review`, `skill-creator` (anthropic-skills), `claude-api`, `init`.
 
 Account-synced skills: `skills/synced/` is written by claude.ai (anthropic-skills such as docx, pdf, pptx, xlsx, docs, deep-research, browser/computer-use guides). It is gitignored and managed outside this repository; do not edit it here.
 
-Usage evidence (transcripts 2026-07-22..2026-11-07, 34 sessions): none of the own skills above has been invoked through the Skill tool yet, and `code-reviewer` ran in one session. Judge additions and pruning from real project use, not from this baseline.
+Usage evidence: in transcripts 2026-07-22..2026-11-07 (34 sessions) none of the own skills had been invoked through the Skill tool. In the final-check session of 2026-11-16 (a task that named no tool) `new-project`, `plan`, `implement` and `debug` were invoked unprompted (`docs/plans/archive/2026-11-16-devenv-p4.md`, progress record). `/skill-doctor` shows skills never invoked. Judge additions and pruning from real project use.
 
 ## Acquisition policy (what Claude does when a skill is missing)
 

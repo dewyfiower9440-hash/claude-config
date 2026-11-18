@@ -1,6 +1,6 @@
 ---
 name: commit
-description: Self-review the working changes against a checklist, split them into logical Conventional Commits on main, and (after confirmation) push and watch CI, diagnosing failures. Use when the user says commit, save my work, push, or asks for a commit message. Can also draft a PR when asked.
+description: Self-review the working changes against a checklist, split them into logical Conventional Commits on main, and (after confirmation) push and watch CI, diagnosing failures. Use when the user says commit, save my work, push, or asks for a commit message. Can also draft a PR when asked. Not for reviewing a change (/deep-review), for a release check (/predeploy), or for releasing this hooks repository (/release-hooks).
 argument-hint: [push] [pr] [hint about the change]
 ---
 
@@ -33,7 +33,7 @@ Run the project's fast checks (lint + format check + types + unit tests) unless 
   <why; what changed if not obvious; wrapped at 72>
   ```
   Types: feat, fix, refactor, perf, test, docs, build, ci, chore. Breaking: `!` plus a `BREAKING CHANGE:` footer. End the message with the attribution lines from the current system reminder, if any.
-- Commit via `-F <file>` or a heredoc so the newlines survive. Show `git log --oneline -n <k>`.
+- Commit via `git commit -F <file>` (write the message with the Write tool to a file outside the repository) so the newlines survive; never a shell heredoc (global rules, section 9). Show `git log --oneline -n <k>`.
 
 ## 5. Push + CI (only with `push` in the arguments, or after the user confirms)
 - `git push origin main`, then `gh run list -L 1 --json databaseId,status,conclusion,workflowName` and `gh run watch <id> --exit-status`.

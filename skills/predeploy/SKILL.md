@@ -1,6 +1,6 @@
 ---
 name: predeploy
-description: Pre-deploy verification gate. Diffs what will be deployed against what is live (or the last deployed tag), runs the full test/lint/type suite, a security audit and a code review, and gives a GO / NO-GO verdict. Use before any deploy, release, publish or copying dev files over live files.
+description: Pre-deploy verification gate. Diffs what will be deployed against what is live (or the last deployed tag), runs the full test/lint/type suite, a security audit and a code review, and gives a GO / NO-GO verdict. Use before any deploy, release, publish or copying dev files over live files. Not for an ordinary commit or push to main (/commit), nor a substitute for /deep-review during development.
 argument-hint: [live path or deployed ref] [dev path or ref]
 ---
 

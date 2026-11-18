@@ -1,6 +1,6 @@
 ---
 name: implement
-description: Execute an approved plan autonomously to the end - for each step write/adjust tests first, implement minimally, run the quality gate, self-review, tick the plan checkbox and commit - stopping only on defined exceptions; then review, close the plan and record lessons. Use after /plan is approved, when the user says to implement/build an agreed design, or to resume ("continue") an in-progress plan.
+description: Execute an approved plan autonomously to the end - for each step write/adjust tests first, implement minimally, run the quality gate, self-review, tick the plan checkbox and commit - stopping only on defined exceptions; then review, close the plan and record lessons. Use after /plan is approved, when the user says to implement/build an agreed design, or to resume ("continue") an in-progress plan. Not when there is no approved plan file (run /plan first) or for a one-file change with an obvious approach.
 argument-hint: [plan file or "continue"] [step number]
 ---
 
@@ -18,7 +18,7 @@ Arguments: `$ARGUMENTS`
 Proceed through all remaining steps without asking between them. For each step:
 1. **Tests first.** Add or adjust tests that express the step's acceptance criteria (happy path, boundaries, error paths). Run them and confirm the new ones fail for the expected reason (or are already-green characterization tests for a refactor step).
 2. **Implement minimally** until they pass. Follow the language rules and design principles (boundary validation, pure core, explicit errors, structured logs). No scope creep; note extra ideas for the end.
-3. **Quality gate:** the project's full lint + format check + type check + test command (see the project CLAUDE.md). Use the `test-runner` agent for long suites so the output stays out of the main context.
+3. **Quality gate:** the project's declared `gate` (its CLAUDE.md `## Verification`), run by the main session itself: verbatim, from the project root, in the foreground, as the whole command line (no pipe, `;`, redirect-and-echo or background: the hook records those as unknown). Inside a multi-step section, the tests of the modules the step touches are enough between gates; the plan says where the full gate runs. The `test-runner` agent is for diagnosis only (a long failing suite): its report is not evidence and never replaces the gate.
 4. **Self-review the diff** (`git diff`): debug prints, commented-out code, leftover TODOs, unrelated changes, missing error handling/timeouts, secrets, names. Fix before committing.
 5. **Tick and commit.** Change the step's `- [ ]` to `- [x]` in the plan file, append one line to `## 진행 기록` (`YYYY-MM-DD 단계 N: <what> — <deviation or "계획대로">`), and commit code + plan together as one Conventional Commit (`/commit` conventions). Do not push unless the approved plan's text quotes the user's decision that this task's pushes may go ahead (global rules, section 6); then follow CI to its end.
 6. **One-line progress report:** `단계 N/M 완료 — <what>, 테스트 <x passed>, 커밋 <sha>`.
@@ -32,7 +32,7 @@ Stop, leave the step unchecked, write the reason under `## 진행 기록`, and r
 Anything else (a lint fix, a missing import, a test fixture) is handled without asking. Never improvise a different design silently.
 
 ## 2. Finish
-- Run the full quality gate once more from a clean state.
+- Run the full quality gate once more from a clean state (the main session, in the foreground, as above).
 - Run the `code-reviewer` agent on the whole range (`git diff <base>..HEAD`); also `security-auditor` if auth, input handling, secrets, dependencies or CI changed. Fix CONFIRMED findings (each as its own commit), and list the PLAUSIBLE ones for the user.
 - Update docs touched by the change (README, CLAUDE.md commands, `.env.example`).
 - Set the plan frontmatter to `status: done` and commit it.

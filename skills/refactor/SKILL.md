@@ -1,6 +1,6 @@
 ---
 name: refactor
-description: Behavior-preserving refactoring - pin current behavior with characterization tests, then change structure in small verified steps (each green and committed) with no functional change. Use when the user asks to refactor, clean up, restructure, extract, rename, split modules, remove duplication or improve design without changing behavior.
+description: Behavior-preserving refactoring - pin current behavior with characterization tests, then change structure in small verified steps (each green and committed) with no functional change. Use when the user asks to refactor, clean up, restructure, extract, rename, split modules, remove duplication or improve design without changing behavior. Not when behavior is meant to change (bug fix: /debug; new behavior: /plan).
 argument-hint: <target code and goal>
 ---
 

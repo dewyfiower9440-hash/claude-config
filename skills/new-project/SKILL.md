@@ -1,6 +1,6 @@
 ---
 name: new-project
-description: Scaffold a new project under C:\dev with Python (uv), TypeScript (pnpm) or PowerShell, including lint/format/type/test tooling, GitHub Actions CI, CLAUDE.md, .env.example and optional SQLite/MSSQL MCP. Use when the user wants to start, create or set up a new project, app, tool, script or repo.
+description: Scaffold a new project under C:\dev with Python (uv), TypeScript (pnpm) or PowerShell, including lint/format/type/test tooling, GitHub Actions CI, CLAUDE.md, .env.example and optional SQLite/MSSQL MCP. Use when the user wants to start, create or set up a new project, app, tool, script or repo. Not for adding a module or tooling to a project that already exists.
 argument-hint: <name> [python|ts|ps] [sqlite] [mssql]
 ---
 
