@@ -817,6 +817,30 @@ check(
     notify.should_toast_on_stop(block_reason=None, elapsed=None),
     False,
 )
+# devenv-final 26: the toast's text goes into a single-quoted PowerShell string. It is cut
+# first and escaped afterwards; cut after escaping, a doubled quote could lose its half
+# (the string would end there and what follows would run) and an entity its end.
+check(
+    "notify: quotes stay doubled and entities whole at the cut, whatever the length",
+    (
+        [
+            notify.toast_text("x" * n + "'" * 5 + "; calc").count("'") % 2
+            for n in range(194, 202)
+        ],
+        [notify.toast_text("y" * n + "&&&").rstrip("y&amp;") for n in range(190, 202)],
+        notify.toast_text("<b>'a'&</b>"),
+    ),
+    ([0] * 8, [""] * 12, "&lt;b&gt;''a''&amp;&lt;/b&gt;"),
+)
+check(
+    "notify / discipline: a number in the environment that is not one is the default",
+    [
+        (os.environ.__setitem__("CLAUDE_T_INT", raw), m.env_int("CLAUDE_T_INT", 7))[1]
+        for m in (notify, discipline)
+        for raw in ("12", "abc", "", "-3", "1.5", "²")
+    ],
+    [12, 7, 7, 7, 7, 7] * 2,
+)
 
 # ---- P0-04b: path classes. A git worktree under %TEMP% is code like any repository; only a
 # non-git temp folder (scratch) stays out of scope. Links never move a path into or out of it.

@@ -241,6 +241,12 @@ check(
     ("x = 1\ny = 2\n", True, 0),
 )
 check(
+    "F-T9 ... what it prints on stdout is one JSON hook output (a plain line would break "
+    "every reader of the post hook's output)",
+    json.loads(r.stdout).get("hookSpecificOutput", {}).get("hookEventName"),
+    "PostToolUse",
+)
+check(
     "F-T9 ... and still records the edit (the formatter did not replace the hook's work)",
     any("via_post.py" in str(f) for f in state.get("turn_files", [])),
     True,

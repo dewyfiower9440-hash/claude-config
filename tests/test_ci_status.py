@@ -365,6 +365,22 @@ check(
 )
 git(REPO, "checkout", "--", "src/m.py")
 
+# ---- devenv-final 26: a push is git's subcommand `push`, not the word among its arguments
+s = locally_verified()
+bash(s, "git stash push -m wip")
+bash(s, "git log --oneline push-notes")
+check(
+    "`git stash push` and a ref named like it are no push of the branch",
+    state(s).get("pushes") or {},
+    {},
+)
+bash(s, "git -c core.quotepath=false push origin main")
+check(
+    "`git -c x=y push` is one",
+    [p.get("sha") for p in (state(s).get("pushes") or {}).values()],
+    [SHA],
+)
+
 # ---- ci: none needs no CI
 (REPO / "CLAUDE.md").write_text(
     "# demo\n\n## Verification\n- gate: `uv run pytest -q`\n- ci: none\n",

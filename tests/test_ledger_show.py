@@ -329,6 +329,33 @@ check(
     (3, True, 3, False),
 )
 
+# ---- devenv-final 26: setting the ledger aside is the user's, at a terminal
+before = sorted(x.name for x in LHOME.rglob("*") if x.is_file())
+rc, out = run("rotate")
+check(
+    "S12 rotate from a tool call (no terminal): refused, nothing moved",
+    (rc, sorted(x.name for x in LHOME.rglob("*") if x.is_file()) == before),
+    (2, True),
+)
+ledger.secret(LHOME, create=True)
+ledger.record(str(PROJ), fields("widget", "IMPLEMENTED"), NOW)
+old_file = ledger.repo_file(str(PROJ))
+kept = ledger.rotate(str(PROJ), NOW)
+ledger.record(str(PROJ), fields("widget", "LOCALLY_VERIFIED", content="c1"), NOW + 1)
+entries, problem = ledger.read(str(PROJ))
+check(
+    "S12 rotate (the function behind it): the old file is kept under a dated name, the "
+    "next record starts a new ledger that is intact; no ledger to rotate is no error",
+    (
+        kept is not None and kept.is_file() and ledger.ROTATED in kept.name,
+        old_file.is_file(),
+        len(entries),
+        problem,
+        ledger.rotate(str(PLAIN), NOW),
+    ),
+    (True, True, 1, None, None),
+)
+
 for p in (ROOT, PROJ, PLAIN):
     shutil.rmtree(p, ignore_errors=True)
 print("FAILURES:", fails)

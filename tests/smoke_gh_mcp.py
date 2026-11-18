@@ -1,5 +1,9 @@
 import json
 import subprocess
+import threading
+
+# a server that never answers ends here (the read below then fails), not never
+WAIT_S = 60
 
 p = subprocess.Popen(
     ["cmd", "/c", r"C:\dev\tools\github-mcp-server\github-mcp.cmd"],
@@ -10,6 +14,9 @@ p = subprocess.Popen(
     encoding="utf-8",
 )
 assert p.stdin and p.stdout
+watchdog = threading.Timer(WAIT_S, p.kill)
+watchdog.daemon = True
+watchdog.start()
 
 
 def send(m: dict) -> dict | None:

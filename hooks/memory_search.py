@@ -202,9 +202,14 @@ def shown(text: str) -> str:
     here = str(Path(__file__).resolve().parent)
     if here not in sys.path:
         sys.path.insert(0, here)
+    import unicodedata
+
     from redact import redact
 
-    return _CONTROL.sub("", redact(text))[:SHOWN_CHARS]
+    plain = _CONTROL.sub("", redact(text))
+    # format characters too (direction marks, zero-width characters): a memory written
+    # with them could show another text than it holds
+    return "".join(ch for ch in plain if unicodedata.category(ch) != "Cf")[:SHOWN_CHARS]
 
 
 def render(found: Sequence[Found], total: int, looked: int, skipped: int) -> str:

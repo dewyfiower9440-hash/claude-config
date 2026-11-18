@@ -363,10 +363,48 @@ def record(root: str, fields: dict[str, Any], now: float) -> bool:
                     if f.read(1) != b"\n":
                         f.write(b"\n")
                 f.write(_canonical(entry) + b"\n")
+                # on the disk before the hook says it is recorded: a line lost in a crash
+                # would break the chain of every line after it
+                f.flush()
+                os.fsync(f.fileno())
             return True
     except (OSError, session_store.StateError) as e:
         # the ledger is a record, not a gate: the caller's work goes on without it
         log.warning("ledger.not_recorded (%s)", type(e).__name__)
+        return False
+
+
+# ---------------------------------------------------------------- rotating it (the user)
+ROTATED = (
+    ".rotated-"  # `<file>.rotated-<UTC time>`: kept, never read by the hooks again
+)
+
+
+def rotate(root: str, now: float) -> Path | None:
+    """Set the repository's ledger aside under a dated name, so that the next record
+    starts a new chain (devenv-final 26: the hooks read a long ledger from its end only,
+    and a ledger that is not intact stays so for ever). The old file is kept, not deleted.
+    None when there is no ledger. Raises OSError / session_store.StateError when it cannot
+    be moved (in use)."""
+    import time
+
+    import session_store
+
+    path = repo_file(root)
+    with session_store.locked(path, LOCK_BUDGET_S):
+        if not path.is_file():
+            return None
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now))
+        kept = path.with_name(f"{path.name}{ROTATED}{stamp}")
+        os.replace(path, kept)
+        return kept
+
+
+def interactive() -> bool:
+    """True when a person runs this at a console: a tool call has no terminal on stdin."""
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, ValueError):  # a closed or replaced stream
         return False
 
 
@@ -484,7 +522,20 @@ def main(argv: list[str] | None = None) -> int:
     show = commands.add_parser("show", help="the last recorded state of a task")
     show.add_argument("--task")
     show.add_argument("--root", help="a repository (default: the one of this folder)")
+    turn = commands.add_parser(
+        "rotate",
+        help="set this repository's ledger aside and start a new one (run it yourself, "
+        "in a terminal)",
+    )
+    turn.add_argument("--root", help="a repository (default: the one of this folder)")
     args = parser.parse_args(argv)
+    if args.command == "rotate" and not interactive():
+        # the record of what was verified is not Claude's to set aside
+        print(
+            "ledger: rotate는 사용자가 터미널에서 직접 실행해야 합니다(도구 호출로는 실행되지 않습니다)",
+            file=sys.stderr,
+        )
+        return 2
     if args.root is not None and not Path(args.root).is_dir():
         print(f"ledger: 폴더가 없습니다: {args.root!r}", file=sys.stderr)
         return 2
@@ -495,6 +546,20 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if args.command == "rotate":
+        import session_store
+
+        try:
+            kept = rotate(root, time.time())
+        except (OSError, session_store.StateError) as e:
+            print(f"ledger: 옮기지 못했습니다({type(e).__name__})", file=sys.stderr)
+            return 2
+        print(
+            f"ledger: {kept.name}로 보존했습니다. 다음 기록부터 새 원장입니다."
+            if kept
+            else "ledger: 이 저장소의 원장이 없습니다."
+        )
+        return 0
     entries, problem = read(root)
     lines = show_lines(entries, problem, args.task, time.time())
     sys.stdout.write("\n".join(lines) + "\n")

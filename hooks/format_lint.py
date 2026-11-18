@@ -246,16 +246,36 @@ def main() -> None:
     sys.exit(2 if problems else 0)
 
 
-def report(changed: bool, problems: list[str], data: object) -> None:
-    """What a run tells: one line when the file was rewritten, the remaining problems."""
+def changed_note(data: object) -> str:
+    """The one line that says the edited file was rewritten."""
     ti = data.get("tool_input") if isinstance(data, dict) else None
     name = (
         Path(str((ti or {}).get("file_path") or "")).name
         if isinstance(ti, dict)
         else ""
     )
-    if changed:
-        print(f"format_lint: {name} was reformatted (read it again before editing it)")
+    return f"format_lint: {name} was reformatted (read it again before editing it)"
+
+
+def report(
+    changed: bool, problems: list[str], data: object, as_json: bool = False
+) -> None:
+    """What a run tells: one line when the file was rewritten (as the hook output of a
+    PostToolUse hook when `as_json`: a hook's stdout is one JSON object or none), and the
+    remaining problems on stderr."""
+    if changed and as_json:
+        print(
+            json.dumps(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PostToolUse",
+                        "additionalContext": changed_note(data),
+                    }
+                }
+            )
+        )
+    elif changed:
+        print(changed_note(data))
     if problems:
         print(
             "Lint problems remain after auto-fix; fix them:\n" + "\n\n".join(problems),

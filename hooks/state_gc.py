@@ -113,11 +113,17 @@ def sweep(
     except OSError:  # no such folder, not a folder, not listable: nothing to do
         return 0, 0
     removed = failed = 0
+    listed = dict(entries)
     for name in stale_entries(entries, now, ttl_s):
         if removed >= limit or clock() - started > budget_s:
             break
+        target = os.path.join(folder, name)
         try:
-            os.unlink(os.path.join(folder, name))
+            # A session that woke up since the folder was listed has written its state
+            # again: what is removed is what is still as old as it was when listed.
+            if os.stat(target).st_mtime > listed.get(name, 0.0):
+                continue
+            os.unlink(target)
             removed += 1
         except FileNotFoundError:  # another sweep took it
             continue
@@ -182,4 +188,45 @@ def sweep_default(now: float) -> tuple[int, int]:
     days = ttl_days(os.environ.get("CLAUDE_STATE_TTL_DAYS"))
     result = sweep(folder, now, days * 86400.0)
     sweep_markers(alive_dir(), folder, now, days * 86400.0)
+    sweep_stamps(folder.parent / NOTIFY_FOLDER, now, days * 86400.0)
     return result
+
+
+# notify.py leaves `<session>.start` per session in the temp folder's `claude-notify` (when
+# the turn began) and never removed them.
+NOTIFY_FOLDER = "claude-notify"
+STAMP = re.compile(r"^[A-Za-z0-9_-]+\.start$", re.ASCII)
+
+
+def sweep_stamps(
+    folder: Path,
+    now: float,
+    ttl_s: float,
+    limit: int = LIMIT,
+    budget_s: float = BUDGET_S,
+    clock: Callable[[], float] = time.monotonic,
+) -> int:
+    """Turn-start stamps older than the TTL, removed. Only names of the form
+    `<id>.start` in a folder named NOTIFY_FOLDER; never raises for a missing folder."""
+    if folder.name != NOTIFY_FOLDER:
+        return 0
+    started = clock()
+    removed = 0
+    try:
+        with os.scandir(folder) as it:
+            for entry in it:
+                if removed >= limit or clock() - started > budget_s:
+                    break
+                try:
+                    if (
+                        STAMP.match(entry.name)
+                        and entry.is_file(follow_symlinks=False)
+                        and now - entry.stat(follow_symlinks=False).st_mtime > ttl_s
+                    ):
+                        os.unlink(entry.path)
+                        removed += 1
+                except OSError:  # vanished or in use: left for next time
+                    continue
+    except OSError:  # no such folder: nothing to do
+        return removed
+    return removed

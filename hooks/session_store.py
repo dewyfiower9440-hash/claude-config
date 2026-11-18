@@ -23,6 +23,9 @@ log = logging.getLogger("session_store")  # stderr only; never state contents
 LOCK_BUDGET_S = (
     20.0  # initial prior: below the 30 s pre/prompt hook timeout in settings.json
 )
+# how long a save keeps trying to replace a state file somebody holds open (initial prior:
+# well inside the shortest hook timeout that writes a state)
+SAVE_BUDGET_S = 2.0
 MAX_FILE_BYTES = 8_000_000
 
 
@@ -160,14 +163,16 @@ def save(path: Path, state: dict[str, Any]) -> None:
             f.write(json.dumps(state))
             f.flush()
             os.fsync(f.fileno())
-        for attempt in range(
-            3
-        ):  # Windows: a reader (notify) may hold the target briefly
+        # Windows: a reader (notify, a scanner) may hold the target. Tried again until
+        # SAVE_BUDGET_S has passed (three quick tries were often not enough, and a save
+        # that fails is a missed event: the next run starts from a reset).
+        give_up = time.monotonic() + SAVE_BUDGET_S
+        while True:
             try:
                 os.replace(tmp, path)
                 return
             except PermissionError:
-                if attempt == 2:
+                if time.monotonic() >= give_up:
                     raise
                 time.sleep(0.02 + random.random() * 0.03)
     except OSError as e:
@@ -218,17 +223,43 @@ def note_missed(path: Path, why: str) -> None:
         log.warning("session_store.note_missed_failed", exc_info=True)
 
 
-def take_missed(path: Path, legacy: bool = False) -> list[str]:
+_taken: list[Path] = []  # notes read with keep=True, removed by forget_taken()
+TAKEN_PREFIX = "taken."  # the name of a note between being read and being forgotten
+
+
+def forget_taken() -> None:
+    """Remove the notes the last take_missed(keep=True) read: called once the state that
+    holds what they said is saved. A note that cannot be removed is read again next time."""
+    while _taken:
+        note = _taken.pop()
+        try:
+            note.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            log.warning("session_store.forget_taken_failed", exc_info=True)
+
+
+def take_missed(path: Path, legacy: bool = False, keep: bool = False) -> list[str]:
     """Reasons of events missed since the last locked run (call only while locked). Each
     note is removed only after it was read; one that cannot be removed yet is read again
     next time and still counts now (as a generic reason), so nothing is lost.
+
+    `keep` leaves the notes in place until forget_taken() (devenv-final 26): the caller
+    removes them after its state, which now holds their reasons, is saved. Removed at
+    once, a failed save lost them for good.
 
     `legacy` also takes the notes of the earlier formats (`<stem>.missed` and
     `<stem>.missed.<name>` next to the state file). Finding them lists the whole state
     folder, so the caller asks for it once per session, not on every run."""
     folder = notes_dir(path)
     try:
-        notes = [folder / n for n in _names(folder) if n.startswith("missed.")]
+        # "taken.": read by a run with keep=True whose state was not saved afterwards
+        notes = [
+            folder / n
+            for n in _names(folder)
+            if n.startswith(("missed.", TAKEN_PREFIX))
+        ]
         if legacy:
             prefix = f"{path.stem}.missed"
             old = [n for n in _names(path.parent) if n.startswith(prefix)]
@@ -244,8 +275,18 @@ def take_missed(path: Path, legacy: bool = False) -> list[str]:
         except OSError:
             out.append("놓친 이벤트 기록을 읽을 수 없음")
             continue
+        held = keep and p.parent == folder  # an earlier-format note goes at once
         try:
-            p.unlink()
+            if held and p.name.startswith(TAKEN_PREFIX):
+                _taken.append(p)
+            elif held:
+                # claimed by renaming: what cannot be moved now could not be removed
+                # either, and is reported and read again next time, as before
+                claimed = p.with_name(TAKEN_PREFIX + p.name)
+                os.replace(p, claimed)
+                _taken.append(claimed)
+            else:
+                p.unlink()
         except FileNotFoundError:
             pass  # already gone: what was read above is still reported
         except OSError:  # kept: its reasons are reported when it can be removed

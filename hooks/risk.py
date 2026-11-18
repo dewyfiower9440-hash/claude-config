@@ -33,7 +33,8 @@ FILE_STEPS = (3, 6, 11)  # from this many files on: +1, +2, +3
 LINE_STEPS = (50, 200, 500)
 PER_EXTRA_REPO = 2
 
-_GUARD_DIRS = {"hooks", ".claude", ".husky"}
+# hooks, and what tells the agent how to work: its rules, agent and skill definitions
+_GUARD_DIRS = {"hooks", ".claude", ".husky", ".githooks", "agents", "skills", "rules"}
 _CI_NAMES = {".gitlab-ci.yml", "azure-pipelines.yml"}
 _DEPS_NAMES = {
     "uv.lock",
@@ -81,6 +82,7 @@ def kind(rel: str, is_test: bool, is_code: bool) -> str:
         top in _GUARD_DIRS
         or name == ".pre-commit-config.yaml"
         or (name == "settings.json" and top in ("", ".claude"))
+        or (name == "claude.md" and top == "")  # the rules file of the repository
     ):
         return "guard"
     if ".github/workflows/" in f"{path.as_posix()}" or name in _CI_NAMES:

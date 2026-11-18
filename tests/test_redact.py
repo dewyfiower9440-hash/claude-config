@@ -157,6 +157,43 @@ check(
     [redact(x) for x in KEPT],
     KEPT,
 )
+# devenv-final 26: connection-string keys, a newer chat token prefix, chat webhook URLs
+CONN = {
+    f"AccountKey={VALUE}{VALUE}==;EndpointSuffix=core.windows.net": "EndpointSuffix",
+    f"SharedAccessKey={VALUE}{VALUE}=": "SharedAccessKey=",
+    f"shared_access_key: {VALUE}": "shared_access_key",
+    f"account-key={VALUE}": "account-key=",
+}
+check(
+    "D-T10 storage and service-bus keys of a connection string: the value goes",
+    [(VALUE not in redact(text), keep in redact(text)) for text, keep in CONN.items()],
+    [(True, True)] * len(CONN),
+)
+HOOKED = [
+    "https://hooks.slack" + ".com/services/T01ABCDEF/B01ABCDEF/" + "a1B2c3D4" * 3,
+    "https://discord" + ".com/api/webhooks/123456789012345678/" + "a1B2c3D4" * 8,
+    "xox" + "e-1-" + "A1b2C3d4" * 6,
+]
+check(
+    "D-T10 a webhook URL is a credential (who has it can post); a refresh token prefix",
+    [gone(f"notify {t} now", t.rsplit("/", 1)[-1][-16:]) for t in HOOKED],
+    [(True, True)] * len(HOOKED),
+)
+KEPT_MORE = [
+    "account_key_rotation: enabled",
+    "AccountKeyPolicy=strict",
+    "see https://hooks.slack.com/docs for the format",
+    "https://discord.com/api/webhooks is the endpoint family",
+    "the shared access key is rotated monthly",
+    "commit 3f2a9c1e4b5d6a7f8e9d0c1b2a3f4e5d6c7b8a9f",
+    "session b56acf8d-9ac8-4840-86b2-775730006f6b",
+]
+check(
+    "D-T11 what only looks alike is left: a setting about keys, the URL family without "
+    "its secret part, a sentence, a commit hash, a session id",
+    [redact(x) for x in KEPT_MORE],
+    KEPT_MORE,
+)
 tricky = 'token=":sk-@:b'
 check(
     "D-T6 masking twice equals masking once also where one mask creates another match",

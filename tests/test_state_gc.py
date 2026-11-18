@@ -315,6 +315,52 @@ check(
     ROOT / "h" / "alive",
 )
 
+# ---- devenv-final 26: a file written again since the folder was listed stays; the
+# turn-start stamps of notify.py are swept too
+woke = ROOT / "woke" / "claude-discipline"
+woke.mkdir(parents=True)
+(woke / "s1.json").write_text("{}", encoding="utf-8")
+os.utime(woke / "s1.json", (OLD, OLD))
+real_stale = state_gc.stale_entries
+
+
+def wakes_up(entries: list[tuple[str, float]], now: float, ttl: float) -> list[str]:
+    names = real_stale(entries, now, ttl)
+    os.utime(woke / "s1.json", (NOW, NOW))  # the session writes its state right now
+    return names
+
+
+state_gc.stale_entries = wakes_up
+try:
+    got = state_gc.sweep(woke, NOW, TTL)
+finally:
+    state_gc.stale_entries = real_stale
+check(
+    "G-T15 a state file written again between the listing and the removal is kept",
+    (got, (woke / "s1.json").exists()),
+    ((0, 0), True),
+)
+stamps = ROOT / "stamps" / "claude-notify"
+stamps.mkdir(parents=True)
+for name, age in (("old.start", OLD), ("new.start", RECENT), ("notes.txt", OLD)):
+    (stamps / name).write_text("1", encoding="utf-8")
+    os.utime(stamps / name, (age, age))
+other = ROOT / "stamps" / "something-else"
+other.mkdir()
+(other / "old.start").write_text("1", encoding="utf-8")
+os.utime(other / "old.start", (OLD, OLD))
+check(
+    "G-T16 old turn-start stamps go; recent ones, other names and other folders stay",
+    (
+        state_gc.sweep_stamps(stamps, NOW, TTL),
+        sorted(x.name for x in stamps.iterdir()),
+        state_gc.sweep_stamps(other, NOW, TTL),
+        (other / "old.start").exists(),
+        state_gc.sweep_stamps(ROOT / "no-such" / "claude-notify", NOW, TTL),
+    ),
+    (1, ["new.start", "notes.txt"], 0, True, 0),
+)
+
 shutil.rmtree(ROOT, ignore_errors=True)
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

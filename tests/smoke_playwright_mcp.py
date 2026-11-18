@@ -3,8 +3,10 @@
 import json
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
+WAIT_S = 120  # the first start may download the pinned package
 LAUNCHER = r"C:\dev\tools\playwright-mcp\playwright-mcp.cmd"
 PINNED = "0.0.81"
 GATED = {"browser_run_code_unsafe", "browser_file_upload"}
@@ -18,6 +20,10 @@ p = subprocess.Popen(
     encoding="utf-8",
 )
 assert p.stdin and p.stdout
+# a server that never answers ends here (the read below then fails), not never
+watchdog = threading.Timer(WAIT_S, p.kill)
+watchdog.daemon = True
+watchdog.start()
 
 
 def send(m: dict) -> dict | None:

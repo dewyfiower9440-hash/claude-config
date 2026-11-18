@@ -3,6 +3,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 db = Path(tempfile.gettempdir()) / "dbmcp-smoke.db"
@@ -57,6 +58,10 @@ p = subprocess.Popen(
     encoding="utf-8",
 )
 assert p.stdin and p.stdout
+# a server that never answers ends here (the read below then fails), not never
+watchdog = threading.Timer(60, p.kill)
+watchdog.daemon = True
+watchdog.start()
 for m in msgs:
     p.stdin.write(json.dumps(m) + "\n")
     p.stdin.flush()

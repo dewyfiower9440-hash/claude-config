@@ -185,6 +185,11 @@ check(
     (False, 160, "a[31mbc\td"),
 )
 check(
+    "M3 ... direction marks and zero-width characters too (a memory must show what it holds)",
+    shown("safe" + chr(0x202E) + "txt." + chr(0x200B) + "exe" + chr(0x2066) + "!"),
+    "safetxt.exe!",
+)
+check(
     "M2 a block description; a type only at the top level or under metadata",
     [
         fields(

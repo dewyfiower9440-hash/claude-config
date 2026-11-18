@@ -81,6 +81,29 @@ check(
     ),
     ["guard"] * 5,
 )
+# devenv-final 26: the rules and the agents that apply them guard the work like the hooks
+check(
+    "R1 the rules file, agent definitions, skills, rule files and git hooks are guards too",
+    kinds(
+        "CLAUDE.md",
+        "agents/code-reviewer.md",
+        "skills/plan/SKILL.md",
+        "rules/python.md",
+        ".githooks/pre-push",
+        ".claude/agents/x.md",
+    ),
+    ["guard"] * 6,
+)
+check(
+    "R1 ... by their place at the top: the same names deeper down are what they were",
+    [
+        call("kind", "docs/CLAUDE.md", False, False),
+        call("kind", "src/agents/planner.py", False, True),
+        call("kind", "app/skills/list.ts", False, True),
+        call("kind", "src/rules/engine.py", False, True),
+    ],
+    ["docs", "code", "code", "code"],
+)
 check(
     "R1 a hooks folder deeper down (React hooks) and an editor's settings are no guards",
     [

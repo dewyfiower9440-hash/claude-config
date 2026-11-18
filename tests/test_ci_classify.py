@@ -183,6 +183,29 @@ def fake_api(listing: dict, jobs: dict | None, log: str | None) -> None:
     ci.required_workflows = lambda toplevel, sha: [WORKFLOW]
 
 
+# devenv-final 26: workflow files that cannot be read make the whole answer unknown (they
+# used to count as "no workflow is required"), and so does a lookup with no time left.
+fake_api({"workflow_runs": [run("success")]}, JOBS, "")
+ci.required_workflows = lambda toplevel, sha: None
+unreadable = ci.fetch_ci(PUSH)
+ci.required_workflows = lambda toplevel, sha: [WORKFLOW]
+check(
+    "F-T20 the commit's workflow files cannot be read: unknown, whatever the runs say",
+    (unreadable.get("status"), "workflow" in str(unreadable.get("why"))),
+    ("unknown", True),
+)
+check(
+    "F-T20 the lookups of one check share a time budget; a spent one runs nothing",
+    (
+        ci.FETCH_BUDGET_S < 60,
+        setattr(ci, "_deadline", 0.0),
+        ci._run(["git", "--version"], None, 5),
+        setattr(ci, "_deadline", None),
+        ci._run(["git", "--version"], None, 5) is not None,
+    ),
+    (True, None, None, None, True),
+)
+
 fake_api({"workflow_runs": [run("failure")]}, JOBS, "token " + SECRET + "\n" + ENCODING)
 ev = ci.fetch_ci(PUSH)
 check(

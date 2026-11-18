@@ -56,7 +56,14 @@ def temp_root() -> Path:
     return Path(tempfile.gettempdir())
 
 
-MAX_FILES_WITHOUT_PLAN = int(os.environ.get("CLAUDE_MAX_FILES_WITHOUT_PLAN", "5"))
+def env_int(name: str, default: int) -> int:
+    """A whole number from the environment; anything else (a typo) is the default. A hook
+    that dies while it is imported decides nothing."""
+    raw = os.environ.get(name, "").strip()
+    return int(raw) if raw.isascii() and raw.isdigit() else default
+
+
+MAX_FILES_WITHOUT_PLAN = env_int("CLAUDE_MAX_FILES_WITHOUT_PLAN", 5)
 
 
 def authz_mode(raw: object) -> str:
@@ -2682,6 +2689,14 @@ def record_evidence(
     note_ci_failures(state, data.get("session_id"))
 
 
+def _git_subcommand(args: list[str]) -> list[str]:
+    """git's subcommand and what follows it (guard.git_subcommand: one reading of a git
+    command line for the guard and for this hook)."""
+    import guard
+
+    return guard.git_subcommand(args)
+
+
 def record_ci_activity(
     command: str, is_ps: bool, cwd: str, state: dict[str, Any], *, failed: bool
 ) -> None:
@@ -2700,7 +2715,9 @@ def record_ci_activity(
         program, args = program_and_args(cmd)
         if (
             program == "git"
-            and "push" in args[:3]
+            # the subcommand as git reads it (`git -C x -c a=b push`), not a word "push"
+            # among the first arguments (`git stash push`, a branch named push)
+            and _git_subcommand(args)[:1] == ["push"]
             and not failed
             and not {"--dry-run", "-n"} & set(args)
         ):
@@ -3450,6 +3467,9 @@ GIT_BUDGET_S = {
 # Mirrors the discipline hook timeouts in settings.json (a test fails when they drift). The
 # lock wait and the git budget both come out of this one deadline, so the hook decides
 # (closed) before Claude Code kills it.
+# What settings.json gives the post hook on top of its own time: the formatter it runs
+# first for an edit (format_first; format_lint.RUN_BUDGET_S and some room).
+FORMAT_ALLOWANCE_S = 90.0
 HOOK_TIMEOUT_S = {
     "pre": 30.0,
     "prompt": 30.0,
@@ -4806,7 +4826,8 @@ def format_first(mode: str, data: dict[str, Any]) -> tuple[bool, list[str]] | No
         import format_lint
 
         result = format_lint.process(data)
-        format_lint.report(result[0], result[1], data)
+        # this hook prints nothing else on stdout for an edit, so the note is its output
+        format_lint.report(result[0], result[1], data, as_json=True)
     except Exception:  # hook boundary: the formatter is a convenience, not a gate
         log.exception("discipline.format_failed")
         result = None
@@ -5477,7 +5498,8 @@ def run_locked(mode: str, data: dict[str, Any], handler: Any, path: Path) -> Non
         # A look that found anything (also a note it could not read or remove yet) is
         # repeated by the next run: "read again next time" holds for the earlier format too.
         checked = bool(state.get("notes_checked"))
-        taken = session_store.take_missed(path, legacy=not checked)
+        # read now, removed after the save below: a failed save must not lose them
+        taken = session_store.take_missed(path, legacy=not checked, keep=True)
         why += taken
         state["notes_checked"] = 1 if checked or not taken else 0
         if why:
@@ -5508,6 +5530,8 @@ def run_locked(mode: str, data: dict[str, Any], handler: Any, path: Path) -> Non
     finally:
         try:
             session_store.save(path, state)
+            # what the missed-event notes said is in the saved state now
+            session_store.forget_taken()
         except session_store.StateWriteFailed as e:
             if mode == "prompt":
                 _prompt_failure["unsaved"] = "1"

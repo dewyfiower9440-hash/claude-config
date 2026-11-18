@@ -27,7 +27,7 @@ _TOKEN = re.compile(
     r"gh[pousr]_[A-Za-z0-9]{4,}"
     r"|github_pat_[A-Za-z0-9_]{4,}"
     r"|glpat-[A-Za-z0-9_-]{4,}"
-    r"|xox[abprs]-[A-Za-z0-9-]{4,}"
+    r"|xox[abeprs]-[A-Za-z0-9-]{4,}"
     r"|hf_[A-Za-z0-9]{20,}"
     r"|npm_[A-Za-z0-9]{20,}"
     r"|pypi-[A-Za-z0-9_-]{20,}"
@@ -45,13 +45,21 @@ _SCHEME = re.compile(
 _PAIR = re.compile(
     r"(?<![A-Za-z0-9])((?:[A-Za-z0-9]{1,20}[_-]){0,3}"
     r"(?:password|passwd|passphrase|pass|secret|token|credentials?"
-    r"|api[_-]?key|access[_-]?key|private[_-]?key|authorization)"
+    r"|api[_-]?key|access[_-]?key|private[_-]?key|authorization"
+    # the keys of a storage or service-bus connection string
+    r"|account[_-]?key|shared[_-]?access[_-]?key)"
     r"(?:[_-]key)?"
     r"[\"']?\s{0,3}[:=]\s{0,3})"
     r"([\"']?)([^\s\"',;\[\]]{" + str(MIN_VALUE) + r",})",
     re.IGNORECASE,
 )
 _URL = re.compile(r"(://[^/\s:@]{1,100}:)(?!\[가림\]@)([^@\s/]{1,200})(@)")
+# A chat webhook URL is a credential by itself: whoever holds it can post. The secret is
+# the path after the fixed part; the host and that fixed part stay readable.
+_WEBHOOK = re.compile(
+    r"(hooks\.slack\.com/services/|discord(?:app)?\.com/api/webhooks/)"
+    r"(?!\[가림\])[A-Za-z0-9_/-]{16,}"
+)
 
 
 def _once(text: str) -> str:
@@ -59,6 +67,7 @@ def _once(text: str) -> str:
     out = _TOKEN.sub(MASK, out)
     out = _SCHEME.sub(rf"\1 {MASK}", out)
     out = _PAIR.sub(rf"\1\2{MASK}", out)
+    out = _WEBHOOK.sub(rf"\1{MASK}", out)
     return _URL.sub(rf"\1{MASK}\3", out)
 
 

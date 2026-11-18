@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from typing import Any, NotRequired, TypedDict
 
 GH_TIMEOUT_S = 15
@@ -219,7 +220,18 @@ def github_repo(remote_url: str) -> str | None:
 
 
 # ---------------------------------------------------------------- adapters (git, gh)
-def _run(cmd: list[str], cwd: str | None, timeout: int) -> str | None:
+# devenv-final 26: one CI lookup makes several gh calls of up to GH_TIMEOUT_S each. They
+# share what is left of the hook's time, so the hook answers ("unknown") instead of being
+# ended by its timeout in the middle of them.
+FETCH_BUDGET_S = 40.0
+_deadline: float | None = None
+
+
+def _run(cmd: list[str], cwd: str | None, timeout: float) -> str | None:
+    if _deadline is not None:
+        timeout = min(timeout, _deadline - time.monotonic())
+        if timeout <= 0:
+            return None  # no time left: no answer, never a late one
     try:
         p = subprocess.run(
             cmd,
@@ -267,12 +279,22 @@ def push_info(cwd: str) -> PushInfo | None:
     }
 
 
-def required_workflows(toplevel: str, sha: str) -> list[str]:
+def required_workflows(toplevel: str, sha: str) -> list[str] | None:
+    """The workflow files of commit `sha` that a push triggers; None when git could not
+    list or read them (a workflow that cannot be read is not "not required": with none
+    required, any green run would verify the push)."""
     listing = _git(toplevel, "ls-tree", "--name-only", sha, ".github/workflows/")
-    paths = [p for p in (listing or "").splitlines() if p.endswith((".yml", ".yaml"))]
-    return [
-        p for p in paths if triggers_push(_git(toplevel, "show", f"{sha}:{p}") or "")
-    ]
+    if listing is None:
+        return None
+    paths = [p for p in listing.splitlines() if p.endswith((".yml", ".yaml"))]
+    required: list[str] = []
+    for p in paths:
+        text = _git(toplevel, "show", f"{sha}:{p}")
+        if text is None:
+            return None
+        if triggers_push(text):
+            required.append(p)
+    return required
 
 
 def _gh_json(path: str, **params: str) -> dict[str, Any] | None:
@@ -347,20 +369,35 @@ def failure_note(repo: str, run_id: int) -> tuple[str, str]:
     return "other", ""
 
 
-def fetch_ci(push: PushInfo) -> CiEvidence:
+def fetch_ci(push: PushInfo, budget_s: float = FETCH_BUDGET_S) -> CiEvidence:
+    global _deadline
+    _deadline = time.monotonic() + budget_s
+    try:
+        return _fetch_ci(push)
+    finally:
+        _deadline = None
+
+
+def _unknown(push: PushInfo, why: str) -> CiEvidence:
+    return {
+        "status": "unknown",
+        "repo": push["repo"],
+        "branch": push["branch"],
+        "sha": push["sha"],
+        "runs": [],
+        "why": why,
+    }
+
+
+def _fetch_ci(push: PushInfo) -> CiEvidence:
     required = required_workflows(push["toplevel"], push["sha"])
+    if required is None:
+        return _unknown(push, "the commit's workflow files could not be read")
     listing = _gh_json(
         f"repos/{push['repo']}/actions/runs", head_sha=push["sha"], per_page="100"
     )
     if listing is None:
-        return {
-            "status": "unknown",
-            "repo": push["repo"],
-            "branch": push["branch"],
-            "sha": push["sha"],
-            "runs": [],
-            "why": "GitHub API unavailable",
-        }
+        return _unknown(push, "GitHub API unavailable")
     runs = [r for r in listing.get("workflow_runs", []) if isinstance(r, dict)]
     jobs: dict[int, list[dict[str, Any]] | None] = {}
     for r in runs:

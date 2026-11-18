@@ -520,3 +520,5 @@ rec(
 fails = [r for r in results if r[0] == "FAIL"]
 warns = [r for r in results if r[0] == "WARN"]
 print(f"\nSUMMARY: {len(results)} checks, {len(fails)} FAIL, {len(warns)} WARN")
+# a FAIL must reach whoever runs this (a script, a hook reading the exit status)
+sys.exit(1 if fails else 0)

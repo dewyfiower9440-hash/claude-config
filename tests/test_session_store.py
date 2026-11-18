@@ -478,10 +478,16 @@ for groups in settings.get("hooks", {}).values():
             words = str(h.get("command", "")).split()
             if any(w.endswith("discipline.py") for w in words[:-1]):
                 declared[words[-1]] = float(h.get("timeout"))
+# devenv-final 25 (changed expectation: post was 60 in both): the post hook runs the
+# formatter first for an edit, so settings.json gives it the hook's own time plus the
+# formatter's allowance.
 check(
-    "S-T12 settings.json discipline timeouts == HOOK_TIMEOUT_S",
+    "S-T12 settings.json discipline timeouts == HOOK_TIMEOUT_S (post: plus the formatter's)",
     declared,
-    discipline.HOOK_TIMEOUT_S,
+    {
+        **discipline.HOOK_TIMEOUT_S,
+        "post": discipline.HOOK_TIMEOUT_S["post"] + discipline.FORMAT_ALLOWANCE_S,
+    },
 )
 
 # ---- S-T13 a note written while notes are being taken is never lost
@@ -533,6 +539,58 @@ check(
     ),
     (["sess1.notes"], [True, True]),
 )
+# devenv-final 26: read and kept until the state that holds them is saved
+t_keep = LT / "keep1.json"
+session_store.note_missed(t_keep, "kept reason")
+first = session_store.take_missed(t_keep, keep=True)
+still = len(list((LT / "keep1.notes").iterdir()))
+again = session_store.take_missed(t_keep, keep=True)  # a run whose save failed
+session_store.forget_taken()
+check(
+    "L-T8 take(keep): the note stays until forget_taken; a run whose save failed leaves "
+    "it for the next run, which reads it again",
+    (first, still, again, list((LT / "keep1.notes").iterdir())),
+    (["kept reason"], 1, ["kept reason"], []),
+)
+shutil.rmtree(LT / "keep1.notes", ignore_errors=True)
+held = [0]
+real_replace = os.replace
+
+
+def busy_replace(src: str, dst: str) -> None:
+    if str(dst).endswith("busy.json") and held[0] > 0:
+        held[0] -= 1
+        raise PermissionError(13, "held by a reader")
+    real_replace(src, dst)
+
+
+os.replace = busy_replace
+try:
+    held[0] = 12  # more than the three quick tries of before
+    session_store.save(LT / "busy.json", {"a": 1})
+    saved_after = json.loads((LT / "busy.json").read_text(encoding="utf-8"))
+    budget, session_store.SAVE_BUDGET_S = session_store.SAVE_BUDGET_S, 0.05
+    held[0] = 10_000
+    try:
+        session_store.save(LT / "busy.json", {"a": 2})
+        gave_up = "saved"
+    except session_store.StateWriteFailed:
+        gave_up = "StateWriteFailed"
+    session_store.SAVE_BUDGET_S = budget
+finally:
+    os.replace = real_replace
+check(
+    "L-T9 a state file held open for a moment is saved once it is free; one held for good "
+    "fails after the budget, with nothing left behind",
+    (
+        saved_after,
+        gave_up,
+        json.loads((LT / "busy.json").read_text(encoding="utf-8")),
+        [x.name for x in LT.iterdir() if x.name.endswith(".tmp")],
+    ),
+    ({"a": 1}, "StateWriteFailed", {"a": 1}, []),
+)
+(LT / "busy.json").unlink()
 check(
     "L-T2 take: both reasons in order, the files are removed, nothing the second time",
     (

@@ -17,7 +17,29 @@ import time
 from pathlib import Path
 from types import ModuleType
 
-LONG_TURN_SECONDS = int(os.environ.get("CLAUDE_NOTIFY_MIN_SECONDS", "60"))
+
+def env_int(name: str, default: int) -> int:
+    """A whole number from the environment; anything else (a typo) is the default, never
+    a crash of the hook."""
+    raw = os.environ.get(name, "").strip()
+    return int(raw) if raw.isascii() and raw.isdigit() else default
+
+
+LONG_TURN_SECONDS = env_int("CLAUDE_NOTIFY_MIN_SECONDS", 60)
+TOAST_CHARS = 200
+
+
+def toast_text(text: str) -> str:
+    """`text` for the toast's XML inside a single-quoted PowerShell string: cut first,
+    escaped afterwards. Cut after escaping, a doubled quote could lose its second half
+    (the string would end there and the rest run as PowerShell) and an entity its end."""
+    return (
+        text[:TOAST_CHARS]
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("'", "''")
+    )
 
 
 def load_discipline() -> ModuleType:
@@ -38,14 +60,7 @@ def should_toast_on_stop(block_reason: str | None, elapsed: float | None) -> boo
 
 
 def toast(title: str, body: str) -> None:
-    def esc(s: str) -> str:
-        return (
-            s.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace("'", "''")[:200]
-        )
-
+    esc = toast_text
     ps = f"""
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
 [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
