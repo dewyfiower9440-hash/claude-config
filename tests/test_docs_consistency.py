@@ -319,5 +319,54 @@ check(
     },
 )
 
+# ---- devenv-fix-m: the read-only subagents. Their definitions deny the edit tools with a
+# documented frontmatter field (an unknown field is ignored without an error, so a typo
+# would go unnoticed), and the guard hook keeps their shell commands read-only by agent
+# type: the names in the guard are the names of the definitions.
+import guard
+
+
+def front_value(name: str, key: str) -> str | None:
+    text = (REPO / "agents" / f"{name}.md").read_text(encoding="utf-8")
+    front = re.match(r"---\n(.*?)\n---\n", text.replace("\r\n", "\n"), re.DOTALL)
+    if not front:
+        return "no frontmatter"
+    line = re.search(rf"^{re.escape(key)}\s*:[ \t]*(.*)$", front.group(1), re.MULTILINE)
+    return line.group(1).strip() if line else None
+
+
+def tool_list(value: str | None) -> list[str]:
+    return sorted(x.strip() for x in (value or "").split(",") if x.strip())
+
+
+defined = sorted(
+    f.stem
+    for f in (REPO / "agents").glob("*.md")
+    if front_value(f.stem, "name") == f.stem
+)
+check(
+    "D9 every read-only agent of the guard is a defined agent, denies the four edit tools "
+    "in its definition and lists none of them as a tool; the other agents are not named",
+    (
+        sorted(guard.READ_ONLY_AGENTS - set(defined)),
+        {
+            name: (
+                tool_list(front_value(name, "disallowedTools")),
+                sorted(set(tool_list(front_value(name, "tools"))) & guard.EDIT_TOOLS),
+            )
+            for name in sorted(guard.READ_ONLY_AGENTS)
+        },
+        sorted(set(defined) - guard.READ_ONLY_AGENTS),
+    ),
+    (
+        [],
+        {
+            name: (["Edit", "MultiEdit", "NotebookEdit", "Write"], [])
+            for name in ("code-reviewer", "security-auditor", "test-runner")
+        },
+        ["researcher"],
+    ),
+)
+
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

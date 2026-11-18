@@ -25,6 +25,11 @@ REVIEWED_NEW_BLOCKS_EXACT = {
     # sharing its harmless prefix is never excused.
     "claude --version 2>&1; claude auth status --json 2>/dev/null | python -c \"import json,sys;d=json.load(sys.stdin);print({k:d.get(k) for k in ('loggedIn','authMethod','apiProvider','subscriptionType','planTier')})\"; env | grep -oE '^(ANTHROPIC|CLAUDE)[A-Z_]*' | sort -u": "bare `env` piped to grep in a later segment streams every environment value; legacy only caught `env` at line end",
 }
+NEUTRAL_CWD = "C:/dev/_nobody_s_folder"
+PROTECTED_MARKS = (
+    "protected folder of ~/.claude",
+    "walks through the protected folders",
+)
 REVIEWED_NEW_BLOCKS = {
     "env | cut -d= -f1": "bare `env` streams every environment value into the pipe; legacy only caught `env` at line end",
 }
@@ -81,12 +86,25 @@ def main() -> None:
 
     new_blocks: list[str] = []
     relaxed: list[str] = []
+    protected: list[str] = []
+    # The transcripts do not say where a command ran. Judged from a folder that is nobody's
+    # (not this repository: every `grep -r x .` of the past would count as a sweep of
+    # ~/.claude), so only commands that name ~/.claude themselves meet the rules below.
+    guard._ctx["cwd"] = NEUTRAL_CWD
     for tool, cmd in corpus:
         dialect = "powershell" if tool == "PowerShell" else "bash"
+        guard._asks.clear()
+        said = io.StringIO()
         with contextlib.redirect_stderr(io.StringIO()):
             old = blocked(guard.legacy_check, cmd)
+        with contextlib.redirect_stderr(said):
             new = blocked(guard.check_command, cmd, dialect)
-        if new and not old:
+        if new and not old and any(mark in said.getvalue() for mark in PROTECTED_MARKS):
+            # devenv-fix-m (2026-11-18): reading ~/.claude/discipline or ~/.claude/state
+            # through the shell, or sweeping all of ~/.claude, is blocked on purpose. These
+            # are past commands that did so; tests/test_guard.py (M-T5, M-T6) holds the rule.
+            protected.append(f"{tool}: {cmd[:160]!r}")
+        elif new and not old:
             reviewed = REVIEWED_NEW_BLOCKS_EXACT.get(cmd) or next(
                 (r for p, r in REVIEWED_NEW_BLOCKS.items() if cmd.startswith(p)), None
             )
@@ -100,6 +118,9 @@ def main() -> None:
     print(f"newly blocked (must be 0): {len(new_blocks)}")
     for c in new_blocks[:20]:
         print("  NEW BLOCK", c)
+    print(f"blocked by the protected-folder rules, on purpose: {len(protected)}")
+    for c in protected[:12]:
+        print("  PROTECTED", c)
     print(f"no longer blocked (review): {len(relaxed)}")
     for c in relaxed[:40]:
         print("  RELAXED", c)

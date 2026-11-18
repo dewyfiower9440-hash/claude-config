@@ -236,5 +236,340 @@ for tool, ti, expect in CASES:
     print(
         ("OK  " if ok else "FAIL"), tool, ti, "-> blocked" if blocked else "-> allowed"
     )
+
+# ---- devenv-fix-m: read-only subagents, the protected folders through the shell, and
+# commands that end processes. Every case names who runs it (agent type, None = the main
+# session), where (cwd) and what the guard must answer: "deny" (exit 2), "ask" (a
+# permissionDecision of "ask") or "allow".
+import os
+import tempfile
+
+HOME = os.path.expanduser("~").replace("\\", "/")
+CLAUDE = f"{HOME}/.claude"
+ELSEWHERE = "C:/dev/some-project"
+TMP = tempfile.gettempdir().replace("\\", "/")
+REVIEWER, AUDITOR, RUNNER = "code-reviewer", "security-auditor", "test-runner"
+
+
+def answer(tool: str, ti: dict, agent: str | None = None, cwd: str = ELSEWHERE) -> str:
+    payload: dict = {"tool_name": tool, "tool_input": ti, "cwd": cwd}
+    if agent is not None:
+        payload.update(agent_id="a1b2c3", agent_type=agent)
+    p = subprocess.run(
+        [sys.executable, GUARD],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if p.returncode == 2:
+        return "deny"
+    out = json.loads(p.stdout) if p.stdout.strip() else {}
+    decision = out.get("hookSpecificOutput", {}).get("permissionDecision")
+    return "ask" if p.returncode == 0 and decision == "ask" else "allow"
+
+
+def sh(command: str) -> tuple[str, dict]:
+    return "Bash", {"command": command}
+
+
+def ps(command: str) -> tuple[str, dict]:
+    return "PowerShell", {"command": command}
+
+
+M_CASES: list[tuple[str, tuple[str, dict], str | None, str, str]] = [
+    # M-T1 a read-only agent has no edit tool, whatever its definition says
+    ("M-T1", ("Edit", {"file_path": f"{ELSEWHERE}/a.py"}), REVIEWER, ELSEWHERE, "deny"),
+    ("M-T1", ("Write", {"file_path": f"{ELSEWHERE}/a.py"}), AUDITOR, ELSEWHERE, "deny"),
+    (
+        "M-T1",
+        ("MultiEdit", {"file_path": f"{ELSEWHERE}/a.py"}),
+        RUNNER,
+        ELSEWHERE,
+        "deny",
+    ),
+    (
+        "M-T1",
+        ("NotebookEdit", {"notebook_path": f"{ELSEWHERE}/a.ipynb"}),
+        RUNNER,
+        ELSEWHERE,
+        "deny",
+    ),
+    ("M-T1", ("Write", {"file_path": f"{ELSEWHERE}/a.py"}), None, ELSEWHERE, "allow"),
+    (
+        "M-T1",
+        ("Write", {"file_path": f"{ELSEWHERE}/a.py"}),
+        "researcher",
+        ELSEWHERE,
+        "allow",
+    ),
+    (
+        "M-T1",
+        ("Write", {"file_path": f"{ELSEWHERE}/a.py"}),
+        "general-purpose",
+        ELSEWHERE,
+        "allow",
+    ),
+    (
+        "M-T1",
+        ("Read", {"file_path": f"{ELSEWHERE}/a.py"}),
+        REVIEWER,
+        ELSEWHERE,
+        "allow",
+    ),
+    # M-T2 ... and may not write through the shell either
+    ("M-T2", sh("echo x > probe.txt"), REVIEWER, ELSEWHERE, "deny"),
+    ("M-T2", sh("rm probe.txt"), REVIEWER, ELSEWHERE, "deny"),
+    ("M-T2", sh("sed -i s/a/b/ src/m.py"), AUDITOR, ELSEWHERE, "deny"),
+    ("M-T2", sh("cp a.py b.py"), RUNNER, ELSEWHERE, "deny"),
+    ("M-T2", sh("git diff HEAD | tee review.txt"), REVIEWER, ELSEWHERE, "deny"),
+    ("M-T2", ps("Set-Content -Path a.txt -Value x"), REVIEWER, ELSEWHERE, "deny"),
+    ("M-T2", ps("Remove-Item a.txt"), RUNNER, ELSEWHERE, "deny"),
+    ("M-T2", sh("git commit -m x"), REVIEWER, ELSEWHERE, "deny"),
+    ("M-T2", sh("git add -A"), REVIEWER, ELSEWHERE, "deny"),
+    ("M-T2", sh("git checkout -- src/m.py"), REVIEWER, ELSEWHERE, "deny"),
+    ("M-T2", sh("git stash"), RUNNER, ELSEWHERE, "deny"),
+    ("M-T2", sh("git -C sub reset --soft HEAD~1"), AUDITOR, ELSEWHERE, "deny"),
+    ("M-T2", sh("git branch -D old"), REVIEWER, ELSEWHERE, "deny"),
+    ("M-T2", sh("cd sub && git push origin main"), REVIEWER, ELSEWHERE, "deny"),
+    ("M-T2", sh("bash -c 'echo x > deep.txt'"), REVIEWER, ELSEWHERE, "deny"),
+    # the same commands from the main session are none of this rule's business
+    ("M-T2", sh("echo x > probe.txt"), None, ELSEWHERE, "allow"),
+    ("M-T2", sh("git commit -m x"), "researcher", ELSEWHERE, "allow"),
+    # what a reviewer, an auditor and a test runner do need
+    ("M-T2", sh(f"echo x > {TMP}/note.txt"), REVIEWER, ELSEWHERE, "allow"),
+    ("M-T2", sh("git diff HEAD"), REVIEWER, ELSEWHERE, "allow"),
+    (
+        "M-T2",
+        sh("git log --oneline -5 && git show HEAD:src/m.py"),
+        REVIEWER,
+        ELSEWHERE,
+        "allow",
+    ),
+    ("M-T2", sh("git status --short"), AUDITOR, ELSEWHERE, "allow"),
+    ("M-T2", sh("git branch --list"), REVIEWER, ELSEWHERE, "allow"),
+    ("M-T2", sh("git stash list"), REVIEWER, ELSEWHERE, "allow"),
+    ("M-T2", sh("uv run pytest -q"), RUNNER, ELSEWHERE, "allow"),
+    ("M-T2", sh("uvx ruff check ."), RUNNER, ELSEWHERE, "allow"),
+    ("M-T2", sh("python -I -c 'print(1)'"), REVIEWER, ELSEWHERE, "allow"),
+    ("M-T2", sh("grep -rn TODO src tests | head -5"), REVIEWER, ELSEWHERE, "allow"),
+    ("M-T2", sh("git diff HEAD 2>/dev/null"), REVIEWER, ELSEWHERE, "allow"),
+    # M-T3 a read-only agent may not end processes at all
+    ("M-T3", sh("taskkill /F /IM grep.exe"), REVIEWER, ELSEWHERE, "deny"),
+    ("M-T3", sh("kill -9 1234"), RUNNER, ELSEWHERE, "deny"),
+    ("M-T3", ps("Stop-Process -Name python -Force"), AUDITOR, ELSEWHERE, "deny"),
+    ("M-T3", ps("Get-Process grep | Stop-Process"), REVIEWER, ELSEWHERE, "deny"),
+    # M-T4 anyone else is asked first
+    ("M-T4", sh("taskkill /F /IM grep.exe"), None, ELSEWHERE, "ask"),
+    ("M-T4", sh("kill -9 1234"), None, ELSEWHERE, "ask"),
+    ("M-T4", sh("pkill -f collector"), None, ELSEWHERE, "ask"),
+    ("M-T4", sh("killall node"), "general-purpose", ELSEWHERE, "ask"),
+    ("M-T4", sh("echo start; bash -c 'kill 1'"), None, ELSEWHERE, "ask"),
+    ("M-T4", sh("cmd /c taskkill /PID 4"), None, ELSEWHERE, "ask"),
+    ("M-T4", ps("Stop-Process -Id 1234"), None, ELSEWHERE, "ask"),
+    ("M-T4", ps("Get-Process x | Stop-Process -Force"), None, ELSEWHERE, "ask"),
+    ("M-T4", ps("spps -Name x"), None, ELSEWHERE, "ask"),
+    ("M-T4", ps("kill 1234"), None, ELSEWHERE, "ask"),
+    ("M-T4", sh("wmic process where name='x.exe' delete"), None, ELSEWHERE, "ask"),
+    ("M-T4", sh("taskkill.exe /PID 4"), None, ELSEWHERE, "ask"),
+    # a block still wins over a question
+    ("M-T4", sh("kill 1; cat .env"), None, ELSEWHERE, "deny"),
+    # words that only look like it
+    ("M-T4", sh("echo kill"), None, ELSEWHERE, "allow"),
+    ("M-T4", sh("git log --grep kill"), None, ELSEWHERE, "allow"),
+    ("M-T4", sh("cat skill.md"), None, ELSEWHERE, "allow"),
+    ("M-T4", sh("grep -n taskkill docs/notes.md"), None, ELSEWHERE, "allow"),
+    ("M-T4", ps("Get-Process python"), None, ELSEWHERE, "allow"),
+    ("M-T4", sh("tasklist"), None, ELSEWHERE, "allow"),
+    # M-T5 the two protected folders are not read through the shell, by anyone
+    ("M-T5", sh("cat ~/.claude/discipline/approvals.v2.json"), None, ELSEWHERE, "deny"),
+    ("M-T5", sh(f"grep -r key {CLAUDE}/state"), None, ELSEWHERE, "deny"),
+    ("M-T5", sh(f"ls {CLAUDE}/discipline"), REVIEWER, ELSEWHERE, "deny"),
+    ("M-T5", sh("ls $HOME/.claude/state/"), None, ELSEWHERE, "deny"),
+    ("M-T5", sh("head -c 100 < ~/.claude/discipline/hwm"), None, ELSEWHERE, "deny"),
+    (
+        "M-T5",
+        sh("cat /c/Users/" + HOME.rsplit("/", 1)[1] + "/.claude/state/x.json"),
+        None,
+        ELSEWHERE,
+        "deny",
+    ),
+    (
+        "M-T5",
+        # (in bash the backslashes would be escapes and the word no path at all)
+        ps("cmd /c type %USERPROFILE%\\.claude\\discipline\\a.json"),
+        None,
+        ELSEWHERE,
+        "deny",
+    ),
+    (
+        "M-T5",
+        ps("Get-Content $env:USERPROFILE\\.claude\\state\\b.json"),
+        None,
+        ELSEWHERE,
+        "deny",
+    ),
+    ("M-T5", ps("Get-ChildItem ~\\.claude\\discipline"), None, ELSEWHERE, "deny"),
+    ("M-T5", sh("cat discipline/approvals.v2.json"), None, CLAUDE, "deny"),
+    ("M-T5", sh("ls state"), None, CLAUDE, "deny"),
+    ("M-T5", sh("cat ../state/x.json"), None, f"{CLAUDE}/hooks", "deny"),
+    ("M-T5", sh("cp -r ~/.claude/discipline /tmp/copy"), None, ELSEWHERE, "deny"),
+    (
+        "M-T5",
+        sh("git -C ~/.claude status && cat ~/.claude/state/s.json"),
+        None,
+        ELSEWHERE,
+        "deny",
+    ),
+    # names that only contain the words
+    ("M-T5", sh("cat hooks/discipline.py"), None, CLAUDE, "allow"),
+    ("M-T5", sh("python -I hooks/discipline.py pre"), None, CLAUDE, "allow"),
+    ("M-T5", sh("ls docs"), None, CLAUDE, "allow"),
+    ("M-T5", sh("git status --short"), None, CLAUDE, "allow"),
+    ("M-T5", sh("cat state/x.json"), None, ELSEWHERE, "allow"),
+    ("M-T5", sh("ls discipline"), None, ELSEWHERE, "allow"),
+    ("M-T5", sh("grep -n state_dir hooks/session_store.py"), None, CLAUDE, "allow"),
+    ("M-T5", sh("cat ~/.claude/CLAUDE.md"), None, ELSEWHERE, "allow"),
+    # M-T6 a sweep that starts at ~/.claude or above it walks through them
+    ("M-T6", sh("grep -rn approvals ."), None, CLAUDE, "deny"),
+    ("M-T6", sh("grep -R approvals"), None, CLAUDE, "deny"),
+    ("M-T6", sh("rg approvals"), None, CLAUDE, "deny"),
+    ("M-T6", sh("rg -n approvals ."), REVIEWER, CLAUDE, "deny"),
+    ("M-T6", sh("find . -name '*.json'"), None, CLAUDE, "deny"),
+    ("M-T6", sh("ls -R"), None, CLAUDE, "deny"),
+    ("M-T6", sh("ls -laR ."), None, CLAUDE, "deny"),
+    ("M-T6", sh("du -sh ."), None, CLAUDE, "deny"),
+    ("M-T6", sh("tar -czf /tmp/all.tgz ."), None, CLAUDE, "deny"),
+    ("M-T6", sh("cp -r . /tmp/copy"), None, CLAUDE, "deny"),
+    ("M-T6", ps("Get-ChildItem -Recurse"), None, CLAUDE, "deny"),
+    ("M-T6", ps("gci -r -Filter *.json"), None, CLAUDE, "deny"),
+    ("M-T6", ps("Copy-Item -Recurse . D:\\copy"), None, CLAUDE, "deny"),
+    ("M-T6", sh("grep -r token ~/.claude"), None, ELSEWHERE, "deny"),
+    ("M-T6", sh(f"rg token {HOME}"), None, ELSEWHERE, "deny"),
+    ("M-T6", sh("find ~ -name '*.json'"), None, ELSEWHERE, "deny"),
+    ("M-T6", sh("grep -rn x .."), None, f"{CLAUDE}/hooks", "deny"),
+    ("M-T6", sh("cd ~/.claude && grep -rn x ."), None, ELSEWHERE, "deny"),
+    # from a subfolder, on named files, with git, or somewhere else
+    ("M-T6", sh("grep -rn approvals hooks tests"), None, CLAUDE, "allow"),
+    ("M-T6", sh("rg approvals docs"), None, CLAUDE, "allow"),
+    ("M-T6", sh("git grep -n approvals"), None, CLAUDE, "allow"),
+    ("M-T6", sh("grep -n approvals CLAUDE.md settings.json"), None, CLAUDE, "allow"),
+    ("M-T6", sh("ls -la"), None, CLAUDE, "allow"),
+    ("M-T6", sh("find hooks -name '*.py'"), None, CLAUDE, "allow"),
+    ("M-T6", sh("grep -rn x ."), None, f"{CLAUDE}/hooks", "allow"),
+    ("M-T6", sh("grep -rn x ."), None, ELSEWHERE, "allow"),
+    ("M-T6", sh("rg x"), None, ELSEWHERE, "allow"),
+    ("M-T6", ps("Get-ChildItem -Recurse"), None, ELSEWHERE, "allow"),
+    ("M-T6", ps("Get-ChildItem"), None, CLAUDE, "allow"),
+    ("M-T6", sh("tar -czf /tmp/h.tgz hooks"), None, CLAUDE, "allow"),
+    ("M-T6", sh("uvx ruff check ."), None, CLAUDE, "allow"),
+    ("M-T6", sh("python -I tests/run_all.py"), None, CLAUDE, "allow"),
+    # what replaying past commands showed: words inside code or scripts are not paths,
+    # and a pattern that cannot match the folders does not walk into them
+    (
+        "M-T5",
+        sh("python -I -c \"print(st.get('state'), d['discipline'])\""),
+        None,
+        CLAUDE,
+        "allow",
+    ),
+    (
+        "M-T5",
+        sh("sed -i 's/reads no suite state/x/' tests/a.py"),
+        None,
+        CLAUDE,
+        "allow",
+    ),
+    (
+        "M-T5",
+        sh("ruff check hooks | awk '/discipline/{getline; print}'"),
+        None,
+        CLAUDE,
+        "allow",
+    ),
+    ("M-T5", sh("git log --oneline -- state"), None, ELSEWHERE, "allow"),
+    (
+        "M-T5",
+        sh("git commit -m 'the state folder and discipline/ are protected'"),
+        None,
+        CLAUDE,
+        "allow",
+    ),
+    ("M-T5", sh("ls state/ledger"), None, CLAUDE, "deny"),
+    ("M-T5", sh("rm -f state/ledger/a.jsonl"), None, CLAUDE, "deny"),
+    (
+        "M-T5",
+        sh("python -I -c \"open('C:/Users/x/.claude/state/s.json')\""),
+        None,
+        ELSEWHERE,
+        "allow",
+    ),
+    (
+        "M-T5",
+        sh(f"python -I -c \"open('{CLAUDE}/state/s.json')\""),
+        None,
+        ELSEWHERE,
+        "deny",
+    ),
+    ("M-T6", sh("grep -rln drain_usage *.py"), None, CLAUDE, "allow"),
+    ("M-T6", sh("grep -rn x hooks/*.py config*"), None, CLAUDE, "allow"),
+    ("M-T6", sh("grep -rn x *"), None, CLAUDE, "deny"),
+    ("M-T6", sh("grep -rn x s*"), None, CLAUDE, "deny"),
+    ("M-T6", sh("ls -R ~/.cl*"), None, ELSEWHERE, "deny"),
+    (
+        "M-T6",
+        ps("Get-ChildItem -Recurse -Filter *vm*bundle* C:\\ProgramData\\x"),
+        None,
+        CLAUDE,
+        "allow",
+    ),
+    (
+        "M-T1",
+        ("Read", {"file_path": f"{CLAUDE}/state/ledger/a.jsonl"}),
+        None,
+        ELSEWHERE,
+        "deny",
+    ),
+    (
+        "M-T1",
+        ("Grep", {"pattern": "x", "path": f"{CLAUDE}/discipline"}),
+        None,
+        ELSEWHERE,
+        "deny",
+    ),
+    ("M-T1", ("Grep", {"pattern": "x", "path": CLAUDE}), None, ELSEWHERE, "deny"),
+    (
+        "M-T1",
+        ("Grep", {"pattern": "x", "path": f"{CLAUDE}/hooks"}),
+        None,
+        ELSEWHERE,
+        "allow",
+    ),
+    ("M-T1", ("Grep", {"pattern": "x", "glob": "*.py"}), None, CLAUDE, "allow"),
+    (
+        "M-T1",
+        ("Glob", {"pattern": "**/*.py", "path": CLAUDE}),
+        None,
+        ELSEWHERE,
+        "allow",
+    ),
+]
+for label, (tool, ti), agent, cwd, want in M_CASES:
+    got = answer(tool, ti, agent, cwd)
+    ok = got == want
+    fails += not ok
+    print(
+        ("OK  " if ok else "FAIL"),
+        label,
+        agent or "main",
+        "in ~/.claude" + cwd[len(CLAUDE) :] if cwd.startswith(CLAUDE) else "elsewhere",
+        tool,
+        ti,
+        "->",
+        got,
+        "" if ok else f"(want {want})",
+    )
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

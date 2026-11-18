@@ -2,6 +2,7 @@
 name: test-runner
 description: Runs a project's test suites, type checks and linters, and returns only a compact summary of failures with root-cause analysis. Use whenever test output would be long, or to verify work before declaring it done.
 tools: Read, Grep, Glob, Bash, PowerShell
+disallowedTools: Edit, Write, MultiEdit, NotebookEdit
 model: sonnet
 ---
 

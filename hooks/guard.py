@@ -1,6 +1,9 @@
-"""PreToolUse guard: blocks destructive shell commands and access to secrets.
+"""PreToolUse guard: blocks destructive shell commands and access to secrets, keeps the
+read-only subagents read-only, keeps the approval folders from being read through the shell,
+and asks before a command ends processes.
 
-Exit code 2 blocks the tool call; stderr is shown to Claude as the reason.
+Exit code 2 blocks the tool call; stderr is shown to Claude as the reason. A question to the
+user is a PreToolUse permissionDecision of "ask" on stdout.
 """
 
 from __future__ import annotations
@@ -110,6 +113,23 @@ def block(reason: str) -> None:
         file=sys.stderr,
     )
     sys.exit(2)
+
+
+def ask(reason: str) -> None:
+    """Hand the decision to the user (PreToolUse permissionDecision "ask")."""
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "ask",
+                    "permissionDecisionReason": f"guard hook: {reason}. Confirm that this "
+                    "is what you want to end.",
+                }
+            }
+        )
+    )
+    sys.exit(0)
 
 
 def is_secret_path(path: str) -> bool:
@@ -523,19 +543,367 @@ def _basename(word: str) -> str:
     return program_and_args(SimpleCommand(words=[word]))[0]
 
 
-def check_parsed(command: str, dialect: Dialect, depth: int = 0) -> None:
+# ---------------------------------------------------------------- devenv-fix-m
+# Who runs the tool call and where. A subagent's tool calls reach this hook with its
+# agent_type (the hooks of settings.json run for subagents as for the main session).
+_ctx: dict[str, str | None] = {"agent": None, "cwd": None}
+_asks: list[str] = []  # questions for the user; a block anywhere in the command wins
+
+# Subagents whose definitions say "read-only". Their definitions have no edit tool; this
+# makes the shell follow (2026-11-18: a reviewer killed every grep on the machine by name).
+READ_ONLY_AGENTS = {"code-reviewer", "security-auditor", "test-runner"}
+EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+READ_ONLY_REASON = (
+    "the read-only subagent ({agent}) may not {what}; say so in your report and leave it "
+    "to the main session"
+)
+KILLERS = {"kill", "pkill", "killall", "taskkill", "tskill", "stop-process", "spps"}
+GIT_WRITES = {
+    "add", "am", "apply", "bisect", "checkout", "cherry-pick", "clean", "clone", "commit",
+    "fetch", "gc", "init", "merge", "mv", "pull", "push", "rebase", "reset", "restore",
+    "revert", "rm", "switch", "update-index", "update-ref",
+}  # fmt: skip
+GIT_READ_FORMS = {  # subcommands that write unless used in one of these read forms
+    "branch": {"", "-a", "-r", "-v", "-vv", "-l", "--list", "--all", "--remotes",
+               "--show-current", "--contains", "--merged", "--no-merged"},
+    "stash": {"list", "show"},
+    "tag": {"", "-l", "--list", "-n", "--contains"},
+    "worktree": {"list"},
+    "remote": {"", "-v", "show", "get-url"},
+    "config": {"--get", "--get-all", "--list", "-l", "--show-origin"},
+    "notes": {"", "list", "show"},
+}  # fmt: skip
+
+
+def read_only_agent() -> str | None:
+    agent = _ctx["agent"]
+    return agent if agent in READ_ONLY_AGENTS else None
+
+
+def ends_processes(program: str, args: list[str]) -> bool:
+    if program in KILLERS:
+        return True
+    low = [a.lower() for a in args]
+    return (
+        program == "wmic"
+        and "process" in low
+        and any(a in ("delete", "terminate") or "terminate" in a for a in low)
+    )
+
+
+def git_writes(sub: list[str]) -> bool:
+    """True when the git subcommand (as git_subcommand gives it) changes the repository."""
+    if not sub:
+        return False
+    head, rest = sub[0], sub[1:]
+    if head in GIT_WRITES:
+        return True
+    forms = GIT_READ_FORMS.get(head)
+    if forms is None:
+        return False
+    first = rest[0] if rest else ""
+    if first not in forms:
+        return True
+    # `git branch --list x` reads; `git branch -l` followed by nothing else reads too
+    return head == "branch" and any(
+        a in ("-d", "-D", "-m", "-M", "-c", "-C", "-f", "--delete", "--move", "--copy")
+        for a in rest
+    )
+
+
+# The folders of the approval store and of the session records. settings.json denies the
+# Read tool for one of them; a shell command reads them all the same.
+HOME_DIR = os.path.expanduser("~")
+CLAUDE_HOME = os.path.join(HOME_DIR, ".claude")
+PROTECTED = [os.path.join(CLAUDE_HOME, name) for name in ("discipline", "state")]
+PROTECTED_REASON = (
+    "{path} is inside a protected folder of ~/.claude (discipline, state): it is not read "
+    "or written through a tool"
+)
+SWEEP_REASON = (
+    "a recursive command starting at {root} walks through the protected folders of "
+    "~/.claude (discipline, state): start from a subfolder (hooks, tests, docs, ...) or "
+    "use `git grep`"
+)
+_HOME_FORM = re.compile(
+    r"^(~|\$HOME|\$\{HOME\}|%USERPROFILE%|\$env:USERPROFILE|\$\{env:USERPROFILE\}|\$env:HOME)"
+    r"(?=$|[\\/])",
+    re.IGNORECASE,
+)
+
+
+# Programs whose plain-word arguments are files or folders. For any other program a word
+# without a path separator (`state` inside a line of Python, a branch name, a subcommand) is
+# not taken for a path: only words that look like one are.
+FILE_PROGRAMS = {
+    "cat", "ls", "dir", "type", "head", "tail", "less", "more", "wc", "cp", "mv", "rm",
+    "rmdir", "find", "tree", "du", "tar", "zip", "7z", "7za", "stat", "file", "sort", "uniq",
+    "grep", "egrep", "fgrep", "rg", "ag", "ack", "findstr", "sed", "awk", "cut", "xxd",
+    "strings", "od", "nl", "tac", "diff", "cmp", "xcopy", "robocopy", "start", "explorer",
+    "notepad", "code", "get-content", "gc", "get-childitem", "gci", "get-item", "gi",
+    "copy-item", "cpi", "copy", "move-item", "remove-item", "select-string", "sls",
+    "test-path", "resolve-path", "get-filehash", "import-csv", "compress-archive",
+    "cd", "pushd", "chdir", "set-location", "sl",
+}  # fmt: skip
+
+
+def as_path(word: str, cwd: str, bare: bool = True) -> str | None:
+    """The absolute path a command word names, or None when it names none that can be told
+    (a flag, a variable, a URL). A glob counts as the folder it starts in. With `bare`
+    false, a word that does not look like a path (no separator, no home form, not `.` or
+    `..`) is not one."""
+    from verification import _resolve
+
+    text = word.strip("'\"")
+    if not text or text.startswith("-") or "://" in text:
+        return None
+    looks = bool(_HOME_FORM.match(text)) or "/" in text or "\\" in text
+    if not bare and not looks and text not in (".", ".."):
+        return None
+    text = _HOME_FORM.sub(lambda _m: HOME_DIR, text)
+    cut = re.search(r"[*?\[]", text)
+    if cut:
+        text = text[: cut.start()]
+        text = text[: max(text.rfind("/"), text.rfind("\\")) + 1] or "."
+    if re.search(r"[$%`]", text):
+        return None
+    try:
+        return _resolve(cwd, text)
+    except (ValueError, OSError):
+        return None
+
+
+def in_protected(path: str) -> bool:
+    from verification import _inside
+
+    return any(_inside(path, root) for root in PROTECTED)
+
+
+def above_protected(path: str) -> bool:
+    """True for ~/.claude itself and every folder above it."""
+    from verification import _inside
+
+    return _inside(CLAUDE_HOME, path)
+
+
+def glob_reaches_protected(word: str, cwd: str) -> bool | None:
+    """For a start word with a pattern in it (`*.py`, `s*`, `~/.claude/*`): whether the
+    pattern can match the way down to a protected folder. None when the word has no
+    pattern."""
+    import fnmatch
+
+    from verification import _resolve
+
+    text = word.strip("'\"").rstrip(",")
+    cut = re.search(r"[*?\[]", text)
+    if not cut:
+        return None
+    split = max(text.rfind("/", 0, cut.start()), text.rfind("\\", 0, cut.start())) + 1
+    folder = as_path(text[:split] or ".", cwd)
+    pattern = re.split(r"[\\/]", text[split:])[0]
+    if folder is None or not above_protected(folder):
+        return False
+    for root in PROTECTED:
+        down = os.path.relpath(root, _resolve(folder, "."))
+        if fnmatch.fnmatch(re.split(r"[\\/]", down)[0].lower(), pattern.lower()):
+            return True
+    return False
+
+
+SCRIPT_PROGRAMS = {"sed", "awk", "gawk", "perl"}  # their first plain word is a script
+
+
+def script_indexes(program: str, args: list[str]) -> set[int]:
+    """The arguments of sed, awk and the like that are program text, not files."""
+    if program not in SCRIPT_PROGRAMS:
+        return set()
+    out = {
+        k + 1 for k, a in enumerate(args) if a in ("-e", "--expression", "-f", "--file")
+    }
+    if not out:
+        first = next((k for k, a in enumerate(args) if not a.startswith("-")), None)
+        if first is not None:
+            out.add(first)
+    # whatever has braces or statement ends in it is program text wherever it stands
+    # (`awk -F : '/x/{getline}'`)
+    return out | {k for k, a in enumerate(args) if re.search(r"[{};]", a)}
+
+
+def _flag_letters(args: list[str]) -> str:
+    return "".join(a[1:] for a in args if re.fullmatch(r"-[A-Za-z]+", a))
+
+
+def _ps_switch(args: list[str], name: str) -> bool:
+    """A PowerShell switch given in full or by an unambiguous-looking prefix (-Recurse, -r)."""
+    return any(
+        len(a) >= 2 and a.startswith("-") and name.startswith(a[1:].lower())
+        for a in args
+    )
+
+
+PS_VALUED = {"-filter", "-include", "-exclude", "-depth", "-pattern", "-destination",
+             "-name", "-attributes", "-encoding"}  # fmt: skip
+SWEEP_ALWAYS = {"rg", "find", "tree", "du", "fd", "fdfind", "ag", "ack"}
+ARCHIVERS = {"tar", "zip", "7z", "7za", "compress-archive", "xcopy", "robocopy"}
+
+
+def sweep_starts(program: str, args: list[str], dialect: Dialect) -> list[str] | None:
+    """Where a command that walks a folder tree starts: the words naming its start folders,
+    [] for "the current folder", None when the command does not walk a tree."""
+    letters = _flag_letters(args)
+    ps = dialect == "powershell"
+    skip: set[int] = set()
+    for k, a in enumerate(args):
+        low = a.lower()
+        if low in VALUE_FLAGS or low in PATTERN_FLAGS or (ps and low in PS_VALUED):
+            skip.add(k + 1)
+    skip |= {k - 1 for k in search_patterns([program, *args]) if k >= 1}
+    words = [
+        a
+        for k, a in enumerate(args)
+        if k not in skip
+        and not a.startswith("-")
+        and not re.fullmatch(r"/[A-Za-z?]+", a)
+    ]
+    default_here = True
+    if program in ("grep", "egrep", "fgrep"):
+        walks = (
+            "r" in letters
+            or "R" in letters
+            or any(a in ("--recursive", "--dereference-recursive") for a in args)
+        )
+    elif program in SWEEP_ALWAYS:
+        walks = True
+        if program == "find":  # roots come before the first expression
+            cut = next(
+                (k for k, a in enumerate(args) if a.startswith(("-", "(", "!"))),
+                len(args),
+            )
+            words = [a for a in args[:cut]]
+        elif program in ("fd", "fdfind"):
+            words = words[1:]  # the first word is the pattern
+    elif program in ("ls", "dir", "gci", "get-childitem"):
+        walks = (
+            _ps_switch(args, "recurse")
+            if ps
+            else "R" in letters
+            or "--recursive" in args
+            or any(a.lower() == "/s" for a in args)
+        )
+    elif program == "findstr":
+        walks = any(a.lower() == "/s" for a in args)
+    elif program in ("cp", "copy-item", "cpi", "copy"):
+        walks = (
+            _ps_switch(args, "recurse")
+            if ps
+            else any(c in letters for c in "rRa")
+            or "--recursive" in args
+            or "--archive" in args
+        )
+        words, default_here = words[:1] if ps else words[:-1], False
+    elif program in ARCHIVERS:
+        walks, default_here = True, False
+        if program in ("xcopy", "robocopy"):
+            words = words[:1]
+    else:
+        return None
+    if not walks:
+        return None
+    return words if words or not default_here else []
+
+
+def check_isolation(
+    program: str, args: list[str], dialect: Dialect, cwd: str, data: set[int]
+) -> None:
+    """The rules of devenv-fix-m for one simple command at `cwd`; `data` are the indexes of
+    arguments that are message text or search patterns, not paths."""
+    agent = read_only_agent()
+    if ends_processes(program, args):
+        if agent:
+            block(READ_ONLY_REASON.format(agent=agent, what="end processes"))
+        _asks.append(f"`{program}` ends processes")
+    if agent and program == "git" and git_writes(git_subcommand(args)):
+        block(READ_ONLY_REASON.format(agent=agent, what="change a git repository"))
+    data = data | script_indexes(program, args)
+    for k, arg in enumerate(args):
+        if k in data:
+            continue
+        for tok in re.split(r"[\s'\"<>|;&()=,]+", arg):
+            path = as_path(tok, cwd, program in FILE_PROGRAMS) if tok else None
+            if path and in_protected(path):
+                block(PROTECTED_REASON.format(path=tok))
+    starts = sweep_starts(program, args, dialect)
+    if starts is None:
+        return
+    if dialect == "powershell":
+        # a word that is all pattern (`*vm*bundle*`) is a filter there, not a start folder
+        named = [
+            w for w in starts if not re.fullmatch(r"[^\\/]*[*?][^\\/]*", w.rstrip(","))
+        ]
+        if starts and not named:
+            return
+        starts = named
+    for word in starts or ["."]:
+        reaches = glob_reaches_protected(word, cwd)
+        if reaches is False:
+            continue  # a pattern that matches neither folder nor the way to them
+        path = as_path(word, cwd)
+        if path and above_protected(path):
+            block(SWEEP_REASON.format(root=word if starts else "the current folder"))
+
+
+def check_read_only_writes(command: str, dialect: Dialect, cwd: str) -> None:
+    """A read-only subagent writes nothing a command line shows, outside the temp folder."""
+    agent = read_only_agent()
+    if not agent:
+        return
+    import tempfile
+
+    from shellwrites import write_targets
+    from verification import _inside
+
+    targets, unknown = write_targets(command, dialect, cwd)
+    temp = tempfile.gettempdir()
+    outside = [t for t in targets if not _inside(t, temp)]
+    if outside:
+        block(
+            READ_ONLY_REASON.format(
+                agent=agent, what=f"write files ({os.path.basename(outside[0])})"
+            )
+        )
+    if unknown:
+        block(
+            READ_ONLY_REASON.format(
+                agent=agent, what="write to a target it does not name"
+            )
+        )
+
+
+def check_parsed(
+    command: str, dialect: Dialect, depth: int = 0, cwd: str | None = None
+) -> None:
     from shellparse import ParseError, parse, program_and_args
+    from verification import cwd_at
 
     if depth > MAX_DEPTH:
         block("too deeply nested shell command")
+    base = cwd or _ctx["cwd"] or os.getcwd()
     try:
         commands = parse(command, dialect)
     except ParseError:
         legacy_check(command)
+        if read_only_agent():
+            block(
+                READ_ONLY_REASON.format(
+                    agent=read_only_agent(), what="run a command that cannot be read"
+                )
+            )
         return
+    check_read_only_writes(command, dialect, base)
     pipeline: list[str] = []
     piped_heredocs: list[str] = []
-    for cmd in commands:
+    for index, cmd in enumerate(commands):
+        here = cwd_at(commands, index, base)
         program, args = program_and_args(cmd)
         canonical = " ".join(
             [program, *(git_subcommand(args) if program == "git" else args)]
@@ -560,17 +928,17 @@ def check_parsed(command: str, dialect: Dialect, depth: int = 0) -> None:
                 block("pipe from internet to a shell")
             for body in piped_heredocs if shells_downstream else []:
                 ps = shells_downstream[0] in PS_HOSTS | {"iex", "invoke-expression"}
-                check_parsed(body, "powershell" if ps else "bash", depth + 1)
+                check_parsed(body, "powershell" if ps else "bash", depth + 1, here)
             pipeline = []
             piped_heredocs = []
 
         for script, sub_dialect in nested_scripts(program, args):
-            check_parsed(script, sub_dialect, depth + 1)
+            check_parsed(script, sub_dialect, depth + 1, here)
         if cmd.heredoc is not None and program in INTERPRETERS:
             if program in POSIX_SHELLS:
-                check_parsed(cmd.heredoc, "bash", depth + 1)
+                check_parsed(cmd.heredoc, "bash", depth + 1, here)
             elif program in PS_HOSTS:
-                check_parsed(cmd.heredoc, "powershell", depth + 1)
+                check_parsed(cmd.heredoc, "powershell", depth + 1, here)
             else:
                 hit = tokens_look_secret(cmd.heredoc)
                 if hit:
@@ -580,6 +948,7 @@ def check_parsed(command: str, dialect: Dialect, depth: int = 0) -> None:
         data |= {k - 1 for k in search_patterns([program, *args]) if k >= 1}
         if program == "git" and git_names_only(cmd, args):
             data = set(range(len(args)))  # names a file, cannot print it
+        check_isolation(program, args, dialect, here, data)
         for k, arg in enumerate(args):
             if k in data:
                 continue
@@ -622,15 +991,26 @@ def main() -> None:
         sys.exit(0)
     tool = data.get("tool_name", "")
     ti = data.get("tool_input", {}) or {}
+    agent = data.get("agent_type")
+    _ctx["agent"] = agent if isinstance(agent, str) and data.get("agent_id") else None
+    cwd = data.get("cwd")
+    _ctx["cwd"] = cwd if isinstance(cwd, str) and cwd else os.getcwd()
 
+    if tool in EDIT_TOOLS and read_only_agent():
+        block(READ_ONLY_REASON.format(agent=read_only_agent(), what="edit files"))
     if tool in ("Bash", "PowerShell"):
         check_command(
             ti.get("command", ""), "powershell" if tool == "PowerShell" else "bash"
         )
+        if _asks:
+            ask("; ".join(dict.fromkeys(_asks)))
     elif tool in ("Read", "Edit", "Write", "MultiEdit", "NotebookEdit"):
         path = ti.get("file_path") or ti.get("notebook_path") or ""
         if path and is_secret_path(path):
             block(f"access to secret file {path}")
+        full = as_path(str(path), str(_ctx["cwd"])) if path else None
+        if full and in_protected(full):
+            block(PROTECTED_REASON.format(path=path))
     elif tool in ("Grep", "Glob"):
         # Grep's "pattern" is a regex over content, not a path; only Glob's pattern is a path.
         keys = ("path", "pattern") if tool == "Glob" else ("path", "glob")
@@ -638,6 +1018,12 @@ def main() -> None:
         hit = tokens_look_secret(target)
         if hit:
             block(f"search targets a secret file ({hit})")
+        where = as_path(str(ti.get("path") or "."), str(_ctx["cwd"]))
+        if where and in_protected(where):
+            block(PROTECTED_REASON.format(path=ti.get("path")))
+        if where and above_protected(where) and not ti.get("glob") and tool == "Grep":
+            # a content search over all of ~/.claude or above it reads the protected folders
+            block(SWEEP_REASON.format(root=ti.get("path") or "the current folder"))
     sys.exit(0)
 
 
