@@ -25,7 +25,14 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if (
+    TYPE_CHECKING
+):  # names for annotations only: verification is imported where it is used
+    from collections.abc import Mapping
+
+    from verification import Policy
 
 _T0 = time.monotonic()  # earliest point of this hook run: every budget counts from here
 
@@ -803,6 +810,7 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
     ti = data.get("tool_input", {}) or {}
     cwd = str(data.get("cwd") or os.getcwd())
 
+    note_policies(state, tool, ti, cwd)
     # D-5: snapshot any repository this tool is about to touch, before it runs.
     if tool in ("Bash", "PowerShell"):
         command = str(ti.get("command", ""))
@@ -2289,6 +2297,92 @@ def v2_write_check(
 MAX_DIRTY_FILES = 200
 
 
+# devenv-final 11c: the gate a session is judged by is the one it found. When the
+# declaration changes during the session (the gate line edited, or a CLAUDE.md with its own
+# gate created below the real one), a pass of the new gate alone proves nothing about what
+# the old one checked: both must pass on the same content.
+MAX_POLICIES_SEEN = 50
+POLICY_CHANGED = (
+    "이 세션에서 이 프로젝트의 게이트 선언이 바뀌었습니다. 바뀌기 전 게이트 `{old}`({root}에서 실행)와 "
+    "지금 게이트가 같은 내용에서 모두 통과해야 검증으로 인정됩니다"
+)
+
+
+def note_policy(state: dict[str, Any], policy: Mapping[str, Any], now: float) -> None:
+    """Remember the gate of a project as it was when this session first acted there
+    (called before the tool runs). A declaration that appears below an already seen one,
+    in a CLAUDE.md written after that one was seen, was made in this session: its old gate
+    is the enclosing project's."""
+    root = str(policy.get("root") or "")
+    seen = state.setdefault("policy_seen", {})
+    if not root or root in seen or len(seen) >= MAX_POLICIES_SEEN:
+        return
+    record: dict[str, Any] = {"gate": policy.get("gate"), "at": now}
+    above = [r for r in seen if r != root and _inside(root, r) and seen[r].get("gate")]
+    if above:
+        parent = seen[max(above, key=len)]
+        try:
+            written = os.path.getmtime(os.path.join(root, "CLAUDE.md"))
+        except OSError:  # cannot be told: taken as it is found
+            written = 0.0
+        if written > float(parent.get("at", 0)):
+            record = {
+                "gate": parent["gate"],
+                "at": now,
+                "old_root": parent.get("old_root") or max(above, key=len),
+            }
+    seen[root] = record
+
+
+def note_policies(
+    state: dict[str, Any], tool: object, ti: Mapping[str, Any], cwd: str
+) -> None:
+    """note_policy for every project this tool call is about to act in."""
+    from verification import find_policy
+
+    now = time.time()
+    if tool in ("Bash", "PowerShell"):
+        places = [
+            os.path.join(d, "_")
+            for d in shell_targets(
+                str(ti.get("command", "")), tool == "PowerShell", cwd
+            )
+        ]
+    else:
+        target = edit_target(dict(ti))
+        places = [absolute(target, cwd)] if target else []
+    for place in places:
+        note_policy(state, find_policy(place), now)
+
+
+def old_policy(state: dict[str, Any], root: str, gate: object) -> Policy | None:
+    """The policy this project had when the session first saw it, when its gate differs
+    from the one declared now (None when nothing changed)."""
+    seen = (state.get("policy_seen") or {}).get(root)
+    if not isinstance(seen, dict) or not seen.get("gate") or seen.get("gate") == gate:
+        return None
+    return {
+        "root": str(seen.get("old_root") or root),
+        "gate": str(seen["gate"]),
+        "ci": "none",
+        "validate": None,
+    }
+
+
+def entry_policy(root: str, entry: Mapping[str, Any]) -> Policy:
+    """The verification policy recorded with a project's unverified edits."""
+    policy: Policy = {
+        "root": root,
+        "gate": entry.get("gate"),
+        "ci": entry.get("ci", "undeclared"),
+        "validate": entry.get("validate"),
+    }
+    if entry.get("invalid"):
+        policy["invalid"] = str(entry["invalid"])
+        policy["gates"] = [str(g) for g in entry.get("gates") or []]
+    return policy
+
+
 def mark_dirty(
     state: dict[str, Any], path: str, at: float, lines: int = 0, by: object = None
 ) -> None:
@@ -2304,6 +2398,8 @@ def mark_dirty(
             "gate": policy["gate"],
             "ci": policy["ci"],
             "validate": policy["validate"],
+            "invalid": policy.get("invalid"),
+            "gates": policy.get("gates"),
         }
     )
     files = entry.setdefault("files", [])
@@ -2385,7 +2481,7 @@ def record_evidence(
     data: dict[str, Any], state: dict[str, Any], *, failed: bool
 ) -> None:
     """Attach what this shell command proves (if anything) to each project with unverified edits."""
-    from verification import Policy, evaluate
+    from verification import evaluate
 
     reresolve_dirty(state)
 
@@ -2408,12 +2504,7 @@ def record_evidence(
     )
     policies: dict[str, Policy] = {}
     for root, entry in state["dirty"].items():
-        policies[root] = {
-            "root": root,
-            "gate": entry.get("gate"),
-            "ci": entry.get("ci", "undeclared"),
-            "validate": entry.get("validate"),
-        }
+        policies[root] = entry_policy(root, entry)
     # D-5: projects changed outside the Edit tool have no dirty entry; the directories this
     # command ran in decide which project's evidence it can be.
     for d in targets:
@@ -2430,14 +2521,48 @@ def record_evidence(
             failed=failed,
             background=background,
         )
-        if ev is None:
-            continue
-        if ev["outcome"] == "passed" and changed_during:
+        if ev is not None and ev["outcome"] == "passed" and changed_during:
             ev = {
                 **ev,
                 "outcome": "unknown",
                 "why": changed_during,
             }
+        was = old_policy(state, root, policy.get("gate"))
+        if was is not None:
+            ev_old = evaluate(
+                command,
+                "powershell" if is_ps else "bash",
+                cwd,
+                was,
+                failed=failed,
+                background=background,
+            )
+            old_ok = bool(
+                ev_old and ev_old["outcome"] == "passed" and not changed_during
+            )
+            new_ok = ev is not None and ev["outcome"] == "passed"
+            if old_ok or new_ok:
+                seen = state["policy_seen"][root]
+                content = evidence_digests(state, root, targets[-1])
+                if old_ok:
+                    seen["old_pass"] = content
+                if new_ok:
+                    seen["new_pass"] = content
+                if content and seen.get("old_pass") == content == seen.get("new_pass"):
+                    ev = {
+                        "outcome": "passed",
+                        "kind": "gate",
+                        "cmd": command[:200],
+                        "why": "",
+                    }
+                elif ev is not None and new_ok:
+                    ev = {
+                        **ev,
+                        "outcome": "unknown",
+                        "why": POLICY_CHANGED.format(old=was["gate"], root=was["root"]),
+                    }
+        if ev is None:
+            continue
         old = state["evidence"].get(root) or {}
         still_valid_pass = old.get("outcome") == "passed" and float(
             old.get("at", 0)
@@ -3379,20 +3504,20 @@ def check_repos(
 ) -> list[str] | None:
     """Repositories whose content a check command could be evidence for (None if not a check)."""
     from shellparse import Dialect
-    from verification import Policy, evaluate, find_policy
+    from verification import evaluate, find_policy
 
     reresolve_dirty(state)  # the same policy grouping record_evidence() will use
     targets = shell_targets(command, is_ps, cwd)
     policies: list[Policy] = [find_policy(os.path.join(d, "_")) for d in targets]
     for r, e in state.get("dirty", {}).items():
-        policies.append(
-            {
-                "root": r,
-                "gate": e.get("gate"),
-                "ci": e.get("ci", "undeclared"),
-                "validate": e.get("validate"),
-            }
-        )
+        policies.append(entry_policy(r, e))
+    # ... and the gates these projects had before this session changed them (11c): a run of
+    # one is evidence too, so its content is remembered like any other check's.
+    policies += [
+        was
+        for was in (old_policy(state, p["root"], p.get("gate")) for p in list(policies))
+        if was is not None
+    ]
     dialect: Dialect = "powershell" if is_ps else "bash"
     if not any(
         evaluate(command, dialect, cwd, p, failed=False, background=False)

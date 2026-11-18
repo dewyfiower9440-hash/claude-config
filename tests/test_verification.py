@@ -226,6 +226,31 @@ check(
     ),
     (None, None, "make t"),
 )
+# devenv-final 11a: two gate lines (a weaker one slipped in under the real one) declare
+# nothing that can pass.
+TWO = "## Verification\n- gate: `uv run pytest -q --cov`\n- gate: `true`\n- ci: required\n"
+two = v.parse_policy(TWO, ROOT)
+check(
+    "V-T5 two gate lines: no gate, the policy says why, ci stays",
+    (two["gate"], bool(two.get("invalid")), two["ci"]),
+    (None, True, "required"),
+)
+check(
+    "V-T5 ... neither declared line, nor a runner, passes there; other commands are no check",
+    (
+        outcome("true", two),
+        outcome("uv run pytest -q --cov", two),
+        outcome("uv run pytest -q", two),
+        outcome("git status", two),
+        outcome("uv run pytest -q", two, cwd="C:/other"),
+    ),
+    ("unknown", "unknown", "unknown", None, None),
+)
+check(
+    "V-T5 one gate line (and a gate: line outside the section) is a valid policy",
+    v.parse_policy(text, "C:/p").get("invalid"),
+    None,
+)
 # Without a declared policy only a command that runs checks counts as a runner.
 for line in (
     "pytest --version",

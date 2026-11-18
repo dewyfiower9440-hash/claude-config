@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -571,5 +572,97 @@ for label, (tool, ti), agent, cwd, want in M_CASES:
         got,
         "" if ok else f"(want {want})",
     )
+# ---- devenv-final 11b: a change of a CLAUDE.md's `## Verification` section (the gate that
+# decides what counts as verified) is the user's to confirm, by whatever tool.
+POLICY_DIR = Path(tempfile.mkdtemp(prefix="guard-policy-"))
+WITH = "# p\n\n## Verification\n- gate: `uv run pytest -q --cov`\n- ci: required\n\n## Gotchas\n- one\n"
+(POLICY_DIR / "has").mkdir()
+(POLICY_DIR / "none").mkdir()
+(POLICY_DIR / "has" / "CLAUDE.md").write_text(WITH, encoding="utf-8")
+(POLICY_DIR / "has" / "README.md").write_text(WITH, encoding="utf-8")
+(POLICY_DIR / "none" / "CLAUDE.md").write_text("# p\n\n## Gotchas\n- one\n", "utf-8")
+HAS, NONE = (
+    str(POLICY_DIR / "has" / "CLAUDE.md"),
+    str(POLICY_DIR / "none" / "CLAUDE.md"),
+)
+
+
+def edit(path: str, old: str, new: str) -> tuple[str, dict[str, object]]:
+    return "Edit", {"file_path": path, "old_string": old, "new_string": new}
+
+
+P_CASES = [
+    ("P-T1 the gate line weakened", edit(HAS, "uv run pytest -q --cov", "true"), "ask"),
+    ("P-T1 ci: required -> none", edit(HAS, "ci: required", "ci: none"), "ask"),
+    ("P-T1 a second gate line", edit(HAS, "- ci:", "- gate: `true`\n- ci:"), "ask"),
+    ("P-T1 the heading renamed", edit(HAS, "## Verification", "## Old checks"), "ask"),
+    ("P-T2 another section edited", edit(HAS, "- one", "- one\n- two"), "allow"),
+    ("P-T2 old_string not in the file", edit(HAS, "no such text", "x"), "allow"),
+    (
+        "P-T2 the same text in another file",
+        edit(str(POLICY_DIR / "has" / "README.md"), "uv run pytest -q --cov", "true"),
+        "allow",
+    ),
+    (
+        "P-T3 a section added by Edit",
+        edit(NONE, "## Gotchas", "## Verification\n- gate: `true`\n\n## Gotchas"),
+        "ask",
+    ),
+    (
+        "P-T3 a new CLAUDE.md with a section",
+        (
+            "Write",
+            {"file_path": str(POLICY_DIR / "new" / "CLAUDE.md"), "content": WITH},
+        ),
+        "ask",
+    ),
+    (
+        "P-T3 a new CLAUDE.md without one",
+        (
+            "Write",
+            {"file_path": str(POLICY_DIR / "new" / "CLAUDE.md"), "content": "# p\n"},
+        ),
+        "allow",
+    ),
+    (
+        "P-T4 Write that drops the section",
+        ("Write", {"file_path": HAS, "content": "# p\n"}),
+        "ask",
+    ),
+    (
+        "P-T4 Write that keeps the section and changes the rest",
+        ("Write", {"file_path": HAS, "content": WITH.replace("- one", "- two")}),
+        "allow",
+    ),
+    (
+        "P-T5 MultiEdit: one of the edits is in the section",
+        (
+            "MultiEdit",
+            {
+                "file_path": HAS,
+                "edits": [
+                    {"old_string": "- one", "new_string": "- two"},
+                    {"old_string": "--cov", "new_string": ""},
+                ],
+            },
+        ),
+        "ask",
+    ),
+    ("P-T6 sed -i on a CLAUDE.md", sh("sed -i s/--cov// CLAUDE.md"), "ask"),
+    ("P-T6 a redirection into one", sh("echo x >> sub/CLAUDE.md"), "ask"),
+    ("P-T6 Set-Content", ps("Set-Content -Path CLAUDE.md -Value x"), "ask"),
+    ("P-T6 reading one", sh("cat CLAUDE.md && grep -n gate CLAUDE.md"), "allow"),
+    ("P-T6 writing another file", sh("echo x > NOTES.md"), "allow"),
+]
+for label, (tool, ti), want in P_CASES:
+    got = answer(tool, ti, None, str(POLICY_DIR / "has"))
+    ok = got == want
+    fails += not ok
+    print(("OK  " if ok else "FAIL"), label, "->", got, "" if ok else f"(want {want})")
+got = answer(*edit(HAS, "uv run pytest -q --cov", "true"), REVIEWER, str(POLICY_DIR))
+ok = got == "deny"
+fails += not ok
+print(("OK  " if ok else "FAIL"), "P-T7 a read-only subagent is still refused ->", got)
+shutil.rmtree(POLICY_DIR, ignore_errors=True)
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

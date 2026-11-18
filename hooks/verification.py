@@ -31,6 +31,9 @@ class Policy(TypedDict):
     validate: str | None
     # ignored files (globs relative to root) whose changes still matter, e.g. a local config
     watch: NotRequired[list[str]]
+    # why this declaration cannot be used (then `gate` is None and nothing passes here)
+    invalid: NotRequired[str]
+    gates: NotRequired[list[str]]  # every gate line of an invalid declaration
 
 
 class Evidence(TypedDict):
@@ -70,11 +73,14 @@ def parse_policy(text: str, root: str) -> Policy | None:
     if not m:
         return None
     fields: dict[str, str] = {}
+    gates: list[str] = []
     for line in m.group(1).splitlines():
         fm = FIELD.match(line)
         if fm:
             value = fm.group(2).split("  #")[0].strip()
             fields[fm.group(1).lower()] = value.strip("`").strip()
+            if fm.group(1).lower() == "gate":
+                gates.append(fields["gate"])
     ci_word = (
         fields.get("ci", "none").split()[0].lower() if fields.get("ci") else "none"
     )
@@ -86,13 +92,21 @@ def parse_policy(text: str, root: str) -> Policy | None:
         for g in re.split(r"[,\s]+", fields.get("watch", ""))
         if g.strip("`")
     ]
-    return {
+    policy: Policy = {
         "root": root,
         "gate": fields.get("gate"),
         "ci": ci,
         "validate": fields.get("validate"),
         "watch": watch,
     }
+    if len(gates) > 1:
+        # The last line used to win silently: a weaker gate added under the real one.
+        policy["gate"] = None
+        policy["gates"] = gates
+        policy["invalid"] = (
+            f"{len(gates)} gate lines in the Verification section (keep exactly one)"
+        )
+    return policy
 
 
 def find_policy(file_path: str) -> Policy:
@@ -360,6 +374,26 @@ def evaluate(
         return {"outcome": "passed", "kind": kind, "cmd": command[:200], "why": ""}
 
     root = policy["root"]
+    invalid = policy.get("invalid")
+    if invalid:
+        # Nothing passes under a declaration that cannot be used: neither one of its gate
+        # lines nor a plain runner.
+        declared_runs = False
+        for candidate in policy.get("gates", []):
+            try:
+                target = [c for c in parse(candidate, dialect) if not c.nested]
+            except ParseError:
+                continue
+            declared_runs |= _find_sequence(cmds, target) is not None
+        for i, c in enumerate(cmds):
+            if (declared_runs or is_runner(c)) and _inside(cwd_at(cmds, i, cwd), root):
+                return {
+                    "outcome": "failed" if failed else "unknown",
+                    "kind": "gate",
+                    "cmd": command[:200],
+                    "why": "exit status non-zero" if failed else invalid,
+                }
+        return None
     for kind, declared in (("gate", policy["gate"]), ("validate", policy["validate"])):
         if not declared:
             continue

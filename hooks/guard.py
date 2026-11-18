@@ -124,7 +124,7 @@ def ask(reason: str) -> None:
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "ask",
                     "permissionDecisionReason": f"guard hook: {reason}. Confirm that this "
-                    "is what you want to end.",
+                    "is what you want.",
                 }
             }
         )
@@ -974,6 +974,67 @@ def check_parsed(
                     )
 
 
+# devenv-final 11b: the `## Verification` section of a CLAUDE.md declares the gate that
+# decides what counts as verified. Weakening it (or adding one in a folder below the real
+# one) would turn any command into "the gate", so a change of it is the user's to confirm.
+POLICY_FILE = "claude.md"
+POLICY_REASON = (
+    "this changes the `## Verification` section of {path} (the gate that decides what "
+    "counts as verified)"
+)
+POLICY_SHELL_REASON = (
+    "this command writes {path}, which can hold the `## Verification` section (the gate "
+    "that decides what counts as verified)"
+)
+
+
+def _policy_section(text: str) -> str:
+    from verification import SECTION
+
+    found = SECTION.search(text.replace("\r\n", "\n"))
+    return found.group(0).strip() if found else ""
+
+
+def changes_policy(tool: str, ti: dict[str, object], full: str) -> bool:
+    """True when this Edit/Write/MultiEdit would leave the file's Verification section
+    different from what it is now (added, removed or changed)."""
+    if os.path.basename(full).lower() != POLICY_FILE:
+        return False
+    try:
+        with open(full, encoding="utf-8", errors="replace", newline="") as f:
+            before = f.read().replace("\r\n", "\n")
+    except OSError:  # no such file yet (or unreadable): whatever it gets is new
+        before = ""
+    if tool == "Write":
+        after = str(ti.get("content") or "")
+    else:
+        listed = ti.get("edits")
+        edits = listed if tool == "MultiEdit" and isinstance(listed, list) else [ti]
+        after = before
+        for e in edits:
+            if not isinstance(e, dict):
+                continue
+            old, new = str(e.get("old_string") or ""), str(e.get("new_string") or "")
+            if not old or old not in after:
+                continue  # this edit will not apply
+            after = (
+                after.replace(old, new)
+                if e.get("replace_all")
+                else after.replace(old, new, 1)
+            )
+    return _policy_section(before) != _policy_section(after)
+
+
+def shell_policy_writes(command: str, dialect: Dialect, cwd: str) -> list[str]:
+    """The CLAUDE.md files a command line visibly writes (best effort, see shellwrites)."""
+    if POLICY_FILE not in command.lower():
+        return []
+    from shellwrites import write_targets
+
+    targets, _unknown = write_targets(command, dialect, cwd)
+    return [t for t in targets if os.path.basename(t).lower() == POLICY_FILE]
+
+
 def check_command(cmd: str, dialect: Dialect = "bash") -> None:
     for pattern, reason in LINE_RULES:
         if re.search(pattern, cmd, re.IGNORECASE):
@@ -999,9 +1060,12 @@ def main() -> None:
     if tool in EDIT_TOOLS and read_only_agent():
         block(READ_ONLY_REASON.format(agent=read_only_agent(), what="edit files"))
     if tool in ("Bash", "PowerShell"):
-        check_command(
-            ti.get("command", ""), "powershell" if tool == "PowerShell" else "bash"
-        )
+        dialect: Dialect = "powershell" if tool == "PowerShell" else "bash"
+        check_command(ti.get("command", ""), dialect)
+        for written in shell_policy_writes(
+            str(ti.get("command", "")), dialect, str(_ctx["cwd"])
+        ):
+            _asks.append(POLICY_SHELL_REASON.format(path=written))
         if _asks:
             ask("; ".join(dict.fromkeys(_asks)))
     elif tool in ("Read", "Edit", "Write", "MultiEdit", "NotebookEdit"):
@@ -1011,6 +1075,8 @@ def main() -> None:
         full = as_path(str(path), str(_ctx["cwd"])) if path else None
         if full and in_protected(full):
             block(PROTECTED_REASON.format(path=path))
+        if full and tool != "Read" and changes_policy(tool, ti, full):
+            ask(POLICY_REASON.format(path=path))
     elif tool in ("Grep", "Glob"):
         # Grep's "pattern" is a regex over content, not a path; only Glob's pattern is a path.
         keys = ("path", "pattern") if tool == "Glob" else ("path", "glob")

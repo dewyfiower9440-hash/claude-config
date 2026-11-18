@@ -84,6 +84,7 @@ TESTS = [
     "test_ledger",
     "test_task_switch",
     "test_prompt_approval",
+    "test_policy_change",
     "test_review_binding",
     "test_test_gap",
     "test_output_size",
