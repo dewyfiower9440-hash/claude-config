@@ -18,7 +18,6 @@ notify.py imports session_key/load_state/stop_block_reason so it never toasts on
 from __future__ import annotations
 
 import json
-import logging
 import math
 import os
 import re
@@ -36,13 +35,15 @@ if (
 
 _T0 = time.monotonic()  # earliest point of this hook run: every budget counts from here
 
-# stderr only (a successful hook's stderr is not shown as a result); never secrets.
-log = logging.getLogger("discipline")
-
 # python -I drops the script dir; verification.py and shellparse.py live next to this file
 _HOOKS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _HOOKS_DIR not in sys.path:
     sys.path.insert(0, _HOOKS_DIR)
+
+from lazylog import LazyLog
+
+# stderr only (a successful hook's stderr is not shown as a result); never secrets.
+log = LazyLog("discipline")
 
 
 def temp_root() -> Path:

@@ -72,6 +72,39 @@ def head(top: str) -> str | None:
     return out.strip() if out else None
 
 
+def find_toplevel(folder: str) -> str | None | bool:
+    """The work tree `folder` is in, found without a git call: the nearest folder at or
+    above it that holds a `.git` entry (a folder, or the file of a linked work tree or
+    submodule), as git names it (links resolved). None: no such folder. False: it cannot
+    be told this way (the folder is inside a `.git` folder, a GIT_DIR is set, the path
+    cannot be read): ask git."""
+    if os.environ.get("GIT_DIR") or os.environ.get("GIT_WORK_TREE"):
+        return False
+    try:
+        d = os.path.realpath(folder)
+        parts = {p.lower() for p in d.replace("\\", "/").split("/")}
+        if ".git" in parts:
+            return False
+        while True:
+            dot_git = os.path.join(d, ".git")
+            if os.path.isdir(dot_git):
+                # a folder named .git that is no repository (no HEAD): git decides
+                if os.path.isfile(os.path.join(dot_git, "HEAD")):
+                    return os.path.normpath(d)
+                return False
+            if os.path.lexists(dot_git):
+                with open(dot_git, encoding="utf-8", errors="replace") as f:
+                    if f.read(8) == "gitdir: ":
+                        return os.path.normpath(d)
+                return False
+            parent = os.path.dirname(d)
+            if parent == d:
+                return None
+            d = parent
+    except (OSError, ValueError):
+        return False
+
+
 def toplevel(path: str) -> str | None:
     d = path if os.path.isdir(path) else os.path.dirname(path)
     while d and not os.path.isdir(d):  # a file about to be created in a new folder
@@ -79,7 +112,13 @@ def toplevel(path: str) -> str | None:
         if parent == d:
             return None
         d = parent
-    out = _git(d, "rev-parse", "--show-toplevel") if d else None
+    if not d:
+        return None
+    # devenv-final 30: most hook runs asked git only for this, at about 60 ms a call
+    found = find_toplevel(d)
+    if found is not False:
+        return found if isinstance(found, str) else None
+    out = _git(d, "rev-parse", "--show-toplevel")
     return os.path.normpath(out.strip()) if out else None
 
 

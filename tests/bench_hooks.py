@@ -1,14 +1,17 @@
 """P0-01 baseline: hook latency, session-context injection and the approval attack/normal corpus.
 
 Not part of the gate (run_all.py): it records measurements, it does not assert.
-Everything runs against throw-away repositories under tests/_tmp_bench and an isolated approval
-home (CLAUDE_DISCIPLINE_HOME); the real approvals, state of real projects and notify toasts are
-never touched.
+Everything runs against throw-away repositories under C:/dev/_bench-hooks-tmp (the gate's
+work folder when run under it) and an isolated approval home (CLAUDE_DISCIPLINE_HOME); the
+real approvals, state of real projects and notify toasts are never touched.
+
+Run it with the interpreter the hooks run on (settings.json names it: 3.13), not with
+whatever `python` is first on PATH: the numbers differ between versions.
 
 The isolated approval home is switched to the v2 store before anything runs, as the real one
 was on 2026-11-14 (P0-04): the corpus measures the path that is in use, not the dormant v1.
 
-  python -I tests/bench_hooks.py <label>     -> tests/_baseline/2026-11-11-<label>.json
+  <hooks' python> -I tests/bench_hooks.py <label>   -> tests/_baseline/<today>-<label>.json
 """
 
 from __future__ import annotations
@@ -482,7 +485,8 @@ def main() -> None:
         "corpus": corpus(),
     }
     OUT_DIR.mkdir(exist_ok=True)
-    out = OUT_DIR / f"2026-11-11-{label}.json"
+    # the day of the run (the name used to carry a fixed 2026-11-11 whatever the day)
+    out = OUT_DIR / f"{time.strftime('%Y-%m-%d')}-{label}.json"
     out.write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
     for name, v in result["latency"].items():
         print(f"{name:28} p50 {v['p50_ms']:7.1f}  p95 {v['p95_ms']:7.1f}")

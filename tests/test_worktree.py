@@ -713,6 +713,86 @@ check(
     (True, None, "unavailable"),
 )
 
+# ---- devenv-final 30: the work tree of a folder is found without a git call, and is the
+# one git names
+import tempfile
+
+FIND = WORK / "find"
+(FIND / "repo" / "a" / "b").mkdir(parents=True)
+(FIND / "plain" / "x").mkdir(parents=True)
+subprocess.run(["git", "init", "-q"], cwd=FIND / "repo", check=True)
+subprocess.run(
+    ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q",
+     "--allow-empty", "-m", "c"],
+    cwd=FIND / "repo",
+    check=True,
+)  # fmt: skip
+subprocess.run(
+    ["git", "worktree", "add", "-q", "--detach", str(FIND / "linked")],
+    cwd=FIND / "repo",
+    check=True,
+)
+OUTSIDE_ALL = Path(tempfile.mkdtemp(prefix="wt-norepo-"))
+
+
+def git_top(folder: Path) -> str | None:
+    out = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=folder,
+        capture_output=True,
+        text=True,
+        check=False,  # not a repository: no output, which is the answer
+    ).stdout.strip()
+    return os.path.normcase(os.path.normpath(out)) if out else None
+
+
+def found_top(path: Path) -> str | None:
+    top = wt.toplevel(str(path))
+    return os.path.normcase(top) if top else None
+
+
+check(
+    "K-T6 toplevel(): the same answer as git for a folder deep in a repository, a file "
+    "that does not exist yet, a linked work tree, and a folder in no repository",
+    (
+        found_top(FIND / "repo" / "a" / "b") == git_top(FIND / "repo" / "a" / "b"),
+        found_top(FIND / "repo" / "a" / "new" / "f.py") == git_top(FIND / "repo" / "a"),
+        found_top(FIND / "linked") == git_top(FIND / "linked"),
+        found_top(FIND / "linked") != found_top(FIND / "repo"),
+        found_top(OUTSIDE_ALL),
+    ),
+    (True, True, True, True, None),
+)
+check(
+    "K-T6 ... and it is decided without git except where the folders cannot tell (inside "
+    "a .git folder, or with GIT_DIR set)",
+    (
+        isinstance(wt.find_toplevel(str(FIND / "repo" / "a")), str),
+        wt.find_toplevel(str(OUTSIDE_ALL)),
+        wt.find_toplevel(str(FIND / "repo" / ".git" / "refs")),
+    ),
+    (True, None, False),
+)
+(FIND / "bogus" / ".git").mkdir(parents=True)  # a folder named .git, no repository
+(FIND / "bogusfile").mkdir()
+(FIND / "bogusfile" / ".git").write_text("not a pointer\n", encoding="utf-8")
+check(
+    "K-T6 ... a .git entry that is no repository (no HEAD, no gitdir line): asked of git, "
+    "whose answer toplevel() gives",
+    (
+        wt.find_toplevel(str(FIND / "bogus")),
+        wt.find_toplevel(str(FIND / "bogusfile")),
+        found_top(FIND / "bogus") == git_top(FIND / "bogus"),
+    ),
+    (False, False, True),
+)
+os.environ["GIT_DIR"] = str(FIND / "repo" / ".git")
+check(
+    "K-T6 ... GIT_DIR set: asked of git", wt.find_toplevel(str(FIND / "plain")), False
+)
+del os.environ["GIT_DIR"]
+shutil.rmtree(OUTSIDE_ALL, ignore_errors=True)
+
 remove_tree(WORK)
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

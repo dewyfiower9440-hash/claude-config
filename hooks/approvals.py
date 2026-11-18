@@ -16,11 +16,8 @@ import hashlib
 import hmac
 import io
 import json
-import logging
 import os
-import random
 import re
-import secrets
 import sys
 import time
 from collections.abc import Callable, Iterator
@@ -28,7 +25,28 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, NamedTuple
 
-log = logging.getLogger("approvals")  # stderr only; never secrets
+# python -I drops the script's folder: needed when this file is run as the admin command
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+from lazylog import LazyLog
+
+log = LazyLog("approvals")  # stderr only; never secrets
+
+
+def _token_hex(n: int) -> str:
+    """n random bytes as hex (os.urandom: what secrets.token_hex uses, without importing
+    secrets, hmac and random on every hook run)."""
+    return os.urandom(n).hex()
+
+
+def _jitter_s() -> float:
+    """A short wait before trying again: 20 to 50 ms, random so that two waiters do not
+    meet again."""
+    return 0.02 + os.urandom(1)[0] / 255 * 0.03
+
+
 V = 2
 ACTIVE, REVOKED, EXPIRED = "ACTIVE", "REVOKED", "EXPIRED"
 MAX_AGE_S = 30 * 86400
@@ -192,7 +210,7 @@ def new_record(
     now: float,
 ) -> dict[str, Any]:
     return {
-        "approval_id": secrets.token_hex(16),
+        "approval_id": _token_hex(16),
         "task_id": task_id,
         "git_root": git_root,
         "plan_path": plan_path,
@@ -356,7 +374,7 @@ def _read_json(path: Path, what: str) -> Any:
             except PermissionError:
                 if attempt == READ_ATTEMPTS - 1:
                     raise
-                time.sleep(0.02 + random.random() * 0.03)
+                time.sleep(_jitter_s())
     except FileNotFoundError:
         raise
     except (OSError, ValueError, RecursionError) as e:
@@ -399,7 +417,7 @@ def _unlock(fd: int) -> None:
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{_token_hex(4)}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(tmp, "wb") as f:
@@ -413,7 +431,7 @@ def _atomic_write(path: Path, data: bytes) -> None:
             except PermissionError:
                 if attempt == 2:
                     raise
-                time.sleep(0.02 + random.random() * 0.03)
+                time.sleep(_jitter_s())
     except OSError as e:
         try:
             tmp.unlink()
@@ -521,7 +539,7 @@ class Store:
                     raise StoreBusy(
                         f"승인 저장소 잠금을 {self.lock_budget_s}s 안에 얻지 못함"
                     )
-                time.sleep(0.02 + random.random() * 0.03)
+                time.sleep(_jitter_s())
             try:
                 yield
             finally:
@@ -553,7 +571,7 @@ class Store:
             if (
                 key is None
             ):  # load() succeeded, so this is a fresh store: create its key
-                key = secrets.token_bytes(32)
+                key = os.urandom(32)
                 _atomic_write(self.key_path, key.hex().encode("utf-8"))
             records = {
                 rid: sign_record(rec, key)
@@ -580,7 +598,7 @@ class Store:
                     os.replace(p, p.with_name(f"{p.name}.corrupt-{stamp}"))
                 except OSError as e:
                     raise StoreWriteFailed(f"격리 실패: {p.name}: {e}") from e
-        key = secrets.token_bytes(32)
+        key = os.urandom(32)
         _atomic_write(self.key_path, key.hex().encode("utf-8"))
         self._write(gen, {}, key)
         return gen
@@ -588,7 +606,7 @@ class Store:
     def admin_activate(self, confirm: Callable[[str], bool], stamp: str) -> int:
         if is_active(self.home):
             raise AdminRefused("이미 활성화됨")
-        if not confirm(secrets.token_hex(3)):
+        if not confirm(_token_hex(3)):
             raise AdminRefused("확인되지 않음")
         with self._lock():
             v1 = self.home / V1_NAME
@@ -603,7 +621,7 @@ class Store:
 
     def admin_reset(self, confirm: Callable[[str], bool], stamp: str) -> int:
         """Quarantine the store and witnesses, rotate the key, start empty. Grants nothing."""
-        if not confirm(secrets.token_hex(3)):
+        if not confirm(_token_hex(3)):
             raise AdminRefused("확인되지 않음")
         with self._lock():
             return self._fresh_start(stamp)

@@ -912,14 +912,16 @@ def in_process(
     out = io.StringIO()
     # the failures are made on purpose: their logged tracebacks would be this module's last
     # output lines, which the gate shows as its result
-    disc_h.logging.disable(disc_h.logging.CRITICAL)
+    import logging  # the hook itself imports it only when it logs (lazylog)
+
+    logging.disable(logging.CRITICAL)
     try:
         if broken:
             setattr(broken[0], broken[1], boom)
         with contextlib.redirect_stdout(out):
             disc_h.run_hook("prompt", data, handler or disc_h.on_prompt, path)
     finally:
-        disc_h.logging.disable(disc_h.logging.NOTSET)
+        logging.disable(logging.NOTSET)
         if broken:
             setattr(broken[0], broken[1], original)
     printed = [ln for ln in out.getvalue().splitlines() if ln.strip()]

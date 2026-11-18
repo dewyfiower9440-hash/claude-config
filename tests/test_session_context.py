@@ -10,6 +10,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+# the injected text is Korean: the CI console (cp1252) cannot print it (CLAUDE.md Gotchas)
+sys.stdout.reconfigure(errors="backslashreplace")
+
 HOOK = Path(__file__).resolve().parent.parent / "hooks" / "session_context.py"
 ROOT = Path(tempfile.mkdtemp(prefix="sessctx-"))
 LIMIT = 4000

@@ -9,17 +9,37 @@ holder dies. Standard library only (hooks run with python -I on every tool call)
 from __future__ import annotations
 
 import json
-import logging
 import os
-import random
-import secrets
+import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-log = logging.getLogger("session_store")  # stderr only; never state contents
+# python -I drops the script's folder: the importing hook has put it on the path, a
+# program that loads this file by itself may not have
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+from lazylog import LazyLog
+
+log = LazyLog("session_store")  # stderr only; never state contents
+
+
+def _token_hex(n: int) -> str:
+    """n random bytes as hex (os.urandom: what secrets.token_hex uses, without importing
+    secrets, hmac and random on every hook run)."""
+    return os.urandom(n).hex()
+
+
+def _jitter_s() -> float:
+    """A short wait before trying again: 20 to 50 ms, random so that two waiters do not
+    meet again."""
+    return 0.02 + os.urandom(1)[0] / 255 * 0.03
+
+
 LOCK_BUDGET_S = (
     20.0  # initial prior: below the 30 s pre/prompt hook timeout in settings.json
 )
@@ -93,7 +113,7 @@ def locked(path: Path, budget_s: float = LOCK_BUDGET_S) -> Iterator[None]:
         while not _try_lock(fd):
             if time.monotonic() >= deadline:
                 raise StateBusy(f"세션 상태 잠금을 {budget_s:g}s 안에 얻지 못함")
-            time.sleep(0.02 + random.random() * 0.03)
+            time.sleep(_jitter_s())
         try:
             yield
         finally:
@@ -127,7 +147,7 @@ def preserve(path: Path, label: str = "corrupt") -> Path | None:
     """Move a state file aside for inspection (`<name>.<label>-<ts>-<rand>`); None if it
     could not be moved."""
     kept = path.with_name(
-        f"{path.name}.{label}-{time.strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(3)}"
+        f"{path.name}.{label}-{time.strftime('%Y%m%dT%H%M%S')}-{_token_hex(3)}"
     )
     try:
         os.replace(path, kept)
@@ -140,7 +160,7 @@ def keep_copy(path: Path, raw: bytes, label: str) -> Path | None:
     """Write `raw` (the state file's bytes) next to it as `<name>.<label>-<ts>-<rand>`,
     durably; the original is not touched. None if the copy could not be written."""
     kept = path.with_name(
-        f"{path.name}.{label}-{time.strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(3)}"
+        f"{path.name}.{label}-{time.strftime('%Y%m%dT%H%M%S')}-{_token_hex(3)}"
     )
     try:
         fd = os.open(kept, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -157,7 +177,7 @@ def keep_copy(path: Path, raw: bytes, label: str) -> Path | None:
 
 def save(path: Path, state: dict[str, Any]) -> None:
     """Write the whole state atomically (temp file, fsync, replace)."""
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{_token_hex(4)}.tmp")
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(json.dumps(state))
@@ -174,7 +194,7 @@ def save(path: Path, state: dict[str, Any]) -> None:
             except PermissionError:
                 if time.monotonic() >= give_up:
                     raise
-                time.sleep(0.02 + random.random() * 0.03)
+                time.sleep(_jitter_s())
     except OSError as e:
         try:
             tmp.unlink()
@@ -207,7 +227,7 @@ def note_missed(path: Path, why: str) -> None:
     Notes live in the session's own folder (`<session>.notes/`): the state folder holds one
     file per session ever seen, and looking for notes there meant listing all of it on
     every hook run."""
-    name = f"{time.time_ns()}.{os.getpid()}.{secrets.token_hex(4)}"
+    name = f"{time.time_ns()}.{os.getpid()}.{_token_hex(4)}"
     folder = notes_dir(path)
     tmp = folder / f"note-tmp.{name}"
     try:
