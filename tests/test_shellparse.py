@@ -207,5 +207,40 @@ check(
 )
 check("program: assignment only", program_and_args(parse("X=1")[0]), ("", []))
 
+# devenv-final 17: a command behind a shell keyword or a wrapper that takes values is the
+# same command (the guard read `then rm -rf ~/` as a program named "then").
+SEEN_THROUGH = {
+    "{ rm -rf x; }": [("rm", ["-rf", "x"]), ("}", [])],
+    "if true; then rm -rf x; fi": [("true", []), ("rm", ["-rf", "x"]), ("fi", [])],
+    "for d in a b; do rm $d; done": [("for", ["d", "in", "a", "b"]), ("rm", ["$d"]), ("done", [])],
+    "while read l; do echo $l; done": [("read", ["l"]), ("echo", ["$l"]), ("done", [])],
+    "if a; then b; elif c x; then d; else e; fi": [
+        ("a", []), ("b", []), ("c", ["x"]), ("d", []), ("e", []), ("fi", []),
+    ],
+    "! rm -rf x": [("rm", ["-rf", "x"])],
+    "time make test": [("make", ["test"])],
+    "timeout 5 rm -rf x": [("rm", ["-rf", "x"])],
+    "timeout -k 3 -s KILL 5s git push -f": [("git", ["push", "-f"])],
+    "timeout --signal KILL 10 uv run pytest": [("uv", ["run", "pytest"])],
+    "nice -n 5 rm -rf x": [("rm", ["-rf", "x"])],
+    "nice rm x": [("rm", ["x"])],
+    "then VAR=1 sudo timeout 9 rm x": [("rm", ["x"])],
+    # a keyword or wrapper with nothing behind it is itself the word
+    "then": [("then", [])],
+    "timeout 5": [("timeout", ["5"])],
+    "nice": [("nice", [])],
+}  # fmt: skip
+check(
+    "program: seen through shell keywords, timeout and nice",
+    {src: [program_and_args(c) for c in parse(src)] for src in SEEN_THROUGH},
+    SEEN_THROUGH,
+)
+hides = _mod.hides_status
+check(
+    "hides_status: behind `!` or in a condition the command's status is not the line's",
+    [hides(parse(src)[0]) for src in ("! pytest", "if pytest; then x; fi", "while pytest; do x; done", "pytest", "then pytest", "time pytest", "{ pytest; }")],
+    [True, True, True, False, False, False, False],
+)  # fmt: skip
+
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

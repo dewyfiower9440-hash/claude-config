@@ -9,8 +9,10 @@ Transcript content is read in place and never written anywhere. Not run in CI
 
 from __future__ import annotations
 
+import collections
 import importlib.util
 import json
+import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -26,6 +28,18 @@ REVIEWED_NEW_BLOCKS_EXACT = {
     "claude --version 2>&1; claude auth status --json 2>/dev/null | python -c \"import json,sys;d=json.load(sys.stdin);print({k:d.get(k) for k in ('loggedIn','authMethod','apiProvider','subscriptionType','planTier')})\"; env | grep -oE '^(ANTHROPIC|CLAUDE)[A-Z_]*' | sort -u": "bare `env` piped to grep in a later segment streams every environment value; legacy only caught `env` at line end",
 }
 NEUTRAL_CWD = "C:/dev/_nobody_s_folder"
+# devenv-final 21. A command exempted as "blocked by the protected-folder rules" must name
+# a protected location itself: ~/.claude (or the home or a folder above it, for a sweep) or
+# the hooks' state folder under the temp folder.
+NAMES_PROTECTED = re.compile(
+    r"\.claude|claude-discipline|~|\$HOME|USERPROFILE|[\\/]Users([\\/]|\b)|AppData"
+    r"|(^|\s)(/|/c/?|[A-Za-z]:[\\/]?)(\s|$)",
+    re.IGNORECASE,
+)
+# The exemption counted 22 commands of 11,012 on 2026-11-18. The corpus grows with every
+# session (a refused attempt is recorded too), so the count is not pinned; a jump past this
+# ceiling means the protected-folder rules started to block something else.
+PROTECTED_CEILING = 60
 PROTECTED_MARKS = (
     "protected folder of ~/.claude",
     "walks through the protected folders",
@@ -88,6 +102,8 @@ def main() -> None:
     new_blocks: list[str] = []
     relaxed: list[str] = []
     protected: list[str] = []
+    unexplained: list[str] = []
+    asked: collections.Counter[str] = collections.Counter()
     # The transcripts do not say where a command ran. Judged from a folder that is nobody's
     # (not this repository: every `grep -r x .` of the past would count as a sweep of
     # ~/.claude), so only commands that name ~/.claude themselves meet the rules below.
@@ -105,6 +121,10 @@ def main() -> None:
             # through the shell, or sweeping all of ~/.claude, is blocked on purpose. These
             # are past commands that did so; tests/test_guard.py (M-T5, M-T6) holds the rule.
             protected.append(f"{tool}: {cmd[:160]!r}")
+            if not NAMES_PROTECTED.search(cmd):
+                # exempted by the reason's wording alone: a rule that words its refusal
+                # like the protected-folder rules would hide every command it blocks
+                unexplained.append(f"{tool}: {cmd[:160]!r}")
         elif new and not old:
             reviewed = REVIEWED_NEW_BLOCKS_EXACT.get(cmd) or next(
                 (r for p, r in REVIEWED_NEW_BLOCKS.items() if cmd.startswith(p)), None
@@ -112,21 +132,40 @@ def main() -> None:
             if reviewed:
                 print(f"  REVIEWED NEW BLOCK ({reviewed}): {cmd[:60]!r}")
             else:
-                new_blocks.append(f"{tool}: {cmd[:160]!r}")
+                why = said.getvalue().partition("guard hook: ")[2].partition(". If")[0]
+                new_blocks.append(f"{tool}: {cmd[:160]!r} <- {why[:120]}")
         elif old and not new:
             relaxed.append(f"{tool}: {cmd[:160]!r}")
+        if not new and guard._asks:
+            asked[
+                guard._asks[0].split("`")[1] if "`" in guard._asks[0] else "other"
+            ] += 1
     print(f"corpus commands: {len(corpus)}")
+    # not a failure: how often the user would have been asked (the friction of the rules)
+    print(f"would ask the user: {sum(asked.values())} {dict(asked.most_common(8))}")
     print(f"newly blocked (must be 0): {len(new_blocks)}")
     for c in new_blocks[:20]:
         print("  NEW BLOCK", c)
     print(f"blocked by the protected-folder rules, on purpose: {len(protected)}")
     for c in protected[:12]:
         print("  PROTECTED", c)
+    print(
+        f"... of them without a protected location in their text (must be 0): {len(unexplained)}"
+    )
+    for c in unexplained[:20]:
+        print("  UNEXPLAINED", c)
+    over = len(protected) > PROTECTED_CEILING
+    if over:
+        print(
+            f"  TOO MANY: {len(protected)} exempted commands, more than {PROTECTED_CEILING}: "
+            "look at what the protected-folder rules block now, then raise the ceiling"
+        )
     print(f"no longer blocked (review): {len(relaxed)}")
     for c in relaxed[:40]:
         print("  RELAXED", c)
-    print("FAILURES:", len(new_blocks))
-    sys.exit(1 if new_blocks else 0)
+    failures = len(new_blocks) + len(unexplained) + int(over)
+    print("FAILURES:", failures)
+    sys.exit(1 if failures else 0)
 
 
 if __name__ == "__main__":

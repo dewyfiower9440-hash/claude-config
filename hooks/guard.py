@@ -222,12 +222,15 @@ def tokens_look_secret(command: str) -> str | None:
     return None
 
 
-def staged_secrets() -> list[str]:
+def staged_secrets(cwd: str | None = None) -> list[str]:
+    """Staged files that look like secrets, in the repository the commit runs in (`cwd`:
+    the session's folder after the command's own `cd`s, not the hook process's folder)."""
     import subprocess  # lazy: only `git commit` checks need it (~20 ms import)
 
     try:
         out = subprocess.run(
             ["git", "diff", "--cached", "--name-only"],
+            cwd=cwd if cwd and os.path.isdir(cwd) else None,
             capture_output=True,
             text=True,
             timeout=10,
@@ -236,6 +239,17 @@ def staged_secrets() -> list[str]:
     except (OSError, subprocess.SubprocessError):
         return []
     return [f for f in out.stdout.splitlines() if is_secret_path(f)]
+
+
+def _git_folder(args: list[str], cwd: str) -> str:
+    """Where a git command runs: `cwd`, or what its `-C <path>` options lead to."""
+    from verification import _resolve
+
+    folder = cwd
+    for k, a in enumerate(args[:-1]):
+        if a == "-C":
+            folder = _resolve(folder, args[k + 1])
+    return folder
 
 
 def legacy_check(cmd: str) -> None:
@@ -523,10 +537,26 @@ def nested_scripts(program: str, args: list[str]) -> list[tuple[str, Dialect]]:
 
 def check_secret_command(program: str, args: list[str], first_word: str) -> None:
     lowered = [a.lower() for a in args]
+    words = [program, *(_basename(a) for a in args)]
     if (
         (program == "gh" and lowered[:2] == ["auth", "token"])
+        # `gh auth status --show-token` / `-t` prints the token like `gh auth token`
+        or (
+            program == "gh"
+            and lowered[:2] == ["auth", "status"]
+            and any(a in ("--show-token", "-t") for a in lowered)
+        )
+        # `git credential fill|get` asks the helper for a stored password and prints it
+        or (
+            program == "git"
+            and git_subcommand(args)[:1] == ["credential"]
+            and any(a in ("fill", "get") for a in git_subcommand(args)[1:2])
+        )
         or (program == "cmdkey" and "/list" in lowered)
-        or (program == "keyring" and lowered[:1] == ["get"])
+        # `keyring get`, also as `python -m keyring get`, `uv run keyring get`
+        or any(
+            a == "keyring" and words[k + 1] == "get" for k, a in enumerate(words[:-1])
+        )
         or program == "printenv"
         or (program in ("env", "") and _basename(first_word) == "env")
         or (
@@ -704,13 +734,17 @@ def above_protected(path: str) -> bool:
     return _inside(CLAUDE_HOME, path)
 
 
-def glob_reaches_protected(word: str, cwd: str) -> bool | None:
-    """For a start word with a pattern in it (`*.py`, `s*`, `~/.claude/*`): whether the
-    pattern can match the way down to a protected folder. None when the word has no
-    pattern."""
+def glob_reaches_protected(word: str, cwd: str, walks: bool = True) -> bool | None:
+    """For a word with a pattern in it (`*.py`, `s*`, `~/.claude/*`): whether the pattern
+    can match the way down to a protected folder. None when the word has no pattern.
+    `walks`: the word is where a command that walks a tree starts, so matching the first
+    folder on the way is enough. Otherwise the word names files, and every part of the
+    pattern must match the folder at its depth: `disc*/key` reaches ~/.claude/discipline
+    from ~/.claude, while `/*/*.jsonl` (a file two levels below the root) does not reach
+    C:\\Users\\<name>\\.claude\\state."""
     import fnmatch
 
-    from verification import _resolve
+    from verification import _inside, _resolve
 
     text = word.strip("'\"").rstrip(",")
     cut = re.search(r"[*?\[]", text)
@@ -718,14 +752,75 @@ def glob_reaches_protected(word: str, cwd: str) -> bool | None:
         return None
     split = max(text.rfind("/", 0, cut.start()), text.rfind("\\", 0, cut.start())) + 1
     folder = as_path(text[:split] or ".", cwd)
-    pattern = re.split(r"[\\/]", text[split:])[0]
-    if folder is None or not above_protected(folder):
+    parts = [p for p in re.split(r"[\\/]", text[split:]) if p]
+    pattern = parts[0] if parts else "*"
+    if folder is None:
         return False
+    start = _resolve(folder, ".")
+    if in_protected(start):
+        return True  # the pattern starts inside a protected folder
     for root in PROTECTED:
-        down = os.path.relpath(root, _resolve(folder, "."))
-        if fnmatch.fnmatch(re.split(r"[\\/]", down)[0].lower(), pattern.lower()):
+        if not _inside(root, start) or os.path.normcase(root) == os.path.normcase(
+            start
+        ):
+            continue  # this protected folder is not below the folder the pattern starts in
+        down = [d.lower() for d in re.split(r"[\\/]", os.path.relpath(root, start))]
+        if walks:
+            if fnmatch.fnmatch(down[0], pattern.lower()):
+                return True
+            continue
+        if "**" in parts[: len(down)]:
+            return True  # any depth
+        if len(parts) >= len(down) and all(
+            fnmatch.fnmatch(d, p.lower()) for d, p in zip(down, parts, strict=False)
+        ):
             return True
     return False
+
+
+# devenv-final 19: a pattern is not a name, so `cat .en*` passed the name rules. Names a
+# pattern is tried against (the secret files the rules above know by name); a pattern
+# counts only when its literal characters make up a real part of the name it matches, so
+# `*`, `*.json` or `s*` are not taken for an attempt on every secret there is.
+SECRET_NAMES = (
+    ".env", ".env.local", ".env.production", ".env.development", ".credentials.json",
+    ".git-credentials", ".netrc", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
+    "secrets.json", "secret.json", "secrets.yaml", "secrets.yml", "secrets.toml",
+    "credentials", "Migration_Secrets",
+)  # fmt: skip
+GLOB_MIN_LITERALS = 3
+# Share of the name the pattern spells out: `.en*` (3 of 4) and `id_*` (3 of 6) count,
+# `*.json` (5 of the 12 of secrets.json) does not. A pattern that starts with a dot is
+# rarer and counts sooner (`.git-c*`), but `.git*` is not an attempt on .git-credentials.
+GLOB_MIN_SHARE = 0.5
+GLOB_MIN_SHARE_DOT = 0.3
+
+
+def glob_reaches_secret(word: str) -> str | None:
+    """The secret file name a pattern word (`.en*`, `./.e[n]v`, `id_*`) can match, or None.
+    As in a shell, a pattern that does not start with a dot does not match a dot file."""
+    import fnmatch
+
+    text = word.strip("'\"").rstrip(",")
+    if not re.search(r"[*?\[]", text):
+        return None
+    for segment in re.split(r"[\\/]+", text):
+        if not re.search(r"[*?\[]", segment):
+            continue
+        literals = len(re.sub(r"\[[^\]]*\]|[*?]", "", segment))
+        if literals < GLOB_MIN_LITERALS:
+            continue
+        for name in SECRET_NAMES:
+            if name.startswith(".") and not segment.startswith("."):
+                continue
+            share = GLOB_MIN_SHARE_DOT if name.startswith(".") else GLOB_MIN_SHARE
+            if (
+                literals >= share * len(name)
+                and fnmatch.fnmatchcase(name.lower(), segment.lower())
+                and not any(re.search(p, name, re.IGNORECASE) for p in SECRET_ALLOW)
+            ):
+                return name
+    return None
 
 
 SCRIPT_PROGRAMS = {"sed", "awk", "gawk", "perl"}  # their first plain word is a script
@@ -830,6 +925,95 @@ def sweep_starts(program: str, args: list[str], dialect: Dialect) -> list[str] |
     return words if words or not default_here else []
 
 
+# devenv-final 18: what a recursive delete names is resolved like any path (`~/`, `~/*`,
+# `$HOME/`, `/c/Users/x`, a `cd` before it) instead of being matched as text.
+PROJECTS_ROOT = os.path.normpath(os.environ.get("CLAUDE_PROJECTS_ROOT") or "C:/dev")
+DELETE_REASON = (
+    "recursive delete of {path}: the home folder, the projects folder, a drive root, or a "
+    "folder above them"
+)
+
+
+def _delete_targets(program: str, args: list[str], dialect: Dialect) -> list[str]:
+    """The words a recursive delete names ([] when the command is not one)."""
+    low = [a.lower() for a in args]
+    if program == "cmd" and "/c" in low:  # cmd /c rd /s /q X
+        rest = args[low.index("/c") + 1 :]
+        return _delete_targets(_basename(rest[0]), rest[1:], dialect) if rest else []
+    if program in ("rd", "rmdir") and "/s" in low:
+        return [a for a in args if not re.fullmatch(r"/[A-Za-z]", a)]
+    if dialect == "powershell" and program in (
+        "remove-item", "ri", "rm", "rmdir", "rd", "del", "erase",
+    ):  # fmt: skip
+        if not _ps_switch(args, "recurse"):
+            return []
+        from shellwrites import _powershell_targets
+
+        return _powershell_targets("remove-item", args)
+    if program == "rm":
+        letters = _flag_letters(args)
+        if "r" in letters or "R" in letters or "--recursive" in args:
+            from shellwrites import _positionals
+
+            return _positionals(args, set())
+    return []
+
+
+def check_recursive_delete(
+    program: str, args: list[str], dialect: Dialect, cwd: str
+) -> None:
+    from verification import _inside, _resolve
+
+    for word in _delete_targets(program, args, dialect):
+        text = re.sub(r"[\\/]\*+$", "", word.strip("'\"")) or word  # X/* empties X
+        text = _HOME_FORM.sub(lambda _m: HOME_DIR, text)
+        if re.search(r"[$%`*?\[]", text):
+            continue  # cannot be told (the text rules above still judge `$HOME`, `~`)
+        try:
+            path = _resolve(cwd, text)
+        except (ValueError, OSError):
+            continue
+        if any(
+            _inside(keep, path) for keep in (HOME_DIR, PROJECTS_ROOT)
+        ) or re.fullmatch(r"[A-Za-z]:[\\/]*", path):
+            block(DELETE_REASON.format(path=word))
+
+
+def check_confirmations(program: str, args: list[str]) -> None:
+    """Commands that throw work away or act on every match: the user's to confirm."""
+    if program == "find":
+        acts = [
+            a for a in args if a in ("-delete", "-exec", "-execdir", "-ok", "-okdir")
+        ]
+        if acts:
+            _asks.append(f"`find {acts[0]}` acts on every file it matches")
+        return
+    if program != "git":
+        return
+    sub = git_subcommand(args)
+    verb, rest = (sub[0] if sub else ""), sub[1:]
+    everything = any(a in (".", ":/", "*") for a in rest)
+    if verb == "switch" and any(
+        a in ("--discard-changes", "-f", "--force") for a in rest
+    ):
+        _asks.append("`git switch --discard-changes` throws away uncommitted changes")
+    elif verb == "checkout" and everything:
+        _asks.append("`git checkout -- .` throws away every uncommitted change")
+    elif (
+        verb == "restore"
+        and everything
+        and not ("--staged" in rest and "--worktree" not in rest and "-W" not in rest)
+    ):
+        _asks.append("`git restore .` throws away every uncommitted change")
+    elif verb == "stash" and rest[:1] in (["drop"], ["clear"]):
+        _asks.append(f"`git stash {rest[0]}` deletes stashed work")
+    elif verb == "push" and (
+        any(a in ("--mirror", "--delete", "-d") for a in rest)
+        or any(re.fullmatch(r":[^:\s]+", a) for a in rest)
+    ):
+        _asks.append("this `git push` deletes or overwrites remote branches")
+
+
 def check_isolation(
     program: str, args: list[str], dialect: Dialect, cwd: str, data: set[int]
 ) -> None:
@@ -850,6 +1034,17 @@ def check_isolation(
             path = as_path(tok, cwd, program in FILE_PROGRAMS) if tok else None
             if path and in_protected(path):
                 block(PROTECTED_REASON.format(path=tok))
+            # a pattern that can match a protected folder, or a secret file by name
+            pathlike = program in FILE_PROGRAMS or "/" in tok or "\\" in tok
+            if tok and pathlike and glob_reaches_protected(tok, cwd, walks=False):
+                block(PROTECTED_REASON.format(path=tok))
+            hit = glob_reaches_secret(tok) if tok and pathlike else None
+            if hit:
+                block(
+                    f"command touches a secret file (the pattern {tok} matches {hit})"
+                )
+    check_recursive_delete(program, args, dialect, cwd)
+    check_confirmations(program, args)
     starts = sweep_starts(program, args, dialect)
     if starts is None:
         return
@@ -985,7 +1180,7 @@ def check_parsed(
             if sub[:1] == ["add"] and ("-f" in sub or "--force" in sub):
                 block("git add --force can stage ignored secret files")
             if sub[:1] == ["commit"]:
-                leaked = staged_secrets()
+                leaked = staged_secrets(_git_folder(args, here))
                 if leaked:
                     block(
                         f"staged files look like secrets: {', '.join(leaked)} (unstage them)"
@@ -1043,14 +1238,71 @@ def changes_policy(tool: str, ti: dict[str, object], full: str) -> bool:
     return _policy_section(before) != _policy_section(after)
 
 
-def shell_policy_writes(command: str, dialect: Dialect, cwd: str) -> list[str]:
-    """The CLAUDE.md files a command line visibly writes (best effort, see shellwrites)."""
-    if POLICY_FILE not in command.lower():
+# devenv-final 20: the hooks, settings and agent definitions under ~/.claude are what runs
+# in every session. They are changed in the work tree and reach ~/.claude by a merge of a
+# commit that passed the gate (CLAUDE.md, Release); a change made in place is the user's
+# to confirm.
+LIVE_FOLDERS = ("hooks", "agents")
+LIVE_FILES = ("settings.json",)
+LIVE_REASON = (
+    "this changes {path} in place: the live hooks, settings and agents of ~/.claude are "
+    "changed in the work tree and merged after the gate (CLAUDE.md, Release)"
+)
+
+
+def is_live_config(full: str) -> bool:
+    from verification import _inside
+
+    return any(
+        _inside(full, os.path.join(CLAUDE_HOME, name)) for name in LIVE_FOLDERS
+    ) or any(
+        os.path.normcase(os.path.normpath(full))
+        == os.path.normcase(os.path.join(CLAUDE_HOME, name))
+        for name in LIVE_FILES
+    )
+
+
+def shell_guarded_writes(command: str, dialect: Dialect, cwd: str) -> list[str]:
+    """Reasons to ask about what a command line visibly writes (best effort, see
+    shellwrites): a CLAUDE.md, or the live configuration under ~/.claude."""
+    low = command.lower()
+    if POLICY_FILE not in low and ".claude" not in low:
         return []
     from shellwrites import write_targets
 
     targets, _unknown = write_targets(command, dialect, cwd)
-    return [t for t in targets if os.path.basename(t).lower() == POLICY_FILE]
+    return [
+        POLICY_SHELL_REASON.format(path=t)
+        for t in targets
+        if os.path.basename(t).lower() == POLICY_FILE
+    ] + [LIVE_REASON.format(path=t) for t in targets if is_live_config(t)]
+
+
+# What the protected folders hold, by name form: a Grep `glob` without a folder part
+# (`*.json`) matches at any depth, so it reaches them when it can match one of these.
+PROTECTED_NAME_FORMS = ("x.json", "x.jsonl", "x.key", "x.lock", "x.log", "x.txt", "x")
+
+
+def tool_glob_reaches_protected(where: str, pattern: str) -> bool:
+    """Whether a Grep `glob` (or a Glob `pattern`) applied at `where`, a folder above the
+    protected ones, can match files in them. `hooks/**` cannot; `state/**`, `st*/x` can; a
+    pattern starting with `**`, or without a folder part, can when it can match a file
+    name found there."""
+    import fnmatch
+
+    text = pattern.strip().lstrip("!").replace("\\", "/")
+    while text.startswith("./"):
+        text = text[2:]
+    deep = text.startswith("**/") or text == "**"
+    while text.startswith("**/"):
+        text = text[3:]
+    if text in ("", "**"):
+        return True
+    if "/" not in text:
+        return any(fnmatch.fnmatch(name, text.lower()) for name in PROTECTED_NAME_FORMS)
+    if deep:
+        return True  # `**/x/y`: any folder, the protected ones among them
+    return bool(glob_reaches_protected(os.path.join(where, text), where))
 
 
 def check_command(cmd: str, dialect: Dialect = "bash") -> None:
@@ -1080,10 +1332,9 @@ def main() -> None:
     if tool in ("Bash", "PowerShell"):
         dialect: Dialect = "powershell" if tool == "PowerShell" else "bash"
         check_command(ti.get("command", ""), dialect)
-        for written in shell_policy_writes(
-            str(ti.get("command", "")), dialect, str(_ctx["cwd"])
-        ):
-            _asks.append(POLICY_SHELL_REASON.format(path=written))
+        _asks.extend(
+            shell_guarded_writes(str(ti.get("command", "")), dialect, str(_ctx["cwd"]))
+        )
         if _asks:
             ask("; ".join(dict.fromkeys(_asks)))
     elif tool in ("Read", "Edit", "Write", "MultiEdit", "NotebookEdit"):
@@ -1095,6 +1346,8 @@ def main() -> None:
             block(PROTECTED_REASON.format(path=path))
         if full and tool != "Read" and changes_policy(tool, ti, full):
             ask(POLICY_REASON.format(path=path))
+        if full and tool != "Read" and is_live_config(full):
+            ask(LIVE_REASON.format(path=path))
     elif tool in ("Grep", "Glob"):
         # Grep's "pattern" is a regex over content, not a path; only Glob's pattern is a path.
         keys = ("path", "pattern") if tool == "Glob" else ("path", "glob")
@@ -1105,11 +1358,50 @@ def main() -> None:
         where = as_path(str(ti.get("path") or "."), str(_ctx["cwd"]))
         if where and in_protected(where):
             block(PROTECTED_REASON.format(path=ti.get("path")))
-        if where and above_protected(where) and not ti.get("glob") and tool == "Grep":
+        above = bool(where) and above_protected(str(where))
+        if above and not ti.get("glob") and tool == "Grep":
             # a content search over all of ~/.claude or above it reads the protected folders
             block(SWEEP_REASON.format(root=ti.get("path") or "the current folder"))
+        reaches = (
+            above
+            and tool == "Grep"
+            and bool(ti.get("glob"))
+            and tool_glob_reaches_protected(str(where), str(ti.get("glob")))
+        )
+        if reaches:  # ... and so does one whose `glob` can match files in them
+            block(SWEEP_REASON.format(root=f"{ti.get('path') or '.'} ({ti['glob']})"))
+        if above and tool == "Glob":
+            # a pattern that names a protected folder (`discipline/**`, `st*/**`); a plain
+            # `**/*.py` lists names everywhere and stays allowed, as before
+            pattern = str(ti.get("pattern") or "").replace("\\", "/")
+            if not pattern.startswith("**") and glob_reaches_protected(
+                os.path.join(str(where), pattern), str(where)
+            ):
+                block(PROTECTED_REASON.format(path=pattern))
+            literal = as_path(os.path.join(str(where), pattern), str(where))
+            if literal and in_protected(literal):
+                block(PROTECTED_REASON.format(path=pattern))
     sys.exit(0)
 
 
+def run() -> None:
+    """devenv-final 20: fail closed. An error inside the guard used to end it with exit
+    code 1, which the harness reads as "no objection": the command the guard could not
+    judge then ran. Now such a call is refused (exit 2) and says so."""
+    try:
+        main()
+    except Exception as e:  # the hook's outermost boundary
+        import logging
+
+        logging.getLogger("guard").exception("guard.hook_boundary_failure")
+        print(
+            f"BLOCKED by guard hook: the guard itself failed ({type(e).__name__}) and "
+            "could not judge this call. Tell the user; if every call is refused, the "
+            "way out is in ~/.claude/CLAUDE.md (Release).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
 if __name__ == "__main__":
-    main()
+    run()

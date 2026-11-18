@@ -21,7 +21,14 @@ import os
 import re
 from typing import NotRequired, TypedDict
 
-from shellparse import Dialect, ParseError, SimpleCommand, parse, program_and_args
+from shellparse import (
+    Dialect,
+    ParseError,
+    SimpleCommand,
+    hides_status,
+    parse,
+    program_and_args,
+)
 
 
 class Policy(TypedDict):
@@ -144,8 +151,8 @@ def silent_on_failure(cmd: SimpleCommand) -> bool:
 def is_runner(cmd: SimpleCommand) -> bool:
     program, args = program_and_args(cmd)
     low = [a.lower() for a in args]
-    if NOT_A_RUN & set(low):
-        return False
+    if NOT_A_RUN & set(low) or hides_status(cmd):
+        return False  # `! pytest`, `if pytest; then ...`: its failure is not the line's
     if program in RUNNERS:
         return True
     if program == "ruff":

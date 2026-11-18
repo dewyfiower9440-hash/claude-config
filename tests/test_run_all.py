@@ -496,6 +496,14 @@ check(
     ),
     (True, run_all.MIN_LIMIT_S, True, []),
 )
+# A module that grows past the minimum limit without a measured time is ended by it
+# (2026-11-18: test_policy_change at 121 s). Every module started first is one of the long
+# ones, so it must have its time written down.
+check(
+    "G-T6 every module started first has a measured time",
+    sorted(n for n in run_all.SLOW_FIRST if n not in run_all.MEASURED_S),
+    [],
+)
 # A character the console cannot encode (cp1252 on CI) must not end the run with a traceback.
 PROBE = (
     "import sys; sys.path.insert(0, sys.argv[1]); import run_all; "

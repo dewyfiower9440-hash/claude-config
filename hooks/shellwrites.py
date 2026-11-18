@@ -40,7 +40,6 @@ GLUED_REDIRECT = re.compile(r"^(?:\d|\*|&)?>{1,2}\|?(?P<target>[^>&|].*)$")
 NOT_A_FILE = {"nul", "$null", "-"}
 POSIX_DEVICES = ("/dev/", "/proc/", "/sys/")
 UNRESOLVABLE = re.compile(r"[$`*?%]")
-KEYWORDS = {"do", "then", "else", "elif", "{", "(", "!", "time"}
 
 # program -> how its plain arguments name what it writes
 ALL_POSITIONAL = {"tee", "rm", "mv", "rmdir", "unlink"}
@@ -246,12 +245,8 @@ def _powershell_targets(cmdlet: str, args: list[str]) -> list[str]:
 
 def _command_targets(cmd: SimpleCommand, dialect: Dialect) -> list[str]:
     plain, found = _split_redirections(cmd.words)
-    while plain and plain[0] in KEYWORDS:
-        plain = plain[1:]  # `do rm x`, `then touch f`, `{ rm x; }`
+    # `do rm x`, `then touch f`, `{ rm x; }`, `timeout 5 rm x`: program_and_args sees through
     program, args = program_and_args(SimpleCommand(words=plain))
-    if program == "timeout":  # timeout [options] DURATION command...
-        rest = _positionals(args, {"-k", "-s", "--kill-after", "--signal"})
-        program, args = program_and_args(SimpleCommand(words=rest[1:]))
     if dialect == "powershell":
         program = PS_ONLY_ALIASES.get(program, program)
     if program in PS_WRITE_FIRST | PS_WRITE_ALL | PS_COPY | PS_MOVE:

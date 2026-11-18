@@ -91,6 +91,7 @@ No preamble, no restating the request, no self-praise, no long explanations unle
 ## Release (this config repository, ~/.claude itself)
 - The live hooks run from `~/.claude`'s working tree: never edit them there. Change them in the work tree `C:\dev\_wt\claude-config` (its own branch).
 - Only a commit that passed the gate in the work tree reaches `main`: `git -C ~/.claude merge --ff-only <branch>`, then push and follow CI.
+- Locked out (the guard and the pre hook block when they fail, `onFailure: "block"`; every tool call is refused): in your own terminal, `git -C ~/.claude checkout <last good commit> -- hooks settings.json`, then fix in the work tree.
 - In a hurry: run the changed module's tests, merge, and run the full gate right after. SessionStart announces uncommitted changes under `~/.claude/hooks` or in `settings.json`.
 
 ## Verification

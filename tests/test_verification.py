@@ -277,6 +277,29 @@ check(
     ("passed", "passed", "passed", "passed"),
 )
 
+# devenv-final 17: the parser's keywords and wrappers are seen through, so what stands
+# behind them is judged as the command it is, and a negated or conditional run is no pass.
+check(
+    "V-T6 a runner behind `!` or in a condition proves nothing; behind timeout it is a run",
+    (
+        outcome("! uv run pytest -q"),
+        outcome("if uv run pytest -q; then echo ok; fi"),
+        outcome("timeout 600 uv run pytest -q"),
+        outcome("for t in a b; do uv run pytest $t; done"),
+    ),
+    (None, None, "passed", "unknown"),
+)
+check(
+    "V-T6 a declared gate behind a wrapper or keyword is not the declared gate (its words "
+    "differ): a test run that is not the gate, never a pass",
+    (
+        outcome("timeout 600 " + gate, DECLARED),
+        outcome("! " + gate, DECLARED),
+        outcome("time " + gate, DECLARED),
+    ),
+    ("partial", "partial", "partial"),
+)
+
 # ---- runners when no policy is declared
 check("pytest -> passed", outcome("uv run pytest -q"), "passed")
 check("uvx ruff check -> passed", outcome("uvx ruff check ."), "passed")

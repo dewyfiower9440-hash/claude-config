@@ -163,6 +163,7 @@
       "Read(**/*.key)",
       "Edit(**/.env)",
       "Read(~/.claude/discipline/**)",
+      "Read(~/.claude/state/**)",
       "Edit(~/.claude/discipline/**)",
       "Edit(//c/dev/qr-data/**)",
       "Edit(//c/dev/qr-backup/**)"
@@ -248,7 +249,8 @@
           {
             "type": "command",
             "command": "C:/Users/user/AppData/Roaming/uv/python/cpython-3.13.5-windows-x86_64-none/python.exe -I C:/Users/user/.claude/hooks/guard.py",
-            "timeout": 15
+            "timeout": 15,
+            "onFailure": "block"
           }
         ]
       },
@@ -258,7 +260,8 @@
           {
             "type": "command",
             "command": "C:/Users/user/AppData/Roaming/uv/python/cpython-3.13.5-windows-x86_64-none/python.exe -I C:/Users/user/.claude/hooks/discipline.py pre",
-            "timeout": 30
+            "timeout": 30,
+            "onFailure": "block"
           }
         ]
       }
@@ -402,6 +405,9 @@
         ]
       }
     ]
+  },
+  "env": {
+    "BASH_MAX_TIMEOUT_MS": "1200000"
   },
   "autoUpdatesChannel": "latest",
   "theme": "light",

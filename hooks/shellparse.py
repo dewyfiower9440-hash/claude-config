@@ -52,6 +52,16 @@ WRAPPERS = {
     "builtin",
 }
 EXECUTABLE_SUFFIXES = (".exe", ".cmd", ".bat", ".com", ".ps1")
+# Shell words a command can stand behind: `then rm x`, `do rm x`, `{ rm x; }`, `! rm x`,
+# `if rm x; then`. The parser leaves them as the first word of the simple command.
+KEYWORDS = {"do", "then", "else", "elif", "if", "while", "until", "{", "(", "!", "time"}
+# Keywords behind which a command's exit status is not the command line's (a condition, a
+# negation): what runs there is still judged as a command, but proves nothing by passing.
+STATUS_HIDING = {"!", "if", "elif", "while", "until"}
+# Wrappers that take values before the real program: `timeout [-k N] [-s SIG] DURATION
+# program ...`, `nice [-n N] program ...`.
+TIMEOUT_VALUED = {"-k", "-s", "--kill-after", "--signal"}
+NICE_VALUED = {"-n", "--adjustment"}
 
 
 class ParseError(ValueError):
@@ -68,8 +78,18 @@ def program_and_args(cmd: SimpleCommand) -> tuple[str, list[str]]:
     words = list(cmd.words)
     while words:
         head = words[0]
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", head):  # VAR=value prefix
+        if (
+            re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", head)
+            or head in KEYWORDS
+            and len(words) > 1
+        ):  # VAR=value prefix
             words.pop(0)
+        elif _basename(head) == "timeout" and len(words) > 2:
+            words.pop(0)
+            words = _after_options(words, TIMEOUT_VALUED)[1:]  # then the duration
+        elif _basename(head) == "nice" and len(words) > 1:
+            words.pop(0)
+            words = _after_options(words, NICE_VALUED)
         elif _basename(head) in WRAPPERS and len(words) > 1:
             words.pop(0)
             while words and words[0].startswith(
@@ -81,6 +101,31 @@ def program_and_args(cmd: SimpleCommand) -> tuple[str, list[str]]:
     if not words:
         return "", []
     return _basename(words[0]), words[1:]
+
+
+def hides_status(cmd: SimpleCommand) -> bool:
+    """True when the command stands behind `!` or in a condition (`if`, `while`, ...):
+    the command line's exit status is then not this command's."""
+    return any(w in STATUS_HIDING for w in _leading_keywords(cmd.words))
+
+
+def _leading_keywords(words: list[str]) -> list[str]:
+    out: list[str] = []
+    for w in words:
+        if w not in KEYWORDS:
+            break
+        out.append(w)
+    return out
+
+
+def _after_options(words: list[str], valued: set[str]) -> list[str]:
+    """`words` without its leading options (an option in `valued` takes the next word)."""
+    i = 0
+    while i < len(words) and words[i].startswith("-") and len(words[i]) > 1:
+        if words[i] == "--":
+            return words[i + 1 :]
+        i += 2 if words[i] in valued else 1
+    return words[i:]
 
 
 def _basename(word: str) -> str:

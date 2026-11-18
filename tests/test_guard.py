@@ -702,5 +702,226 @@ for label, (tool, ti), want in S_CASES:
     ok = got == want
     fails += not ok
     print(("OK  " if ok else "FAIL"), label, "->", got, "" if ok else f"(want {want})")
+
+# ---- devenv-final 16: the review's reproduction inputs (2026-11-18). Each ran through the
+# guard as it was and came back "allow"; `want` is what the guard must answer. With them,
+# as many ordinary commands that must stay allowed.
+HOME_MSYS = "/" + HOME[0].lower() + HOME[2:]  # C:/Users/x -> /c/Users/x
+HOME_WIN = HOME.replace("/", "\\")
+R_DENY = [
+    # recursive deletes of the home, a drive root or the projects folder, however spelled
+    sh("rm -rf ~/"),
+    sh("rm -rf ~/*"),
+    sh(f"rm -rf {HOME_MSYS}"),
+    sh(f"rm -rf {HOME}"),
+    sh("rm -rf $HOME/"),
+    sh("rm -rf /c/dev"),
+    sh("rm -rf /c/dev/"),
+    sh("rm -rf C:/dev/*"),
+    sh("rm -r -f /c/Users"),
+    sh("cd /c && rm -rf dev"),
+    sh("{ rm -rf ~/; }"),
+    sh("if true; then rm -rf ~/; fi"),
+    sh("for d in a b; do rm -rf /c/dev; done"),
+    sh("! rm -rf /c/dev"),
+    sh("timeout 5 rm -rf ~/"),
+    sh("nice -n 5 rm -rf /c/dev"),
+    sh("cmd /c rd /s /q C:/dev"),
+    ps(f"Remove-Item -Recurse -Force {HOME_WIN}"),
+    ps("Remove-Item -Recurse -Force $HOME\\"),
+    ps("Remove-Item C:\\dev -Recurse -Force"),
+    ps("rm -r -fo C:\\dev"),
+    ps("rd /s /q C:\\dev"),
+    # secret files reached through a glob
+    sh("cat .en*"),
+    sh("cat .e[n]v"),
+    sh("cat ./.en?"),
+    ps("Get-Content .en*"),
+    # credentials printed by a tool
+    sh("gh auth status --show-token"),
+    sh("gh auth status -t"),
+    sh("git credential fill"),
+    sh("git credential get"),
+    sh("python -m keyring get svc user"),
+    sh("uv run keyring get svc user"),
+    sh("keyring get svc user"),
+]
+R_DENY_IN_CLAUDE = [  # run with ~/.claude as the session's folder
+    sh("cat disc*/key"),
+    sh("cat ./d?scipline/key"),
+    sh("ls st*"),
+    sh("head -3 stat[e]/x.json"),
+]
+R_DENY_TOOLS = [
+    ps("gc $HOME\\.claude\\dis*\\*"),
+    ("Grep", {"pattern": ".", "path": CLAUDE, "glob": "state/**"}),
+    ("Grep", {"pattern": ".", "path": CLAUDE, "glob": "discipline/**"}),
+    ("Grep", {"pattern": ".", "path": CLAUDE, "glob": "**/*.json"}),
+    ("Glob", {"pattern": "discipline/**", "path": CLAUDE}),
+    ("Glob", {"pattern": "st*/**", "path": CLAUDE}),
+]
+R_ASK = [
+    sh("find /c/dev -delete"),
+    sh("find . -name '*.pyc' -delete"),
+    sh("find . -name x -exec rm {} ;"),
+    sh("find . -execdir sh -c 'echo {}' ;"),
+    sh("find . -ok rm {} ;"),
+    sh("git switch --discard-changes main"),
+    sh("git switch -f main"),
+    sh("git checkout -- ."),
+    sh("git restore ."),
+    sh("git stash drop"),
+    sh("git stash clear"),
+    sh("git push --mirror"),
+    sh("git push origin --delete old-branch"),
+    sh("git push origin :main"),
+    # the live hooks, settings and agents are changed in the work tree, not in place
+    ("Write", {"file_path": f"{CLAUDE}/settings.json", "content": "{}"}),
+    edit(f"{CLAUDE}/hooks/guard.py", "a", "b"),
+    edit(f"{CLAUDE}/agents/code-reviewer.md", "a", "b"),
+    sh(f"sed -i s/a/b/ {CLAUDE}/hooks/guard.py"),
+    sh("cp /tmp/x.py ~/.claude/hooks/guard.py"),
+]
+R_ALLOW = [
+    sh("rm -rf node_modules"),
+    sh("rm -rf ./build dist"),
+    sh("rm -rf /c/dev/proj/dist"),
+    sh("rm -rf ~/scratch/tmp-build"),
+    sh("rm -f a.txt"),
+    sh("cd /c/dev/proj && rm -rf .venv"),
+    sh("if [ -d out ]; then rm -rf out; fi"),
+    sh("timeout 60 uv run pytest -q"),
+    ps("Remove-Item -Recurse -Force .\\dist"),
+    ps("Remove-Item C:\\dev\\proj\\out -Recurse -Force"),
+    ps("rm -r -fo .\\node_modules"),
+    sh("find . -name '*.py'"),
+    sh("find src -type f -newer a.txt"),
+    sh("git switch main"),
+    sh("git switch -c feature"),
+    sh("git checkout main"),
+    sh("git checkout -- src/a.py"),
+    sh("git restore src/a.py"),
+    sh("git stash"),
+    sh("git stash pop"),
+    sh("git stash list"),
+    sh("git push origin main"),
+    sh("git push -u origin feature"),
+    sh("cat .env.example"),
+    sh("cat *.md"),
+    sh("ls src/*.py"),
+    sh("gh auth status"),
+    sh("git credential-cache exit"),
+    sh("uv run pytest -q"),
+    sh("python -m pytest tests -q"),
+    ("Grep", {"pattern": "x", "path": f"{CLAUDE}/hooks", "glob": "*.py"}),
+    ("Grep", {"pattern": "x", "path": CLAUDE, "glob": "hooks/**"}),
+    ("Glob", {"pattern": "hooks/**/*.py", "path": CLAUDE}),
+    ("Glob", {"pattern": "**/*.py", "path": ELSEWHERE}),
+    edit(f"{ELSEWHERE}/hooks/guard.py", "a", "b"),
+    ("Write", {"file_path": f"{ELSEWHERE}/settings.json", "content": "{}"}),
+    edit(f"{CLAUDE}/docs/plans/x.md", "a", "b"),
+    ("Read", {"file_path": f"{CLAUDE}/hooks/guard.py"}),
+    sh(f"cat {CLAUDE}/hooks/guard.py"),
+    sh(f"git -C {CLAUDE} merge --ff-only devenv-final"),
+]
+for group, cases, cwd, want in (
+    ("R-T1", R_DENY, ELSEWHERE, "deny"),
+    ("R-T2", R_DENY_IN_CLAUDE, CLAUDE, "deny"),
+    ("R-T3", R_DENY_TOOLS, ELSEWHERE, "deny"),
+    ("R-T4", R_ASK, ELSEWHERE, "ask"),
+    ("R-T5", R_ALLOW, ELSEWHERE, "allow"),
+):
+    for tool, ti in cases:
+        got = answer(tool, ti, None, cwd)
+        ok = got == want
+        fails += not ok
+        shown = ti.get("command") or {k: v for k, v in ti.items() if k != "content"}
+        print(
+            ("OK  " if ok else "FAIL"), group, tool, shown, "->", got,
+            "" if ok else f"(want {want})",
+        )  # fmt: skip
+# Inputs of the review that the plan's steps 18-20 do not cover (user decision 2026-11-18:
+# to the backlog). Their verdict today is written down here so that a change of it is seen;
+# "allow" is what is, not what should be.
+R_BACKLOG = [
+    sh("set"),
+    sh("export -p"),
+    sh('python -c "import os;print(os.environ)"'),
+    sh("python -c \"print(open('.e'+'nv').read())\""),
+    ps("[Environment]::GetEnvironmentVariables()"),
+    ps("$env:GITHUB_TOKEN"),
+    sh("git add -A"),
+    ("Read", {"file_path": f"{CLAUDE}/history.jsonl"}),
+]
+R_BACKLOG_IN_CLAUDE = [
+    sh("python -c \"import os;print(os.listdir('state'))\""),
+    sh("git grep -n x"),
+]
+for cases, cwd in ((R_BACKLOG, ELSEWHERE), (R_BACKLOG_IN_CLAUDE, CLAUDE)):
+    for tool, ti in cases:
+        got = answer(tool, ti, None, cwd)
+        ok = got == "allow"
+        fails += not ok
+        print(
+            ("OK  " if ok else "FAIL"), "R-T8 (backlog, as it is today)", tool,
+            ti.get("command") or ti, "->", got,
+        )  # fmt: skip
+# A commit is judged in the session's folder, not in the folder the hook process runs in.
+STAGED = Path(tempfile.mkdtemp(prefix="guard-staged-"))
+subprocess.run(["git", "init", "-q"], cwd=STAGED, check=True)
+(STAGED / ".env").write_text("TOKEN=x\n", encoding="utf-8")
+subprocess.run(["git", "add", "-f", ".env"], cwd=STAGED, check=True)
+got = answer(*sh("git commit -m x"), None, str(STAGED))
+ok = got == "deny"
+fails += not ok
+print(
+    ("OK  " if ok else "FAIL"),
+    "R-T6 a staged secret in the session's repository ->",
+    got,
+)
+got = answer(*sh(f"cd {STAGED.as_posix()} && git commit -m x"), None, ELSEWHERE)
+ok = got == "deny"
+fails += not ok
+print(
+    ("OK  " if ok else "FAIL"),
+    "R-T6 ... and in the repository the command cds to ->",
+    got,
+)
+shutil.rmtree(STAGED, ignore_errors=True)
+# A call the guard cannot judge (its own error) is refused, not waved through.
+for label, payload in (
+    ("tool_input is a list", {"tool_name": "Bash", "tool_input": ["rm -rf ~/"]}),
+    ("command is a number", {"tool_name": "Bash", "tool_input": {"command": 5}}),
+    (
+        "file_path is a dict",
+        {"tool_name": "Read", "tool_input": {"file_path": {"a": 1}}},
+    ),
+):
+    p = subprocess.run(
+        [sys.executable, GUARD],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    ok = p.returncode == 2 and "BLOCKED" in p.stderr
+    fails += not ok
+    print(
+        ("OK  " if ok else "FAIL"), "R-T7 fail closed:", label, "-> exit", p.returncode
+    )
+p = subprocess.run(
+    [sys.executable, GUARD],
+    input="not json",
+    capture_output=True,
+    text=True,
+    check=False,
+)
+ok = p.returncode == 0
+fails += not ok
+print(
+    ("OK  " if ok else "FAIL"),
+    "R-T7 a payload that is not JSON is still no objection ->",
+    p.returncode,
+)
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

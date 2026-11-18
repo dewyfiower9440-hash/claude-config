@@ -56,6 +56,8 @@ SLOW_FIRST = [
     "test_task_switch",
     "test_approvals",
     "test_ci_status",
+    "test_guard",
+    "test_policy_change",
 ]
 TESTS = [
     "test_shellparse",
@@ -119,7 +121,9 @@ MEASURED_S = {
     "test_approvals": 169,
     "test_task_switch": 164,
     "test_ci_status": 154,
-    "test_guard": 79,
+    # grown in devenv-final (2026-11-18): the review's inputs, the policy and state cases
+    "test_guard": 121,
+    "test_policy_change": 119,
     "test_authz": 73,
     "test_risk": 58,
     "test_review_binding": 49,
