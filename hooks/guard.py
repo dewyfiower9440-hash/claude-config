@@ -615,10 +615,28 @@ def git_writes(sub: list[str]) -> bool:
 # Read tool for one of them; a shell command reads them all the same.
 HOME_DIR = os.path.expanduser("~")
 CLAUDE_HOME = os.path.join(HOME_DIR, ".claude")
-PROTECTED = [os.path.join(CLAUDE_HOME, name) for name in ("discipline", "state")]
+
+
+def _temp_root() -> str:
+    """The temp folder as discipline.py finds it (its temp_root), without importing it."""
+    for var in ("TMPDIR", "TEMP", "TMP"):
+        value = os.environ.get(var)
+        if value and os.path.isdir(value):
+            return value
+    import tempfile  # fallback only; slow import
+
+    return tempfile.gettempdir()
+
+
+# The approval store, the hooks' records, and the session state the discipline hook keeps
+# under the temp folder (what is unverified, which approval is active: devenv-final 14).
+PROTECTED = [
+    *(os.path.join(CLAUDE_HOME, name) for name in ("discipline", "state")),
+    os.path.join(_temp_root(), "claude-discipline"),
+]
 PROTECTED_REASON = (
-    "{path} is inside a protected folder of ~/.claude (discipline, state): it is not read "
-    "or written through a tool"
+    "{path} is inside a protected folder of ~/.claude (discipline, state) or the hooks' "
+    "session state under the temp folder: it is not read or written through a tool"
 )
 SWEEP_REASON = (
     "a recursive command starting at {root} walks through the protected folders of "

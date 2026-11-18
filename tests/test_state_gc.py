@@ -274,6 +274,47 @@ check(
     (0, ["package.json", "uv.lock"]),
 )
 
+# ---- devenv-final 14: the "this session had a state" markers go with the state files
+gc = ROOT / "markers" / "claude-discipline"
+alive = ROOT / "markers" / "home" / "alive"
+gc.mkdir(parents=True)
+alive.mkdir(parents=True)
+for name, age in (("old1", OLD), ("new1", RECENT)):
+    (gc / f"{name}.json").write_text("{}", encoding="utf-8")
+    os.utime(gc / f"{name}.json", (age, age))
+for name, age in (
+    ("old1", OLD),
+    ("new1", OLD),
+    ("orphan-old", OLD),
+    ("orphan-new", RECENT),
+):
+    (alive / name).write_text("", encoding="utf-8")
+    os.utime(alive / name, (age, age))
+(alive / "not a marker.txt").write_text("", encoding="utf-8")
+os.utime(alive / "not a marker.txt", (OLD, OLD))
+removed = state_gc.sweep(gc, NOW, TTL)
+swept = state_gc.sweep_markers(alive, gc, NOW, TTL)
+check(
+    "G-T14 a marker goes when its state file is gone and it is older than the TTL; a "
+    "marker whose state file stays, a recent one and other names stay",
+    (removed, swept, sorted(x.name for x in alive.iterdir())),
+    ((1, 0), 2, ["new1", "not a marker.txt", "orphan-new"]),
+)
+check(
+    "G-T14 no marker folder, or a time budget already used up: nothing happens, no error",
+    (
+        state_gc.sweep_markers(ROOT / "nope", gc, NOW, TTL),
+        state_gc.sweep_markers(alive, gc, NOW + 400 * DAY, TTL, budget_s=-1.0),
+        sorted(x.name for x in alive.iterdir()),
+    ),
+    (0, 0, ["new1", "not a marker.txt", "orphan-new"]),
+)
+check(
+    "G-T14 the markers live under the approval home (isolated wherever that is)",
+    state_gc.alive_dir({"CLAUDE_DISCIPLINE_HOME": str(ROOT / "h")}),
+    ROOT / "h" / "alive",
+)
+
 shutil.rmtree(ROOT, ignore_errors=True)
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

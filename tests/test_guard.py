@@ -664,5 +664,43 @@ ok = got == "deny"
 fails += not ok
 print(("OK  " if ok else "FAIL"), "P-T7 a read-only subagent is still refused ->", got)
 shutil.rmtree(POLICY_DIR, ignore_errors=True)
+
+# ---- devenv-final 14: the hooks' session state under %TEMP% (what is unverified, which
+# approval is active) is no more a tool's to read or change than ~/.claude/state.
+STATE = f"{TMP}/claude-discipline"
+S_CASES = [
+    ("S-T1 Read", ("Read", {"file_path": f"{STATE}/abc.json"}), "deny"),
+    (
+        "S-T1 Write",
+        ("Write", {"file_path": f"{STATE}/abc.json", "content": "{}"}),
+        "deny",
+    ),
+    ("S-T1 Edit", edit(f"{STATE}/abc.json", "a", "b"), "deny"),
+    ("S-T1 Grep", ("Grep", {"pattern": "approval", "path": STATE}), "deny"),
+    ("S-T1 cat", sh(f"cat {STATE}/abc.json"), "deny"),
+    ("S-T1 rm", sh(f"rm -f {STATE}/abc.json"), "deny"),
+    ("S-T1 ls", sh(f"ls {STATE}"), "deny"),
+    (
+        "S-T1 Remove-Item",
+        ps(f"Remove-Item {STATE}/abc.json".replace("/", "\\")),
+        "deny",
+    ),
+    (
+        "S-T2 another file in the temp folder",
+        ("Read", {"file_path": f"{TMP}/notes.txt"}),
+        "allow",
+    ),
+    ("S-T2 a shell command on one", sh(f"cat {TMP}/claude/scratch/out.txt"), "allow"),
+    (
+        "S-T2 a folder of that name elsewhere",
+        ("Read", {"file_path": "C:/dev/proj/claude-discipline/x.json"}),
+        "allow",
+    ),
+]
+for label, (tool, ti), want in S_CASES:
+    got = answer(tool, ti, None, ELSEWHERE)
+    ok = got == want
+    fails += not ok
+    print(("OK  " if ok else "FAIL"), label, "->", got, "" if ok else f"(want {want})")
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

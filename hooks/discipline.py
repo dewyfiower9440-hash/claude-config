@@ -5239,6 +5239,31 @@ def emit_prompt_context(text: str) -> None:
 SEEN_EVENTS = 200
 
 
+STATE_LOST = "세션 추적 상태 파일이 사라짐(이 세션은 이미 상태를 기록한 적이 있음)"
+
+
+def state_file_lost(data: Mapping[str, Any]) -> str | None:
+    """devenv-final 14. Called when a session has no state file: the reason for a reset when
+    this session is known to have had one (its marker is there: the file was deleted, and
+    what it listed as unverified must not vanish with it), else None after leaving the
+    marker for next time. A session without an id is not tracked; a marker that cannot be
+    read or written changes nothing."""
+    session_id = data.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    import state_gc
+
+    marker = state_gc.alive_dir() / session_key(dict(data))
+    try:
+        if marker.is_file():
+            return STATE_LOST
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+    except OSError:  # an unwritable home: this protection is off, the hook still works
+        log.warning("discipline.alive_marker_failed")
+    return None
+
+
 def run_locked(mode: str, data: dict[str, Any], handler: Any, path: Path) -> None:
     """Load (damage is preserved and turns into a reset marker), handle once per event, save
     atomically (a failed save is remembered as a missed event)."""
@@ -5265,6 +5290,10 @@ def run_locked(mode: str, data: dict[str, Any], handler: Any, path: Path) -> Non
             )
         if saved:
             state.update(saved)
+        elif not why:
+            lost = state_file_lost(data)
+            if lost:
+                why.append(lost)
     except Exception:
         # the state was not read: nothing is saved over it, so nothing can be dropped in it
         if mode == "prompt":

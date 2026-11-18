@@ -103,8 +103,11 @@ def bash(session: str, command: str, cwd: Path) -> None:
     call("post", session, **payload)
 
 
-def stop(session: str) -> str | None:
-    return (call("stop", session) or {}).get("reason")
+def stop(session: str, cwd: Path | None = None) -> str | None:
+    """The Stop event's reason (None = allowed). The harness sends the session's folder;
+    the cases that depend on it (a reset's scope) pass it."""
+    where = {"cwd": str(cwd)} if cwd else {}
+    return (call("stop", session, **where) or {}).get("reason")
 
 
 def project(name: str, gate: str = OLD) -> Path:
@@ -260,6 +263,41 @@ for label, run_gate in (
     )
     bash(s, OLD, P)
     check("D-T2 ... the gate passing on the new content ends it", stop(s), None)
+
+# ---- devenv-final 14: deleting the session's state file does not make its unverified
+# edits disappear. The session is known to have had a state (a marker outside %TEMP%), so a
+# missing file is a reset: Stop holds until the gate passes again.
+STATE = TMPD / "claude-discipline"
+P = project("state-deleted")
+s = begin(P)
+write(s, P / "src" / "a.py", "a = 1\n")
+check("E-T1 an unverified edit blocks the stop", stop(s) is not None, True)
+call("prompt", s, cwd=str(P), prompt="next")
+(STATE / f"{s}.json").unlink()
+reason = stop(s, P) or ""
+check(
+    "E-T1 the state file deleted: the stop is still held, and says the state was lost",
+    (bool(reason), "상태" in reason),
+    (True, True),
+)
+check(
+    "E-T1 ... at the next stop too, while no gate has passed",
+    stop(s, P) is not None,
+    True,
+)
+bash(s, OLD, P)
+check("E-T1 ... until the project's gate passes", stop(s, P), None)
+fresh = begin(P)
+check(
+    "E-T2 a session's first event (no state yet, no marker) is not a reset",
+    stop(fresh),
+    None,
+)
+check(
+    "E-T2 ... and it leaves its marker under the approval home",
+    (ROOT / "home" / "alive" / fresh).is_file(),
+    True,
+)
 
 for p in (ROOT, BASE):
     shutil.rmtree(p, ignore_errors=True)

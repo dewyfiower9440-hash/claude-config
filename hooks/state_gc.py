@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 DEFAULT_TTL_DAYS = 35  # above the transcript retention (30 days by default)
@@ -126,9 +126,60 @@ def sweep(
     return removed, failed
 
 
+# devenv-final 14: discipline.py leaves `<session>` in this folder when a session gets its
+# first state, outside the temp folder: a state file that is missing while its marker is
+# there was deleted, and the session's unverified edits must not vanish with it.
+MARKER = re.compile(r"^[A-Za-z0-9_-]+$", re.ASCII)
+
+
+def alive_dir(env: Mapping[str, str] | None = None) -> Path:
+    """The marker folder, under the approval home (so a test's isolated home isolates the
+    markers too)."""
+    home = (os.environ if env is None else env).get("CLAUDE_DISCIPLINE_HOME")
+    return (Path(home) if home else Path.home() / ".claude" / "discipline") / "alive"
+
+
+def sweep_markers(
+    markers: Path,
+    folder: Path,
+    now: float,
+    ttl_s: float,
+    limit: int = LIMIT,
+    budget_s: float = BUDGET_S,
+    clock: Callable[[], float] = time.monotonic,
+) -> int:
+    """Markers removed: those older than the TTL whose state file in `folder` is gone (the
+    sweep above removed it, or the session never came back). A marker whose state file is
+    still there stays whatever its age. Never raises for a missing folder."""
+    started = clock()
+    removed = 0
+    try:
+        with os.scandir(markers) as it:
+            for entry in it:
+                if removed >= limit or clock() - started > budget_s:
+                    break
+                try:
+                    if (
+                        not MARKER.match(entry.name)
+                        or not entry.is_file(follow_symlinks=False)
+                        or now - entry.stat(follow_symlinks=False).st_mtime <= ttl_s
+                        or os.path.lexists(os.path.join(folder, entry.name + ".json"))
+                    ):
+                        continue
+                    os.unlink(entry.path)
+                    removed += 1
+                except OSError:  # vanished, in use or not permitted: left for next time
+                    continue
+    except OSError:  # no such folder: nothing to do
+        return removed
+    return removed
+
+
 def sweep_default(now: float) -> tuple[int, int]:
     folder = default_dir()
     if folder is None:
         return 0, 0
     days = ttl_days(os.environ.get("CLAUDE_STATE_TTL_DAYS"))
-    return sweep(folder, now, days * 86400.0)
+    result = sweep(folder, now, days * 86400.0)
+    sweep_markers(alive_dir(), folder, now, days * 86400.0)
+    return result
