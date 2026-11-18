@@ -2933,8 +2933,12 @@ def started_here(state: dict[str, Any], prompt: str) -> bool:
     if task_id is None:
         return False
     tasks = state.get("background_tasks")
-    return (isinstance(tasks, list) and task_id in tasks) or started_agent(
-        state, task_id
+    return (
+        (isinstance(tasks, list) and task_id in tasks)
+        or started_agent(state, task_id)
+        # measured 2026-11-18: a subagent launched in the background reports with a
+        # task notification whose id is the Agent tool's `agentId`
+        or launched_agent(state, task_id)
     )
 
 
