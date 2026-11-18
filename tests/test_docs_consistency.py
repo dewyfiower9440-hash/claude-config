@@ -376,5 +376,37 @@ check(
     ),
 )
 
+# ---------------------------------------------------------------- plan archive
+# devenv-final 35: closed plans are moved to docs/plans/archive/. Every hook that lists
+# plan files lists the top level only, so an archived plan can neither be the main plan
+# nor carry an approval.
+listings = {
+    name: re.findall(
+        r"plans_dir\.(r?glob)\(([^)]*)\)", (HOOKS / name).read_text(encoding="utf-8")
+    )
+    for name in ("discipline.py", "session_context.py", "handoff.py")
+}
+check(
+    "D10 the hooks list plan files in five places, each the top level of docs/plans only",
+    listings,
+    {
+        "discipline.py": [("glob", '"*.md"')] * 4,
+        "session_context.py": [("glob", '"*.md"')],
+        "handoff.py": [],  # reads through session_context.read_plans
+    },
+)
+top_plans = sorted(p.name for p in (REPO / "docs" / "plans").glob("*.md"))
+check(
+    "D10 ... and no more than ten plan files are left there for them to open",
+    len(top_plans) <= 10,
+    True,
+)
+ignore = (REPO / ".gitignore").read_text(encoding="utf-8")
+check(
+    "D10 ... the archive's plan files are tracked like the others",
+    "!/docs/plans/archive/*.md" in ignore,
+    True,
+)
+
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

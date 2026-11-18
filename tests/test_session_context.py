@@ -549,6 +549,19 @@ check(
     "malformed payload -> exit 0, no output", (p.returncode, p.stdout.strip()), (0, "")
 )
 
+# devenv-final 35: closed plans live in docs/plans/archive/; nothing under it is a plan to
+# the hook, whatever its status line says.
+write(
+    inj / "docs" / "plans" / "archive" / "2026-11-01-shelved.md",
+    "---\nstatus: in-progress\ntask: shelved\n---\n\n# Shelved\n\n## 단계\n- [ ] 1. old\n",
+)
+ctx = run_hook(inj)
+check(
+    "A-T1 a plan file under docs/plans/archive/ is not read: not the main plan, not listed",
+    ("shelved" in ctx, "2026-11-18-evil.md" in ctx),
+    (False, True),
+)
+
 shutil.rmtree(ROOT, ignore_errors=True)
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

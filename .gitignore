@@ -25,4 +25,8 @@ __pycache__/
 !/docs/plans/
 /docs/plans/*
 !/docs/plans/*.md
+# Closed plans: kept as history, out of the folder the hooks list.
+!/docs/plans/archive/
+/docs/plans/archive/*
+!/docs/plans/archive/*.md
 /tests/_tmp*/

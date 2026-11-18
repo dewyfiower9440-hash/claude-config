@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 task: devenv-master
 created: 2026-11-11
 approved: 2026-11-11
