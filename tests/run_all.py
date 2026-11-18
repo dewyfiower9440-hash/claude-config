@@ -254,12 +254,16 @@ def run_tests(names: list[str], workers: int, tests_dir: Path = ROOT / "tests") 
     # nothing is left under the projects folder (devenv-final 5).
     WORK_PARENT.mkdir(parents=True, exist_ok=True)
     work = tempfile.mkdtemp(prefix=f"_gate-{os.getpid()}-", dir=WORK_PARENT)
+    # ... and so do the `_tmp_*` folders they build inside tests/ (inside this repository
+    # on purpose: some cases rely on its CLAUDE.md being above them; ignored by git).
+    inside = tempfile.mkdtemp(prefix=f"_tmp_gate-{os.getpid()}-", dir=ROOT / "tests")
     env = {
         **os.environ,
         "TEMP": temp,
         "TMP": temp,
         "TMPDIR": temp,
         "GATE_WORK_ROOT": work,
+        "GATE_TMP_ROOT": inside,
     }
     started = time.monotonic()
     try:
@@ -276,7 +280,7 @@ def run_tests(names: list[str], workers: int, tests_dir: Path = ROOT / "tests") 
             }
             results = {n: f.result() for n, f in futures.items()}
     finally:
-        for folder, what in ((temp, "temp"), (work, "work")):
+        for folder, what in ((temp, "temp"), (work, "work"), (inside, "tests")):
             shutil.rmtree(folder, onexc=_retry_writable)
             if os.path.exists(
                 folder

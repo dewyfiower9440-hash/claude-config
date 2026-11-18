@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -79,7 +80,10 @@ check(
     "none",
 )
 
-tmp = Path(__file__).resolve().parent / "_tmp_verification"
+# Under the gate every run has its own folder for these (run_all.GATE_TMP_ROOT, inside
+# tests/ as before); alone, tests/ itself.
+TMP_ROOT = Path(os.environ.get("GATE_TMP_ROOT") or Path(__file__).resolve().parent)
+tmp = TMP_ROOT / "_tmp_verification"
 (tmp / "pkg" / "sub").mkdir(parents=True, exist_ok=True)
 (tmp / "CLAUDE.md").write_text(
     "## Verification\n- gate: `make check`\n", encoding="utf-8"

@@ -17,8 +17,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 HOOKS = HERE.parent / "hooks"
-HOME = HERE / "_tmp_approval_home"
-REPO = HERE / "_tmp_approval_repo"
+# Under the gate every run has its own folder for these (run_all.GATE_TMP_ROOT, inside
+# tests/ as before); alone, tests/ itself.
+TMP_ROOT = Path(os.environ.get("GATE_TMP_ROOT") or Path(__file__).resolve().parent)
+HOME = TMP_ROOT / "_tmp_approval_home"
+REPO = TMP_ROOT / "_tmp_approval_repo"
 shutil.rmtree(HOME, ignore_errors=True)
 shutil.rmtree(REPO, ignore_errors=True)
 os.environ["CLAUDE_DISCIPLINE_HOME"] = str(HOME)
@@ -201,7 +204,7 @@ check(
 )
 
 # ---- review finding 8: an approval is bound to the project it was given in
-OTHER = HERE / "_tmp_approval_other"
+OTHER = TMP_ROOT / "_tmp_approval_other"
 shutil.rmtree(OTHER, ignore_errors=True)
 (OTHER / "docs" / "plans").mkdir(parents=True)
 # Its own git root, so the search really finds the copied plan (same hash) and only the
@@ -508,8 +511,8 @@ check(
 # A relayed agent message / task notification also runs UserPromptSubmit (documented). No
 # official hook field tells it apart from a typed prompt, so it may only make the hook stricter:
 # it never keeps or grants an approval, and it never resets this turn's counted files.
-RREPO = HERE / "_tmp_approval_rrepo"
-RFOREIGN = HERE / "_tmp_approval_rforeign"
+RREPO = TMP_ROOT / "_tmp_approval_rrepo"
+RFOREIGN = TMP_ROOT / "_tmp_approval_rforeign"
 for _p in (RREPO, RFOREIGN):
     shutil.rmtree(_p, ignore_errors=True)
     (_p / "docs" / "plans").mkdir(parents=True)

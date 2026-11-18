@@ -21,7 +21,10 @@ sys.stdout.reconfigure(
 )  # Korean values on a cp1252 console (CI)
 HERE = Path(__file__).resolve().parent
 HOOK = HERE.parent / "hooks" / "discipline.py"
-ROOT = HERE / "_tmp_sstore"
+# Under the gate every run has its own folder for these (run_all.GATE_TMP_ROOT, inside
+# tests/ as before); alone, tests/ itself.
+TMP_ROOT = Path(os.environ.get("GATE_TMP_ROOT") or Path(__file__).resolve().parent)
+ROOT = TMP_ROOT / "_tmp_sstore"
 TMPD = ROOT / "tmp"
 STATE = TMPD / "claude-discipline"
 # Under the gate every run has a folder of its own (run_all.GATE_WORK_ROOT); alone, as before.

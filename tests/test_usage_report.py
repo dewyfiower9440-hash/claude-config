@@ -22,7 +22,10 @@ from typing import Any
 sys.stdout.reconfigure(errors="backslashreplace")
 HERE = Path(__file__).resolve().parent
 HOOKS = HERE.parent / "hooks"
-ROOT = HERE / "_tmp_usage_report"
+# Under the gate every run has its own folder for these (run_all.GATE_TMP_ROOT, inside
+# tests/ as before); alone, tests/ itself.
+TMP_ROOT = Path(os.environ.get("GATE_TMP_ROOT") or Path(__file__).resolve().parent)
+ROOT = TMP_ROOT / "_tmp_usage_report"
 shutil.rmtree(ROOT, ignore_errors=True)
 ROOT.mkdir(parents=True)
 sys.path.insert(0, str(HOOKS))

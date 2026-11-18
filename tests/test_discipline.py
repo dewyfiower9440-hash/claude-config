@@ -12,7 +12,10 @@ from pathlib import Path
 
 HOOK = str(Path(__file__).resolve().parent.parent / "hooks" / "discipline.py")
 # Plan approvals made by these tests go to an isolated store, never the real one.
-APPROVAL_HOME = Path(__file__).resolve().parent / "_tmp_discipline_approvals"
+# Under the gate every run has its own folder for these (run_all.GATE_TMP_ROOT, inside
+# tests/ as before); alone, tests/ itself.
+TMP_ROOT = Path(os.environ.get("GATE_TMP_ROOT") or Path(__file__).resolve().parent)
+APPROVAL_HOME = TMP_ROOT / "_tmp_discipline_approvals"
 shutil.rmtree(APPROVAL_HOME, ignore_errors=True)
 os.environ["CLAUDE_DISCIPLINE_HOME"] = str(APPROVAL_HOME)
 TMP = Path(tempfile.mkdtemp(prefix="disc-"))
@@ -226,7 +229,7 @@ def approve(session: str, plan: str, prompt_id: str, cwd: str) -> None:
     )
 
 
-D2 = Path(__file__).resolve().parent / "_tmp_d2"
+D2 = TMP_ROOT / "_tmp_d2"
 shutil.rmtree(D2, ignore_errors=True)
 (D2 / "docs" / "plans").mkdir(parents=True)
 # Its own git root: approvals re-arm only from the cwd's git toplevel, and without this the
@@ -595,7 +598,7 @@ check(
 check("code-reviewer recorded as review", state_of(s).get("last_review", 0) > 0, True)
 
 # ---- D-1a / FC-2: a declared project gate must be the thing that passed
-ROOT = Path(__file__).resolve().parent / "_tmp_disc_project"
+ROOT = TMP_ROOT / "_tmp_disc_project"
 (ROOT / "src").mkdir(parents=True, exist_ok=True)
 (ROOT / "CLAUDE.md").write_text(
     "# demo\n\n## Verification\n- gate: `uv run pytest -q --cov`\n- ci: none\n\n## Gotchas\n",

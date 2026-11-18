@@ -14,7 +14,10 @@ from pathlib import Path
 
 HOOK = str(Path(__file__).resolve().parent.parent / "hooks" / "discipline.py")
 # Plan approvals made by these tests go to an isolated store, never the real one.
-APPROVAL_HOME = Path(__file__).resolve().parent / "_tmp_discipline_d3_approvals"
+# Under the gate every run has its own folder for these (run_all.GATE_TMP_ROOT, inside
+# tests/ as before); alone, tests/ itself.
+TMP_ROOT = Path(os.environ.get("GATE_TMP_ROOT") or Path(__file__).resolve().parent)
+APPROVAL_HOME = TMP_ROOT / "_tmp_discipline_d3_approvals"
 shutil.rmtree(APPROVAL_HOME, ignore_errors=True)
 os.environ["CLAUDE_DISCIPLINE_HOME"] = str(APPROVAL_HOME)
 TMP = Path(tempfile.mkdtemp(prefix="disc-"))

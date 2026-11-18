@@ -18,8 +18,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 HOOK = HERE.parent / "hooks" / "discipline.py"
 # Plan approvals made by these tests go to an isolated store, never the real one.
-os.environ["CLAUDE_DISCIPLINE_HOME"] = str(HERE / "_tmp_worktree_approvals")
-WORK = HERE / "_tmp_wt"
+# Under the gate every run has its own folder for these (run_all.GATE_TMP_ROOT, inside
+# tests/ as before); alone, tests/ itself.
+TMP_ROOT = Path(os.environ.get("GATE_TMP_ROOT") or Path(__file__).resolve().parent)
+os.environ["CLAUDE_DISCIPLINE_HOME"] = str(TMP_ROOT / "_tmp_worktree_approvals")
+WORK = TMP_ROOT / "_tmp_wt"
 REPO = WORK / "repo"
 fails = 0
 

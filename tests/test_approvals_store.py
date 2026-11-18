@@ -22,7 +22,10 @@ HOOKS = HERE.parent / "hooks"
 sys.path.insert(0, str(HOOKS))
 import approvals as ap
 
-TMP = HERE / "_tmp_store"
+# Under the gate every run has its own folder for these (run_all.GATE_TMP_ROOT, inside
+# tests/ as before); alone, tests/ itself.
+TMP_ROOT = Path(os.environ.get("GATE_TMP_ROOT") or Path(__file__).resolve().parent)
+TMP = TMP_ROOT / "_tmp_store"
 shutil.rmtree(TMP, ignore_errors=True)
 TMP.mkdir()
 # Check names and values hold Korean text; a console that cannot encode it (cp1252 on

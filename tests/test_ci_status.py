@@ -18,7 +18,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 HOOK = HERE.parent / "hooks" / "discipline.py"
-WORK = HERE / "_tmp_ci"
+# Under the gate every run has its own folder for these (run_all.GATE_TMP_ROOT, inside
+# tests/ as before); alone, tests/ itself.
+TMP_ROOT = Path(os.environ.get("GATE_TMP_ROOT") or Path(__file__).resolve().parent)
+WORK = TMP_ROOT / "_tmp_ci"
 fails = 0
 
 

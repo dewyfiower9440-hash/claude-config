@@ -17,8 +17,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 HOOKS = HERE.parent / "hooks"
-HOME = HERE / "_tmp_approval2_home"
-REPO = HERE / "_tmp_approval2_repo"
+# Under the gate every run has its own folder for these (run_all.GATE_TMP_ROOT, inside
+# tests/ as before); alone, tests/ itself.
+TMP_ROOT = Path(os.environ.get("GATE_TMP_ROOT") or Path(__file__).resolve().parent)
+HOME = TMP_ROOT / "_tmp_approval2_home"
+REPO = TMP_ROOT / "_tmp_approval2_repo"
 shutil.rmtree(HOME, ignore_errors=True)
 shutil.rmtree(REPO, ignore_errors=True)
 os.environ["CLAUDE_DISCIPLINE_HOME"] = str(HOME)
@@ -122,7 +125,7 @@ import approvals as ap
 
 # Write decisions ignore %TEMP% paths (discipline IGNORED_PATH): a checkout under %TEMP%
 # (a scratch worktree) points CLAUDE_TEST_TMP at a folder outside it.
-TROOT = Path(os.environ.get("CLAUDE_TEST_TMP") or HERE)
+TROOT = Path(os.environ.get("CLAUDE_TEST_TMP") or TMP_ROOT)
 TROOT.mkdir(parents=True, exist_ok=True)
 V2HOME, V2W = TROOT / "_tmp_approval_v2home", TROOT / "_tmp_approval_v2w"
 V2REPO = TROOT / "_tmp_approval_v2repo"
@@ -1255,7 +1258,7 @@ base = subprocess.run(
 if (
     base.returncode == 0
 ):  # local only: the tag is never pushed, CI checkouts have no tags
-    OLD = HERE / "_tmp_approval_oldhooks"
+    OLD = TMP_ROOT / "_tmp_approval_oldhooks"
     shutil.rmtree(OLD, ignore_errors=True)
     OLD.mkdir()
     names = subprocess.run(

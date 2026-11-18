@@ -18,8 +18,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 HOOKS = HERE.parent / "hooks"
-HOME = HERE / "_tmp_switch_home"
-ROOT = HERE / "_tmp_switch"
+# Under the gate every run has its own folder for these (run_all.GATE_TMP_ROOT, inside
+# tests/ as before); alone, tests/ itself.
+TMP_ROOT = Path(os.environ.get("GATE_TMP_ROOT") or Path(__file__).resolve().parent)
+HOME = TMP_ROOT / "_tmp_switch_home"
+ROOT = TMP_ROOT / "_tmp_switch"
 for _p in (HOME, ROOT):
     shutil.rmtree(_p, ignore_errors=True)
 os.environ["CLAUDE_DISCIPLINE_HOME"] = str(HOME)

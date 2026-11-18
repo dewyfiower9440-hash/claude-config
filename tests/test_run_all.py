@@ -204,11 +204,39 @@ script(
     "proj.mkdir(parents=True)\n"
     "(proj / 'ab').write_text('x')\n"
     "os.chmod(proj / 'ab', 0o444)  # like git's object files\n"
+    "inside = Path(os.environ['GATE_TMP_ROOT'])\n"
+    "(inside / '_tmp_probe').mkdir()\n"
+    "(inside / '_tmp_probe' / 'f').write_text('x')\n"
     "(Path(sys.argv[0]).parent / 'work.result').write_text(str(root))\n"
+    "(Path(sys.argv[0]).parent / 'inside.result').write_text(str(inside))\n"
     "print('FAILURES: 0')\n",
 )
 ok, out = run(["work_probe"], workers=1)
 seen_work = Path((TMP / "work.result").read_text())
+seen_inside = Path((TMP / "inside.result").read_text())
+check(
+    "G-T12 a module gets a folder for its _tmp_* folders, made for this run inside "
+    "tests/ under a name git ignores; gone afterwards",
+    (
+        seen_inside.name.startswith(f"_tmp_gate-{os.getpid()}-"),
+        os.path.normcase(seen_inside.parent) == os.path.normcase(HERE),
+        seen_inside.exists(),
+    ),
+    (True, True, False),
+)
+check(
+    "G-T12 no module builds a _tmp folder straight under tests/ (TMP_ROOT instead)",
+    [
+        p.name
+        for p in sorted(HERE.glob("test_*.py"))
+        if p.name != Path(__file__).name
+        and re.search(
+            r'(HERE|\.parent) / "_tmp',
+            p.read_text(encoding="utf-8").replace('ROOT.parent / "_tmp_disc_late"', ""),
+        )
+    ],
+    [],
+)
 check(
     "G-T11 a module gets a work folder made for this run, under the projects folder",
     (

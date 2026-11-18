@@ -21,7 +21,12 @@ from pathlib import Path
 sys.stdout.reconfigure(errors="backslashreplace")
 HERE = Path(__file__).resolve().parent
 HOOKS = HERE.parent / "hooks"
-ROOT = HERE / "_tmp_prompt_approval"  # its own: test_project_switch has `_tmp_switch`
+# Under the gate every run has its own folder for these (run_all.GATE_TMP_ROOT, inside
+# tests/ as before); alone, tests/ itself.
+TMP_ROOT = Path(os.environ.get("GATE_TMP_ROOT") or Path(__file__).resolve().parent)
+ROOT = (
+    TMP_ROOT / "_tmp_prompt_approval"
+)  # its own: test_project_switch has `_tmp_switch`
 # Under the gate every run has a folder of its own (run_all.GATE_WORK_ROOT); alone, as before.
 WORK_ROOT = Path(os.environ.get("GATE_WORK_ROOT", "C:/dev"))
 PROJ = WORK_ROOT / "_prompt_proj"
