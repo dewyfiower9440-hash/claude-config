@@ -1040,6 +1040,98 @@ check(
     ("alpha", False, "relay", True, True, 2, [True]),
 )
 
+
+# ---- devenv-final 23a: the hand-back of a subagent this session launched with the Agent
+# tool keeps the approval even when no SubagentStart/SubagentStop was recorded for it
+# (observed 2026-11-18 with a web-fetch agent: its report ended the approval mid-task). The
+# hook's own record of the launch is the Agent tool's PostToolUse, which names the agent.
+def launched(response: object, tool: str = "Agent", prompt_id: str = "p1") -> str:
+    s = start()
+    approve(s, "alpha")
+    hook(
+        "post",
+        s,
+        prompt_id,
+        tool_name=tool,
+        tool_input={"subagent_type": "web-fetch", "prompt": "read a page"},
+        tool_response=response,
+        tool_use_id=uuid.uuid4().hex,
+    )
+    return s
+
+
+RESULT_TEXT = (
+    "the report\nagentId: af00d1 (use SendMessage with to: 'af00d1' to continue)"
+)
+for label, response in (
+    ("an agentId field", {"agentId": "af00d1", "content": []}),
+    ("an agent_id field", {"agent_id": "af00d1"}),
+    ("the id in the result text", {"content": [{"type": "text", "text": RESULT_TEXT}]}),
+    ("the result as plain text", RESULT_TEXT),
+):
+    s = launched(response)
+    out = hook("prompt", s, "p1", prompt=handback("af00d1"))
+    check(
+        f"A-T1 the launch recorded from {label}: its hand-back keeps the approval, silently",
+        (task_of(s), LOST_WORDS in said(out)),
+        ("alpha", False),
+    )
+s = launched({"agentId": "af00d1"}, tool="Task")
+check(
+    "A-T1 ... the same under the tool's older name, and with the relay header line",
+    (
+        LOST_WORDS
+        in said(
+            hook(
+                "prompt",
+                s,
+                "p1",
+                prompt="Another Claude session sent a message while you were working:\n"
+                + handback("af00d1"),
+            )
+        ),
+        task_of(s),
+    ),
+    (False, "alpha"),
+)
+s = launched({"agentId": "af00d1"})
+out = hook("prompt", s, "p1", prompt=handback("someone-else"))
+check(
+    "A-T2 a hand-back naming an agent this session did not launch still ends the approval",
+    (task_of(s), LOST_WORDS in said(out)),
+    (None, True),
+)
+s = launched({"note": "no id in it"})
+out = hook("prompt", s, "p1", prompt=handback("af00d1"))
+check(
+    "A-T2 ... and so does one whose launch recorded no id",
+    (task_of(s), LOST_WORDS in said(out)),
+    (None, True),
+)
+s = start()
+hook(
+    "post",
+    s,
+    "p1",
+    tool_name="Agent",
+    tool_input={"subagent_type": "web-fetch"},
+    tool_response={"agentId": "af00d1"},
+    tool_use_id=uuid.uuid4().hex,
+)
+hook("prompt", s, "p1", prompt=handback("af00d1"))
+check("A-T3 a hand-back never creates an approval", task_of(s), None)
+check(
+    "A-T4 the ids are kept as a bounded list of plain ids",
+    (
+        disc_h.agent_ids({"agentId": "ok_1-2.x"}),
+        disc_h.agent_ids({"agentId": "bad id!"}),
+        disc_h.agent_ids(["not", "a", "dict"]),
+        disc_h.agent_ids(None),
+        disc_h.MAX_LAUNCHED_AGENTS >= 20,
+    ),
+    (["ok_1-2.x"], [], [], [], True),
+)
+
 for p in (ROOT, PROJ):
     shutil.rmtree(p, ignore_errors=True)
 print("FAILURES:", fails)

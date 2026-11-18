@@ -1369,6 +1369,7 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
     elif tool in ("Agent", "Task"):
         if ti.get("subagent_type") in REVIEW_AGENTS:
             state["last_review"] = now  # a review, not verification
+        note_launched_agent(data, state)
     elif tool == "ExitPlanMode":
         # PostToolUse only fires once the user approved the plan.
         changed = keep_covered_changes(data, state)
@@ -1953,12 +1954,24 @@ def _v2_find_plan(root: str, task: object, core: object) -> str | None:
             ValueError,
         ):  # unreadable or not UTF-8: cannot be the approved one
             continue
-        if plan_task(text) == task and approvals.core_hash(text) == core:
+        if (
+            plan_task(text) == task
+            and approvals.core_hash(text) == core
+            # devenv-final 23b: an approval is bound to its plan file once that file is in
+            # progress. A plan saved as a draft and approved as it is stays unbound (only
+            # docs/plans may be written, see v2_write_check) until its status line is
+            # switched; bound to the draft, the first write check revoked it for good.
+            and approvals.plan_status(text) == "in-progress"
+        ):
             hits.append(plan)
     return os.path.normcase(os.path.relpath(hits[0], root)) if len(hits) == 1 else None
 
 
 UNBOUND = "승인된 계획 파일이 아직 docs/plans에 없음(계획 파일을 먼저 기록하세요)"
+UNBOUND_DRAFT = (
+    "승인된 글과 같은 계획 파일({names})의 status가 아직 in-progress가 아님: 승인은 유효하며, "
+    "그 파일의 status 줄만 in-progress로 바꾸면(본문은 그대로) 시작됩니다"
+)
 UNBOUND_DIFFERS = (
     "승인된 글과 다른 계획 파일({names}): frontmatter에는 status만 더하고 본문은 "
     "승인된 그대로 저장하세요"
@@ -1979,6 +1992,7 @@ def _v2_unbound_why(root: str, task: object, core: object) -> str:
     plans_dir = Path(root) / "docs" / "plans"
     same: list[str] = []
     other: list[str] = []
+    waiting: list[str] = []
     for plan in sorted(plans_dir.glob("*.md")) if plans_dir.is_dir() else []:
         try:
             text = plan.read_text(encoding="utf-8")
@@ -1986,6 +2000,13 @@ def _v2_unbound_why(root: str, task: object, core: object) -> str:
             continue
         if task and plan_task(text) == task:
             (same if approvals.core_hash(text) == core else other).append(plan.name)
+            if (
+                approvals.core_hash(text) == core
+                and approvals.plan_status(text) != "in-progress"
+            ):
+                waiting.append(plan.name)
+    if len(same) == 1 and waiting:
+        return UNBOUND_DRAFT.format(names=waiting[0])
     names = same if len(same) > 1 else other
     if not names:
         return UNBOUND
@@ -2085,7 +2106,11 @@ def v2_record_approval(
     fp = response.get("filePath")
     if isinstance(fp, str) and _inside(fp, os.path.join(root, "docs", "plans")):
         try:
-            same = ap.core_hash(Path(fp).read_text(encoding="utf-8")) == core
+            saved = Path(fp).read_text(encoding="utf-8")
+            # bound only to a file that is in progress (see _v2_find_plan)
+            same = (
+                ap.core_hash(saved) == core and ap.plan_status(saved) == "in-progress"
+            )
         except (OSError, ValueError):  # not written yet / unreadable: bound later
             same = False
         if same:
@@ -2753,6 +2778,55 @@ def note_background_task(data: dict[str, Any], state: dict[str, Any]) -> None:
     state["background_tasks"] = [*tasks, task_id][-MAX_BACKGROUND_TASKS:]
 
 
+# devenv-final 23a. A subagent's hand-back keeps an approval only for a subagent this
+# session is known to have started. SubagentStart/SubagentStop do not record every one
+# (2026-11-18: a web-fetch agent's report ended the approval in the middle of a task), but
+# the Agent tool's own result names the agent it launched, and that result is this
+# session's record like `backgroundTaskId` is for a shell command.
+MAX_LAUNCHED_AGENTS = 50
+AGENT_ID = re.compile(r"[A-Za-z0-9_.-]{1,64}", re.ASCII)
+AGENT_ID_IN_TEXT = re.compile(r"\bagentId:\s*([A-Za-z0-9_.-]{1,64})", re.ASCII)
+RESPONSE_SCAN_CHARS = 20000
+
+
+def agent_ids(response: object) -> list[str]:
+    """The agent ids an Agent tool result names: its `agentId` / `agent_id` field, or the
+    `agentId: <id>` line of its text. Nothing else of the result is kept."""
+    found: list[str] = []
+    if isinstance(response, dict):
+        for key in ("agentId", "agent_id"):
+            value = response.get(key)
+            if isinstance(value, str) and AGENT_ID.fullmatch(value):
+                found.append(value)
+        if found:
+            return found
+        try:
+            text = json.dumps(response, ensure_ascii=False)[:RESPONSE_SCAN_CHARS]
+        except (TypeError, ValueError):
+            return []
+        text = text.replace("\\n", "\n")
+    elif isinstance(response, str):
+        text = response[:RESPONSE_SCAN_CHARS]
+    else:
+        return []
+    return list(dict.fromkeys(AGENT_ID_IN_TEXT.findall(text)))
+
+
+def note_launched_agent(data: dict[str, Any], state: dict[str, Any]) -> None:
+    """PostToolUse of the Agent tool: remember the agents it launched (ids only)."""
+    ids = agent_ids(data.get("tool_response"))
+    if not ids:
+        return
+    known = state.get("launched_agents")
+    kept = [a for a in known if a not in ids] if isinstance(known, list) else []
+    state["launched_agents"] = [*kept, *ids][-MAX_LAUNCHED_AGENTS:]
+
+
+def launched_agent(state: dict[str, Any], agent_id: str) -> bool:
+    known = state.get("launched_agents")
+    return isinstance(known, list) and agent_id in known
+
+
 def relay_task_id(prompt: str) -> str | None:
     """The task id of a completion notification: `<task-notification>` alone on the first
     non-blank line and `<task-id>ID</task-id>` alone on the very next one. Any other shape
@@ -2771,7 +2845,7 @@ def started_here(state: dict[str, Any], prompt: str) -> bool:
     shell command (PostToolUse)."""
     agent_id = relay_agent_id(prompt)
     if agent_id is not None:
-        return finished_agent(state, agent_id)
+        return finished_agent(state, agent_id) or launched_agent(state, agent_id)
     task_id = relay_task_id(prompt)
     if task_id is None:
         return False

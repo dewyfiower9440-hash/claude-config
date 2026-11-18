@@ -1218,6 +1218,76 @@ check(
 )
 (V2HOME / ap.MARKER_NAME).write_text("test", encoding="utf-8")
 
+# ---- devenv-final 23b: a plan saved as a draft and then approved as it is. The approval
+# was bound to that file and the first write check revoked it for good ("plan_status:
+# draft"), so the documented order "save the draft, get it approved, switch the status" could
+# never work (observed 2026-11-18). A draft the approval has never seen in progress is "not
+# started yet": only the plan file may be written, and switching its status starts it.
+DRAFT = V2PLAN.replace("status: in-progress", "status: draft").replace(
+    "widget", "gadget"
+)
+STARTED = DRAFT.replace("status: draft", "status: in-progress")
+V2GADGET = V2REPO / "docs" / "plans" / "2026-11-18-gadget.md"
+
+
+def gadget_approve(text: str) -> tuple[str, str]:
+    s, p = uuid.uuid4().hex, pid()
+    call("prompt", s, prompt_id=p, prompt="plan the gadget", cwd=str(V2REPO))
+    call(
+        "post",
+        s,
+        prompt_id=p,
+        tool_name="ExitPlanMode",
+        tool_input={},
+        tool_response={"plan": text, "filePath": str(V2GADGET)},
+        cwd=str(V2REPO),
+    )
+    return s, p
+
+
+V2GADGET.write_text(DRAFT, encoding="utf-8")
+s, p = gadget_approve(DRAFT)
+refused = raw_pre(s, p)
+check(
+    "D-T1 a saved draft approved as it is: code is not writable yet, and the reason says "
+    "to switch the status (not that the approval is gone)",
+    (
+        decision(refused),
+        "in-progress" in json.dumps(refused, ensure_ascii=False),
+        "REVOKED" in json.dumps(refused, ensure_ascii=False),
+    ),
+    ("deny", True, False),
+)
+check(
+    "D-T1 ... the plan file itself may be written (the status switch)",
+    decision(raw_pre(s, p, V2GADGET)),
+    "allow",
+)
+V2GADGET.write_text(STARTED, encoding="utf-8")
+check(
+    "D-T1 ... and once its status is in-progress the same approval covers its scope",
+    edit_decision(s, p),
+    "allow",
+)
+V2GADGET.write_text(DRAFT, encoding="utf-8")
+back = raw_pre(s, p)
+V2GADGET.write_text(STARTED, encoding="utf-8")
+check(
+    "D-T2 a plan set back to draft after it was in progress ends the approval as before: "
+    "switching the status again does not bring it back",
+    (decision(back), decision(raw_pre(s, p))),
+    ("deny", "deny"),
+)
+V2GADGET.write_text(DRAFT.replace("keep data", "drop data"), encoding="utf-8")
+s, p = gadget_approve(DRAFT)
+V2GADGET.write_text(STARTED.replace("keep data", "drop data"), encoding="utf-8")
+check(
+    "D-T3 a draft whose text is not the approved text is not started by its status",
+    decision(raw_pre(s, p)),
+    "deny",
+)
+V2GADGET.unlink()
+
 # ---- T13 code rollback to the v1 path: activation retired v1 and rotated the key
 V1HOME = TROOT / "_tmp_approval_v1home"
 shutil.rmtree(V1HOME, ignore_errors=True)
