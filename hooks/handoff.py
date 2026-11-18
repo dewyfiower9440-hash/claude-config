@@ -27,6 +27,9 @@ V = 1
 MAX_AGE_S = 14 * 86400
 GIT_TIMEOUT_S = 1
 END_BUDGET_S = 3.0  # all git calls of one SessionEnd together (the hook's limit is 5)
+# SessionEnd hooks share a 1.5 s default budget (stretched to the hook's own timeout), so
+# the plan lookup opens only the most recently changed plan files.
+END_PLANS_READ = 5
 SWEEP_RESERVE_S = 1.5  # the state sweep starts only this long before END_BUDGET_S
 USAGE_START_S = 2.0  # the usage measurement (up to 1 s) starts only before this
 STEP_CHARS = 200
@@ -296,7 +299,8 @@ def read_plan(root: str) -> dict[str, Any] | None:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import session_context
 
-    main, _summaries = session_context.read_plans(Path(root))
+    # SessionEnd hooks share 1.5 s: only the few most recently changed plans are opened
+    main, _summaries = session_context.read_plans(Path(root), limit=END_PLANS_READ)
     if not main:
         return None
     open_steps = [s for s in main.checklist if session_context.UNCHECKED.match(s)]
