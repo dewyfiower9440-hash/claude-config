@@ -1,5 +1,5 @@
 ---
-status: draft
+status: in-progress
 task: devenv-final
 ---
 
@@ -109,12 +109,12 @@ task: devenv-final
 ## 단계
 
 ### 준비 (지금 세션, `C:\dev`)
-- [ ] P1. 묶음 M을 현재 상태로 마감한다: `cd /c/Users/user/.claude && python -I tests/run_all.py` → fix-m 단계 5의 격리 시험(code-reviewer 1회, scratchpad의 빈 폴더) → 커밋(코드/문서 분리) → push → CI. fix-m의 체크박스와 진행 기록을 채우고 `status: done`. 게이트가 실패하면 원인을 고치지 않고 보고한다(묶음 M의 범위 판단이 필요하므로).
-- [ ] P2. 태그 `pre-final-2026-11-18`. 낡은 작업 트리를 지우고 `git worktree add C:/dev/_wt/claude-config -b devenv-final main`.
-- [ ] P3. 이 본문을 `C:\dev\_wt\claude-config\docs\plans\2026-11-18-devenv-final.md`에 `status: draft`로 저장하고 커밋한다(문서만, 병합하지 않음). 여기서 멈추고 보고한다: 새 세션을 여는 방법과 첫 프롬프트.
+- [x] P1. 묶음 M을 현재 상태로 마감한다: `cd /c/Users/user/.claude && python -I tests/run_all.py` → fix-m 단계 5의 격리 시험(code-reviewer 1회, scratchpad의 빈 폴더) → 커밋(코드/문서 분리) → push → CI. fix-m의 체크박스와 진행 기록을 채우고 `status: done`. 게이트가 실패하면 원인을 고치지 않고 보고한다(묶음 M의 범위 판단이 필요하므로).
+- [x] P2. 태그 `pre-final-2026-11-18`. 낡은 작업 트리를 지우고 `git worktree add C:/dev/_wt/claude-config -b devenv-final main`.
+- [x] P3. 이 본문을 `C:\dev\_wt\claude-config\docs\plans\2026-11-18-devenv-final.md`에 `status: draft`로 저장하고 커밋한다(문서만, 병합하지 않음). 여기서 멈추고 보고한다: 새 세션을 여는 방법과 첫 프롬프트.
 
 ### 본 작업 시작 (새 세션, `C:\dev\_wt\claude-config`)
-- [ ] 1. `/plan`으로 저장된 초안을 그대로 읽어 ExitPlanMode로 승인받고 `status: in-progress`로 바꾼다. p4·p5를 `done`으로 닫고 남은 항목이 이 계획과 백로그로 옮겨졌음을 한 줄씩 적는다. 변경 없이 게이트를 돌려 기준을 잡는다(wall, 모듈별 시간, 통과 수). 실패하면 원인(경로 의존)을 고치는 것이 첫 작업이다. — 검증: 게이트 exit 0, `gate:` 줄 기록.
+- [x] 1. `/plan`으로 저장된 초안을 그대로 읽어 ExitPlanMode로 승인받고 `status: in-progress`로 바꾼다. p4·p5를 `done`으로 닫고 남은 항목이 이 계획과 백로그로 옮겨졌음을 한 줄씩 적는다. 변경 없이 게이트를 돌려 기준을 잡는다(wall, 모듈별 시간, 통과 수). 실패하면 원인(경로 의존)을 고치는 것이 첫 작업이다. — 검증: 게이트 exit 0, `gate:` 줄 기록.
 - [ ] 2. 릴리스 절차: `CLAUDE.md`의 이 저장소 절에 세 줄(작업 트리에서 고치고 게이트 통과 커밋만 main으로 `merge --ff-only`, 급할 때는 해당 모듈 테스트 후 병합하고 게이트는 바로 뒤에). `session_context.py`가 `~/.claude`의 `hooks/`·`settings.json`에 미커밋 변경이 있으면 세션 시작 때 한 줄로 알린다(git 한 번, 2초 예산, 실패하면 건너뜀). — 테스트: `test_session_context.py`에 3사례.
 
 ### 구간 1 — 게이트를 믿을 수 있게
@@ -209,3 +209,5 @@ task: devenv-final
 
 ## 진행 기록
 <!-- /implement가 단계마다 한 줄씩 더한다: 날짜, 단계, 커밋, 계획과 다른 점 -->
+- 2026-11-18 준비 P1~P3: 이전 세션에서 끝남(커밋 `ca35280`·`a808465`·`bfe0c2d`·`ca84474`, 태그 `pre-final-2026-11-18`, 작업 트리 `devenv-final`). 이 세션에서는 git 기록으로만 확인했다.
+- 2026-11-18 단계 1: 승인, `status: in-progress`, p4·p5 `done`. 기준 게이트(변경 없음, 작업 트리 루트): exit 0, `gate: 39 modules, sum 3442s, wall 465s, workers 8`, 39개 모듈 모두 `FAILURES: 0`. 긴 모듈: test_approvals_v2 465s, test_discipline_d3 403s, test_discipline 365s, test_ledger 335s, test_prompt_approval 261s, test_worktree 218s, test_guard_corpus 195s. 모듈별 `OK` 수는 러너가 아직 세지 않는다(단계 3). **계획과 다른 점**: (1) 로컬 wall이 계획의 419초가 아니라 465초다(포그라운드 한도까지 135초). (2) "초안 저장 → 승인 → status 전환" 순서는 성립하지 않았다: 초안이 승인에 묶이고(`discipline.py:2080`) 첫 쓰기 검사가 `plan_status:draft`로 승인을 폐기했다(`approvals.py:272-273`). 사용자 결정("1번으로 진행해")에 따라 status 줄을 먼저 바꾸고 같은 본문을 다시 승인받았다. 이 동작을 단계 23에 넣을지는 사용자 결정으로 남긴다(본문이 바뀌므로).
