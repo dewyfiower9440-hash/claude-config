@@ -72,6 +72,15 @@ def head(top: str) -> str | None:
     return out.strip() if out else None
 
 
+def _git_dir_like(git_dir: str) -> bool:
+    """What git's own check asks of a git folder: HEAD, an objects folder, a refs folder."""
+    return (
+        os.path.isfile(os.path.join(git_dir, "HEAD"))
+        and os.path.isdir(os.path.join(git_dir, "objects"))
+        and os.path.isdir(os.path.join(git_dir, "refs"))
+    )
+
+
 def find_toplevel(folder: str) -> str | None | bool:
     """The work tree `folder` is in, found without a git call: the nearest folder at or
     above it that holds a `.git` entry (a folder, or the file of a linked work tree or
@@ -88,13 +97,19 @@ def find_toplevel(folder: str) -> str | None | bool:
         while True:
             dot_git = os.path.join(d, ".git")
             if os.path.isdir(dot_git):
-                # a folder named .git that is no repository (no HEAD): git decides
-                if os.path.isfile(os.path.join(dot_git, "HEAD")):
+                # Only what git itself takes for a repository (HEAD, objects, refs). A
+                # folder that merely looks like one (planted, or half removed): git
+                # decides, and it walks on to the repository above.
+                if _git_dir_like(dot_git):
                     return os.path.normpath(d)
                 return False
             if os.path.lexists(dot_git):
                 with open(dot_git, encoding="utf-8", errors="replace") as f:
-                    if f.read(8) == "gitdir: ":
+                    first = f.readline().strip()
+                if first.startswith("gitdir: "):
+                    target = os.path.normpath(os.path.join(d, first[len("gitdir: ") :]))
+                    # a linked work tree's or submodule's git folder: HEAD is there
+                    if os.path.isfile(os.path.join(target, "HEAD")):
                         return os.path.normpath(d)
                 return False
             parent = os.path.dirname(d)

@@ -784,6 +784,29 @@ check(
     ),
     (False, False, True),
 )
+# Found by the closing review: a planted `.git` that only looks like one. git walks past a
+# `.git` folder that holds nothing but HEAD (to the repository above) and refuses a `.git`
+# file whose gitdir is not there; the hook answered with the folder itself.
+(FIND / "repo" / "shell" / ".git").mkdir(parents=True)
+(FIND / "repo" / "shell" / ".git" / "HEAD").write_text(
+    "ref: refs/heads/main\n", encoding="utf-8"
+)
+(FIND / "repo" / "dangling").mkdir()
+(FIND / "repo" / "dangling" / ".git").write_text(
+    "gitdir: Z:/nowhere/at/all\n", encoding="utf-8"
+)
+check(
+    "K-T6 ... a .git folder with HEAD only, a .git file whose gitdir is gone: asked of "
+    "git, and toplevel() gives git's answer (the repository above; none)",
+    (
+        wt.find_toplevel(str(FIND / "repo" / "shell")),
+        wt.find_toplevel(str(FIND / "repo" / "dangling")),
+        found_top(FIND / "repo" / "shell") == git_top(FIND / "repo" / "shell"),
+        found_top(FIND / "repo" / "shell") == found_top(FIND / "repo"),
+        found_top(FIND / "repo" / "dangling"),
+    ),
+    (False, False, True, True, None),
+)
 os.environ["GIT_DIR"] = str(FIND / "repo" / ".git")
 check(
     "K-T6 ... GIT_DIR set: asked of git", wt.find_toplevel(str(FIND / "plain")), False
