@@ -323,7 +323,8 @@ def evaluate(
 ) -> Evidence | None:
     """Evidence this command line provides for `policy`'s project, or None if it is not a check."""
     try:
-        cmds = [c for c in parse(command, dialect) if not c.nested]
+        parsed = parse(command, dialect)
+        cmds = [c for c in parsed if not c.nested]
     except ParseError:
         gate = policy["gate"]
         if gate and gate in command:
@@ -411,6 +412,19 @@ def evaluate(
         k = _find_sequence(cmds, target)
         if k is not None and _inside(cwd_at(cmds, k, cwd), root):
             form = gate_form(cmds, k, len(target), cwd, root, declared)
+            # A bracketed command beside the check is something beside the check too:
+            # PowerShell's `( )` and `@( )` run in the session's own scope, `&{ }` can set
+            # a global function or an environment variable. Only what the declared line
+            # itself nests is expected.
+            try:
+                own = sum(c.nested for c in parse(declared, dialect))
+            except ParseError:
+                own = 0
+            if form is None and sum(c.nested for c in parsed) > own:
+                form = (
+                    "a bracketed command runs in the same command line; run the check "
+                    f"alone: `{declared}`"
+                )
             return verdict(kind, k + len(target) - 1, start=k, form=form)
 
     for i, c in enumerate(cmds):

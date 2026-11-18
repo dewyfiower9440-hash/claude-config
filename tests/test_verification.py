@@ -183,6 +183,33 @@ BYPASSES = [
 ]
 for label, line, where in BYPASSES:
     check(f"V-T1 {label} -> unknown", outcome(line, DECLARED, cwd=where), "unknown")
+# Found by the closing review: something in brackets before the gate was not seen as
+# "something before the gate". In PowerShell `( )` and `@( )` run in the session's own
+# scope, and `&{ }` can still set a global function or an environment variable.
+for dialect, lines in (
+    (
+        "powershell",
+        (
+            '($env:PATH = "C:\\fake;$env:PATH"); ' + gate,
+            "(Set-Alias uv hostname -Scope Global); " + gate,
+            "@(Set-Alias -Scope Global uv hostname); " + gate,
+            "&{ function global:uv { } }; " + gate,
+            "(cd pkg); " + gate,
+        ),
+    ),
+    ("bash", ("(export PATH=/tmp/fake:$PATH); " + gate, gate + "; (exit 0)")),
+):
+    for line in lines:
+        check(
+            f"V-T1 [{dialect}] a bracketed command beside the gate -> unknown: {line[:40]}",
+            outcome(line, DECLARED, dialect=dialect),
+            "unknown",
+        )
+check(
+    "V-T1 ... the gate alone still passes in PowerShell",
+    outcome(gate, DECLARED, dialect="powershell"),
+    "passed",
+)
 check(
     "V-T1 ... and a failed event is still a failure, whatever the form",
     outcome("true || " + gate, DECLARED, failed=True),
