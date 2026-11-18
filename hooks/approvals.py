@@ -116,14 +116,27 @@ def _split(text: str) -> tuple[str, str]:
 
 
 def plan_status(text: str) -> str | None:
+    """The plan's status: the one `status:` line of its frontmatter. Two status lines say
+    nothing (the last one used to win: `status: done` could be overruled by a line added
+    under it)."""
     fm, _body = _split(text)
-    m = re.search(r"^status\s*:\s*['\"]?([A-Za-z_-]+)['\"]?\s*$", fm, re.MULTILINE)
-    return m.group(1).lower() if m else None
+    found = re.findall(r"^status\s*:\s*['\"]?([A-Za-z_-]+)['\"]?\s*$", fm, re.MULTILINE)
+    lines = [ln for ln in fm.splitlines() if STATUS_LINE.match(ln.strip())]
+    return found[0].lower() if len(found) == 1 and len(lines) == 1 else None
 
 
 def plan_task(text: str) -> str | None:
-    m = re.search(r"^task:\s*(\S+)\s*$", text.replace("\r\n", "\n"), re.MULTILINE)
-    return m.group(1) if m else None
+    """The plan's task id: the `task:` line of its frontmatter, else the one in the plan's
+    head (before its first `## ` heading: where the earlier plan template put it). A
+    `task:` line further down (a quoted example, another plan pasted in) names nothing,
+    and the frontmatter's wins over any other."""
+    fm, body = _split(text)
+    head = re.split(r"^##\s", body, maxsplit=1, flags=re.MULTILINE)[0]
+    for part in (fm, head):
+        m = re.search(r"^task:\s*(\S+)\s*$", part, re.MULTILINE)
+        if m:
+            return m.group(1)
+    return None
 
 
 def normalize_core(text: str) -> str:
@@ -314,22 +327,43 @@ def default_witness() -> Path:
     return Path(base) / "claude-discipline" / HWM_NAME
 
 
-def is_active(home: Path) -> bool:
+def is_active(home: Path, witness: Path | None = None) -> bool:
     """v2 once activated: the marker, or any v2 file (deleting the marker alone never falls
-    back to v1)."""
-    return any((home / n).exists() for n in V2_FILES)
+    back to v1), or the witness kept outside the home (emptying the home does not either)."""
+    return any((home / n).exists() for n in V2_FILES) or bool(
+        witness and witness.exists()
+    )
+
+
+READ_ATTEMPTS = 4  # Windows: the file is being replaced by another process right now
+MIN_KEY_BYTES = 16  # the store writes 32; a shorter "key" would sign anything
+
+
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
 
 
 def _read_json(path: Path, what: str) -> Any:
-    """Parsed JSON; FileNotFoundError passes through, anything else unreadable is corrupt."""
+    """Parsed JSON; FileNotFoundError passes through, anything else unreadable is corrupt.
+    A file that cannot be opened for a moment (PermissionError while a writer replaces it)
+    is read again a few times before that."""
     try:
         if path.stat().st_size > MAX_FILE_BYTES:
             raise StoreCorrupt(f"{what} 크기 초과: {path.name}")
-        return json.loads(path.read_text(encoding="utf-8"))
+        for attempt in range(READ_ATTEMPTS):
+            try:
+                return json.loads(_read_text(path))
+            except PermissionError:
+                if attempt == READ_ATTEMPTS - 1:
+                    raise
+                time.sleep(0.02 + random.random() * 0.03)
     except FileNotFoundError:
         raise
     except (OSError, ValueError, RecursionError) as e:
         raise StoreCorrupt(f"{what} 손상: {path.name} ({type(e).__name__})") from e
+    raise StoreCorrupt(
+        f"{what} 손상: {path.name}"
+    )  # not reached: the loop returns or raises
 
 
 def _try_lock(fd: int) -> bool:
@@ -410,11 +444,14 @@ class Store:
     # -- key and witnesses
     def _key(self) -> bytes | None:
         try:
-            return bytes.fromhex(self.key_path.read_text(encoding="utf-8").strip())
+            key = bytes.fromhex(self.key_path.read_text(encoding="utf-8").strip())
         except FileNotFoundError:
             return None
         except (OSError, ValueError) as e:
             raise StoreCorrupt(f"서명 키를 읽을 수 없음: {e}") from e
+        if len(key) < MIN_KEY_BYTES:
+            raise StoreCorrupt(f"서명 키가 너무 짧음({len(key)}바이트)")
+        return key
 
     def _witness_gen(self, path: Path, key: bytes | None) -> int:
         try:

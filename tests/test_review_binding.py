@@ -338,7 +338,13 @@ check(
 
 HOME2 = ROOT / "home2"
 (HOME2 / "review-observe.jsonl").mkdir(parents=True)
-BROKEN = dict(ENV, CLAUDE_DISCIPLINE_HOME=str(HOME2))
+# its own witness too: an empty home next to another home's witness is a v2 store that
+# lost its files (devenv-final 23), which is another case than the one meant here
+BROKEN = dict(
+    ENV,
+    CLAUDE_DISCIPLINE_HOME=str(HOME2),
+    CLAUDE_DISCIPLINE_WITNESS=str(ROOT / "home2-w" / "hwm"),
+)
 s = start(BROKEN)
 edit(s, BROKEN)
 gate(s, BROKEN)

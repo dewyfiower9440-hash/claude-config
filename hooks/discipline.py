@@ -1504,9 +1504,23 @@ def plan_hash(text: str) -> str:
     return hashlib.sha256(normalize_plan(text).encode("utf-8")).hexdigest()
 
 
+PLAN_FRONTMATTER = re.compile(r"\A---[ \t]*\n(.*?)\n---[ \t]*(?:\n|\Z)", re.DOTALL)
+
+
 def plan_task(text: str) -> str | None:
-    m = re.search(r"^task:\s*(\S+)\s*$", text, re.MULTILINE)
-    return m.group(1) if m else None
+    """The task id of a plan: the `task:` line of its frontmatter (== approvals.plan_task,
+    kept here so that a hook run that needs only this does not import approvals), else
+    the one in the plan's head, before its first `## ` heading (where the earlier plan
+    template put it). A `task:` line further down names nothing."""
+    normal = text.replace("\r\n", "\n").removeprefix("﻿")
+    front = PLAN_FRONTMATTER.match(normal)
+    body = normal[front.end() :] if front else normal
+    head = re.split(r"^##\s", body, maxsplit=1, flags=re.MULTILINE)[0]
+    for part in (front.group(1) if front else "", head):
+        m = re.search(r"^task:\s*(\S+)\s*$", part, re.MULTILINE)
+        if m:
+            return m.group(1)
+    return None
 
 
 def _scope_items(text: str, headings: str, base: str) -> list[str]:
@@ -1597,6 +1611,12 @@ def _load_approvals() -> tuple[dict[str, Any], str | None]:
     return (data, None) if isinstance(data, dict) else ({}, "승인 기록 파일 손상")
 
 
+NO_TASK_WARNING = (
+    "승인된 계획의 frontmatter에 task: 줄이 없어 승인으로 기록하지 않았습니다. "
+    "frontmatter에 `task: <id>`를 넣어 계획을 다시 승인받으세요"
+)
+
+
 def record_approval(data: dict[str, Any], state: dict[str, Any]) -> None:
     import worktree
 
@@ -1609,7 +1629,13 @@ def record_approval(data: dict[str, Any], state: dict[str, Any]) -> None:
         except (OSError, ValueError):  # gone or not UTF-8: approval stays prompt-only
             text = None
     cwd = str(data.get("cwd") or os.getcwd())
-    if v2_active() and text and plan_task(text):
+    if v2_active():
+        if not (text and plan_task(text)):
+            # Under v2 an approval is an instance bound to a task and its plan. A plan
+            # without a task id used to fall through to the unsigned v1 record below.
+            state["approval"] = None
+            state["approval_warning"] = NO_TASK_WARNING
+            return
         try:
             v2_record_approval(data, state, text, response, cwd)
         except Exception as e:  # hook boundary: no approval rather than a crash
@@ -1638,8 +1664,16 @@ def record_approval(data: dict[str, Any], state: dict[str, Any]) -> None:
         newest = sorted(approvals.items(), key=lambda kv: float(kv[1].get("at", 0)))[
             -MAX_APPROVALS:
         ]
-        APPROVALS_HOME.mkdir(parents=True, exist_ok=True)
-        APPROVALS_FILE.write_text(json.dumps(dict(newest)), encoding="utf-8")
+        import approvals
+
+        # whole or not at all: a reader never sees half a file, and a failed write leaves
+        # the records that were there
+        try:
+            approvals._atomic_write(
+                APPROVALS_FILE, json.dumps(dict(newest)).encode("utf-8")
+            )
+        except approvals.StoreWriteFailed:
+            log.exception("approvals.v1_write_failed")
 
 
 # `task:<id>`, `task_id: <id>`, `task=<id>` (optionally in backticks). ASCII ids only, so a
@@ -1820,11 +1854,9 @@ def in_approved_scope(approval: dict[str, Any] | None, path: str) -> bool:
     if approval is None:
         return False
     scope = approval.get("scope") or []
-    if not scope:
-        return not approval.get(
-            "rearmed_from"
-        )  # unscoped approval covers only its own prompt
     path = plain_path(path)
+    # An approval without a scope allows nothing but its own plan file (devenv-final 23: it
+    # used to allow every file in the prompt it was given in, however many).
     patterns = [g for g in scope if isinstance(g, str)]
     data = [g[len(DATA_SCOPE) :] for g in patterns if g.startswith(DATA_SCOPE)]
     if is_unc(path):
@@ -1846,13 +1878,29 @@ def in_approved_scope(approval: dict[str, Any] | None, path: str) -> bool:
     if kind == "data":  # only the data block covers it, never a code pattern
         target = _norm(real)
         return any(fnmatch.fnmatch(target, g) or target == g for g in data)
-    # Code (here or in another repository) is matched as the tool named it, as before.
+    # Code (here or in another repository) is matched as the tool named it, as before ...
+    code = [g for g in patterns if not g.startswith(DATA_SCOPE)]
+
+    def matches(target: str) -> bool:
+        return any(fnmatch.fnmatch(target, g) or target == g for g in code)
+
     target = _norm(path)
-    return any(
-        fnmatch.fnmatch(target, g) or target == g
-        for g in patterns
-        if not g.startswith(DATA_SCOPE)
-    )
+    if not matches(target):
+        return False
+    # ... and where it really is: a link inside the scope must not lead out of it. The
+    # patterns were written against the approving folder as it was named, so the real path
+    # is also tried with that folder's own links undone.
+    there = _norm(real)
+    if there == target or matches(there):
+        return True
+    if isinstance(base, str) and base:
+        named, resolved = (
+            _norm(plain_path(base)),
+            _norm(os.path.realpath(plain_path(base))),
+        )
+        if there == resolved or there.startswith(resolved + "/"):
+            return matches(named + there[len(resolved) :])
+    return False
 
 
 # ---------------------------------------------------------------- P0-04: v2 approval instances
@@ -1881,9 +1929,27 @@ REASON_V2_INVALID = (
 V2_FILES = ("v2-active", "approvals.v2.json", "hwm")
 
 
-def v2_active() -> bool:
-    # Stats only: importing approvals on every hook call costs ~50-100 ms while v2 is dormant.
-    return any((APPROVALS_HOME / n).exists() for n in V2_FILES)
+def v2_witness() -> Path:
+    """== approvals.default_witness (test_scope checks it), without importing approvals."""
+    env = os.environ.get("CLAUDE_DISCIPLINE_WITNESS")
+    if env:
+        return Path(env)
+    home = os.environ.get("CLAUDE_DISCIPLINE_HOME")
+    if home:
+        return Path(home + "-witness") / "hwm"
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    return Path(base) / "claude-discipline" / "hwm"
+
+
+def v2_active(home: Path | None = None, witness: Path | None = None) -> bool:
+    """v2 once activated (== approvals.is_active): a v2 file in the home, or the witness
+    kept outside it. Emptying the home must not bring the unsigned v1 path back.
+    Stats only: importing approvals on every hook call costs ~50-100 ms while v2 is dormant."""
+    home = APPROVALS_HOME if home is None else home
+    return (
+        any((home / n).exists() for n in V2_FILES)
+        or (v2_witness() if witness is None else witness).exists()
+    )
 
 
 def v2_failure(e: BaseException) -> str:

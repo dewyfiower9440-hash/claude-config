@@ -1287,6 +1287,29 @@ check(
     "deny",
 )
 V2GADGET.unlink()
+# devenv-final 23: under v2 a plan without a task id is no approval (it used to fall
+# through to the unsigned v1 record, which covered every file of that prompt).
+NO_TASK = "---\nstatus: in-progress\n---\n\n# Untitled\n\n## 변경 범위\n- src/**\n\n## 단계\n- [ ] 1. a\n"
+s, p = uuid.uuid4().hex, pid()
+call("prompt", s, prompt_id=p, prompt="plan something", cwd=str(V2REPO))
+call(
+    "post",
+    s,
+    prompt_id=p,
+    tool_name="ExitPlanMode",
+    tool_input={},
+    tool_response={"plan": NO_TASK},
+    cwd=str(V2REPO),
+)
+check(
+    "D-T4 v2: a plan without a task id is not recorded as an approval, and says why",
+    (
+        state_of(s).get("approval"),
+        "task" in str(state_of(s).get("approval_warning")),
+        edit_decision(s, p),
+    ),
+    (None, True, "deny"),
+)
 
 # ---- T13 code rollback to the v1 path: activation retired v1 and rotated the key
 V1HOME = TROOT / "_tmp_approval_v1home"

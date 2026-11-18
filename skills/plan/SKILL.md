@@ -30,11 +30,10 @@ Always save the plan to `docs/plans/YYYY-MM-DD-<slug>.md` in the project (today'
 ```markdown
 ---
 status: draft
+task: <slug, same as the file name's slug>
 ---
 
 # <title>
-
-task: <slug, same as the file name's slug>
 
 ## 목표
 <1-3 sentences>. 비목표: <...>
@@ -62,7 +61,7 @@ task: <slug, same as the file name's slug>
 ```
 - Each step is independently verifiable and committable (ideally < ~200 changed lines); one checkbox per step, numbered.
 - Order the steps so the system stays working after each one (expand, then migrate, then contract for breaking changes).
-- `## 목표` and the checkbox format are parsed by `~/.claude/hooks/session_context.py`; `task:` and `## 변경 범위` are parsed by `discipline.py`. Keep them. Relative scope globs resolve against the session's working directory at approval: start the session in the project root, or write absolute globs.
+- `## 목표` and the checkbox format are parsed by `~/.claude/hooks/session_context.py`; `task:` (read from the frontmatter only: a `task:` line in the body names nothing, and a plan without one is not recorded as an approval) and `## 변경 범위` are parsed by `discipline.py`. Keep them. Relative scope globs resolve against the session's working directory at approval: start the session in the project root, or write absolute globs.
 
 ## 5. Approval
 - Present the plan with **ExitPlanMode** (the user's approval gate). The approval is bound to `task:` + the plan text + `## 변경 범위`: it lifts the >5-file guard only for files inside that scope, and only for the approving prompt.

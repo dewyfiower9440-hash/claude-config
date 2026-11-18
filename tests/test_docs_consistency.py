@@ -170,16 +170,24 @@ block = re.search(r"```markdown\n(.*?)\n```", skill["plan"], re.DOTALL)
 template = block.group(1) if block else ""
 front = re.match(r"---\n(.*?)\n---\n", template, re.DOTALL)
 check(
-    "D6 the plan template's frontmatter holds `status` only",
+    "D6 the plan template's frontmatter holds `status` and `task` (what the hook reads there)",
     [ln.split(":")[0] for ln in front.group(1).splitlines()] if front else None,
-    ["status"],
+    ["status", "task"],
 )
-approved = template[front.end() :] if front else ""
+# devenv-final 23: the task id is read from the frontmatter, so the approved text carries
+# its frontmatter (status and task) and saving changes the status line only.
+approved = template
 saved = template.replace("status: draft", "status: in-progress", 1)
 check(
-    "D6 the template's body, approved, then saved the way the skill says: same plan hash",
-    bool(approved) and approvals.core_hash(approved) == approvals.core_hash(saved),
-    True,
+    "D6 the template, approved with its frontmatter, then saved the way the skill says: "
+    "same plan hash, and the hook finds its task",
+    (
+        bool(approved) and approvals.core_hash(approved) == approvals.core_hash(saved),
+        # the template's placeholder, filled in as a session would
+        approvals.plan_task(re.sub(r"(?m)^task: <.*>$", "task: my-task", saved)),
+        approvals.plan_status(saved),
+    ),
+    (True, "my-task", "in-progress"),
 )
 check(
     "D6 /plan says that saving changes the `status` line only, before the first edit",

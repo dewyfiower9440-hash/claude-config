@@ -648,6 +648,52 @@ check(
     "AdminRefused",
 )
 
+# ---- devenv-final 23: the key and the read path
+s = fresh()
+s.update(lambda recs: ap.issue(recs, rec_for(), time.time()))
+good_key = s.key_path.read_text(encoding="utf-8")
+s.key_path.write_text("abcd", encoding="utf-8")
+check(
+    "S-T1 a key file holding a short key is not a key (a 2-byte key signs anything)",
+    raises(s.load, ap.StoreCorrupt),
+    "StoreCorrupt",
+)
+s.key_path.write_text(good_key, encoding="utf-8")
+check(
+    "S-T1 ... the key written by the store itself is long enough",
+    len(s.load().records),
+    1,
+)
+
+real_read = ap._read_text
+denied = [0]
+
+
+def flaky(path: Path) -> str:
+    # Windows: a reader meets the instant another process replaces the file
+    if path == s.path and denied[0] > 0:
+        denied[0] -= 1
+        raise PermissionError(13, "Access is denied")
+    return real_read(path)
+
+
+ap._read_text = flaky
+try:
+    denied[0] = 2
+    check(
+        "S-T2 a store that cannot be opened for a moment is read again, not called corrupt",
+        (len(s.load().records), denied[0]),
+        (1, 0),
+    )
+    denied[0] = 50
+    check(
+        "S-T2 ... one that stays unreadable is corrupt (bounded retries)",
+        (raises(s.load, ap.StoreCorrupt), denied[0] >= 40),
+        ("StoreCorrupt", True),
+    )
+finally:
+    ap._read_text = real_read
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

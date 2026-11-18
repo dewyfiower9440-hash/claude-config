@@ -432,6 +432,95 @@ check(
     [],
 )
 
+# ---- devenv-final 23: what an approval covers, and what a plan says, read strictly
+check(
+    "N-T1 an approval without a scope allows nothing (it used to allow everything in the "
+    "prompt it was given in)",
+    (
+        d.in_approved_scope(
+            {"task_id": "t", "scope": [], "base": BASE}, str(A / "src" / "a.py")
+        ),
+        d.in_approved_scope({"task_id": "t", "base": BASE}, str(A / "src" / "a.py")),
+        # ... except its own plan file, as for any approval
+        d.in_approved_scope(
+            {"task_id": "t", "scope": [], "base": BASE},
+            str(A / "docs" / "plans" / "p.md"),
+        ),
+    ),
+    (False, False, True),
+)
+OUTSIDE = ROOT / "outside-code"
+OUTSIDE.mkdir()
+subprocess.run(["git", "init", "-q"], cwd=OUTSIDE, check=True)
+CODE_LINK = A / "src" / "vendor"
+subprocess.run(
+    ["cmd", "/c", "mklink", "/J", str(CODE_LINK), str(OUTSIDE)],
+    check=True,
+    capture_output=True,
+)
+check(
+    "N-T2 code reached through a link that leaves the approved scope is not covered; the "
+    "same pattern still covers what really is there",
+    (
+        covered([SRC], CODE_LINK / "x.py"),
+        covered([SRC], A / "src" / "real.py"),
+        covered([SRC, d._norm(str(OUTSIDE / "**"))], CODE_LINK / "x.py"),
+    ),
+    (False, True, True),
+)
+os.rmdir(CODE_LINK)
+LATE_TASK = "---\nstatus: in-progress\n---\n\n# P\n\n## 단계\n- [ ] 1. a\n\n## 참고\ntask: quoted-below\n"
+HEAD_TASK = "---\nstatus: in-progress\n---\n\n# P\n\ntask: in-the-head\n\n## 단계\ntask: quoted-below\n"
+FRONT_TASK = "---\nstatus: in-progress\ntask: from-the-frontmatter\n---\n\n# P\n\ntask: in-the-head\n"
+check(
+    "N-T3 a plan's task: the frontmatter's line wins; without one, the line in the plan's "
+    "head (before the first `## `, where the earlier template put it); a `task:` line "
+    "further down (a quoted example, a pasted plan) names nothing",
+    [
+        (ap.plan_task(text), d.plan_task(text))
+        for text in (LATE_TASK, HEAD_TASK, FRONT_TASK, "# P\n\ntask: no-frontmatter\n")
+    ],
+    [
+        (None, None),
+        ("in-the-head", "in-the-head"),
+        ("from-the-frontmatter", "from-the-frontmatter"),
+        ("no-frontmatter", "no-frontmatter"),
+    ],
+)
+check(
+    "N-T4 two status lines in the frontmatter say nothing (the last one used to win)",
+    (
+        ap.plan_status("---\nstatus: done\nstatus: in-progress\n---\n# P\n"),
+        ap.plan_status("---\nstatus: in-progress\n---\n# P\nstatus: done\n"),
+    ),
+    (None, "in-progress"),
+)
+# v2 stays v2 while its witness outside the home exists: emptying the home must not bring
+# the unsigned v1 path back.
+EMPTY_HOME, ITS_WITNESS = ROOT / "home-emptied", ROOT / "witness-kept" / "hwm"
+EMPTY_HOME.mkdir()
+ITS_WITNESS.parent.mkdir()
+check(
+    "N-T5 an empty home with no witness is not v2",
+    ap.is_active(EMPTY_HOME, ITS_WITNESS),
+    False,
+)
+ITS_WITNESS.write_text("{}", encoding="utf-8")
+check(
+    "N-T5 an emptied home whose outside witness is still there is v2",
+    (ap.is_active(EMPTY_HOME, ITS_WITNESS), ap.is_active(EMPTY_HOME)),
+    (True, False),
+)
+check(
+    "N-T5 the hook's own check looks at the same witness",
+    (
+        d.v2_witness() == ap.default_witness(),
+        d.v2_active(EMPTY_HOME, ITS_WITNESS),
+        d.v2_active(EMPTY_HOME, ROOT / "no-such" / "hwm"),
+    ),
+    (True, True, False),
+)
+
 rm_tree(ROOT)
 for _p in (HOME, WITNESS):
     shutil.rmtree(_p, ignore_errors=True)

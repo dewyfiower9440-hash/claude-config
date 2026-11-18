@@ -175,10 +175,12 @@ check(
     None,
 )
 call("post", s, tool_name="ExitPlanMode", tool_input={})
+# devenv-final 23 (changed expectation, was "allowed"): an approval that names no scope (here:
+# one that came without any plan text) allows nothing; the limit on files stays.
 check(
-    "after plan approval -> allowed",
+    "after a plan approval without a scope -> the sixth file is still denied",
     decision(edit(s, f"{PROJ}/src/f5.py", "a", "b")),
-    None,
+    "deny",
 )
 s2 = uuid.uuid4().hex
 for i in range(5):
@@ -366,10 +368,12 @@ call(
 )
 for i in range(6):
     d2_edit(s, f"{REPO2}/any/a{i}.py", "y1", REPO2, mode="post")
+# devenv-final 23 (changed expectation, was "allowed now"): without a plan text there is no
+# scope, and an approval without a scope allows nothing, not even in its own prompt.
 check(
-    "D-2: approval without plan text -> valid for that prompt only (allowed now)",
+    "D-2: approval without plan text -> covers no file, in its own prompt either",
     decision(d2_edit(s, f"{REPO2}/any/a9.py", "y1", REPO2)),
-    None,
+    "deny",
 )
 d2_prompt(s, "y2", REPO2)
 for i in range(5):
