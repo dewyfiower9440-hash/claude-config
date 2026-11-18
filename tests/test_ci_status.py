@@ -78,6 +78,9 @@ FAKE_BIN.mkdir()
     encoding="utf-8",
 )
 SCENARIO = WORK / "scenario.json"
+# The hook's approval store and its witness: this run's own, never the real ~/.claude ones.
+os.environ["CLAUDE_DISCIPLINE_HOME"] = str(WORK / "home")
+os.environ["CLAUDE_DISCIPLINE_WITNESS"] = str(WORK / "w" / "hwm")
 os.environ["FAKE_GH_SCENARIO"] = str(SCENARIO)
 os.environ["PATH"] = str(FAKE_BIN) + os.pathsep + os.environ["PATH"]
 

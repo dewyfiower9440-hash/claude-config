@@ -294,6 +294,43 @@ check(
     ),
     (False, True),
 )
+# devenv-final 4: a test file that is not in TESTS never runs, and nothing says so.
+check(
+    "G-T8 the test files on disk are the modules the gate runs (both ways)",
+    sorted(p.stem for p in HERE.glob("test_*.py")),
+    sorted(run_all.TESTS),
+)
+# A module that starts hooks/discipline.py (as a process, or by importing it) without a
+# home of its own reads and writes the real approval store under ~/.claude/discipline.
+RUNS_DISCIPLINE = re.compile(
+    r"""["']discipline\.py["']|^\s*import discipline\b""", re.MULTILINE
+)
+# The modules the pattern finds that do not run the hook, each with the reason.
+NOT_RUN = {
+    "test_docs_consistency": "passes the hook's path to verification.find_policy only",
+    "test_usage_report": "reads one constant of the imported module",
+}
+found = {
+    p.stem: "CLAUDE_DISCIPLINE_HOME" in text
+    for p in sorted(HERE.glob("test_*.py"))
+    if p.name != Path(__file__).name
+    and RUNS_DISCIPLINE.search(text := p.read_text(encoding="utf-8"))
+}
+check(
+    "G-T9 every module that runs discipline.py sets CLAUDE_DISCIPLINE_HOME",
+    sorted(n for n, isolated in found.items() if not isolated and n not in NOT_RUN),
+    [],
+)
+check(
+    "G-T9 ... the exceptions are still exceptions, and the pattern still finds modules",
+    (
+        sorted(n for n in NOT_RUN if found.get(n) is not False),
+        len(found) >= 15,
+        found.get("test_ci_status"),
+    ),
+    ([], True, True),
+)
+
 # devenv-final 3: exit code 0 alone is not a pass. A module passes when it also ends on
 # the line every module prints last, "FAILURES: 0".
 reset()
