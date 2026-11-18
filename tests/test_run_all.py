@@ -12,8 +12,10 @@ import io
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -49,6 +51,25 @@ while time.monotonic() < deadline and not (d / "{other}.started").exists():
 (d / "{me}.result").write_text("overlap" if (d / "{other}.started").exists() else "alone")
 print("FAILURES: 0")
 """
+
+
+def alive(pid: int) -> bool:
+    """Whether a process with this id exists (asked of the system, not of run_all)."""
+    if os.name == "nt":
+        listed = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=30,
+            check=False,
+        ).stdout
+        return f'"{pid}"' in listed
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
 
 
 def script(name: str, body: str) -> None:
@@ -218,7 +239,9 @@ script("ok_quiet", 'print("FAILURES: 0")\n')
 script("ok_show", 'print("FAILURES: 0")\n')
 ok, out = run(["ok_quiet", "ok_show"], workers=2)
 timing = re.search(
-    r"^gate: 2 modules, sum (\d+)s, wall (\d+)s, workers 2$", out, re.MULTILINE
+    r"^gate: 2 modules, 0 checks, sum (\d+)s, wall (\d+)s, workers 2$",
+    out,
+    re.MULTILINE,
 )
 check(
     "the run says how long it took: modules, their sum, the wall time, the workers",
@@ -263,11 +286,104 @@ check(
     (
         ok,
         re.search(
-            r"^gate: 2 modules, sum \d+s, wall \d+s, workers 2$", out, re.MULTILINE
+            r"^gate: 2 modules, 0 checks, sum \d+s, wall \d+s, workers 2$",
+            out,
+            re.MULTILINE,
         )
         is not None,
     ),
     (False, True),
+)
+# devenv-final 3: exit code 0 alone is not a pass. A module passes when it also ends on
+# the line every module prints last, "FAILURES: 0".
+reset()
+script("early_exit", 'print("OK   one check")\nraise SystemExit(0)\n')
+script("silent", "pass\n")
+script("ok_two", 'print("OK   a")\nprint("OK   b -> 1")\nprint("FAILURES: 0")\n')
+script("notice", 'print("NOTICE: nothing to run here")\nprint("FAILURES: 0")\n')
+script(
+    "trailing",
+    'print("FAILURES: 0")\nprint("something printed after the verdict")\n',
+)
+ok, out = run(["early_exit"], workers=1)
+check(
+    "G-T1 a module that exits 0 before its last line fails the run, and says why",
+    (ok, "FAIL early_exit: " in out, "FAILURES: 0" in out.split("gate:")[0]),
+    (False, True, True),
+)
+ok, out = run(["silent"], workers=1)
+check("G-T2 a module that prints nothing fails the run", ok, False)
+ok, out = run(["trailing"], workers=1)
+check("G-T3 a module whose last line is not the verdict fails the run", ok, False)
+ok, out = run(["ok_two", "notice"], workers=2)
+check(
+    "G-T4 passing modules: their OK lines are added up in the gate line",
+    (
+        ok,
+        re.search(r"^gate: 2 modules, 2 checks, sum ", out, re.MULTILINE) is not None,
+    ),
+    (True, True),
+)
+# A module that hangs is ended (its child processes too) and fails; the others still report.
+script(
+    "hangs",
+    "import subprocess, sys, time\n"
+    "from pathlib import Path\n"
+    "d = Path(sys.argv[0]).parent\n"
+    "child = subprocess.Popen([sys.executable, '-I', '-c',\n"
+    "    'import time; time.sleep(120)'])\n"
+    "(d / 'hangs.child').write_text(str(child.pid))\n"
+    "time.sleep(120)\n"
+    "print('FAILURES: 0')\n",
+)
+before_min, run_all.MIN_LIMIT_S = run_all.MIN_LIMIT_S, 3
+clock = time.monotonic()
+ok, out = run(["hangs", "ok_two"], workers=2)
+took = time.monotonic() - clock
+run_all.MIN_LIMIT_S = before_min
+child_pid = int((TMP / "hangs.child").read_text())
+check(
+    "G-T5 a module over its time limit fails, the run does not wait for it, the other "
+    "module still passes",
+    (
+        ok,
+        took < 60,
+        "FAIL hangs: " in out and "time limit" in out,
+        "PASS ok_two" in out,
+    ),
+    (False, True, True, True),
+)
+check(
+    "G-T5 ... and the process it started is gone too",
+    alive(child_pid),
+    False,
+)
+check(
+    "G-T6 the limit is three times the measured time, never under the minimum",
+    (
+        run_all.time_limit("test_approvals_v2")
+        == 3 * run_all.MEASURED_S["test_approvals_v2"],
+        run_all.time_limit("test_shellparse"),
+        run_all.MIN_LIMIT_S >= 120,
+        sorted(n for n in run_all.MEASURED_S if n not in run_all.TESTS),
+    ),
+    (True, run_all.MIN_LIMIT_S, True, []),
+)
+# A character the console cannot encode (cp1252 on CI) must not end the run with a traceback.
+PROBE = (
+    "import sys; sys.path.insert(0, sys.argv[1]); import run_all; "
+    "sys.stdout.reconfigure(encoding='cp1252'); "
+    "run_all.console(); run_all.report('m', 1, 'FAIL 한글 x', 1.0)"
+)
+probe = subprocess.run(
+    [sys.executable, "-I", "-c", PROBE, str(HERE)],
+    capture_output=True,
+    check=False,
+)
+check(
+    "G-T7 output the console cannot encode is escaped, not a crash",
+    (probe.returncode, b"\\ud55c" in probe.stdout, b"Traceback" in probe.stderr),
+    (0, True, False),
 )
 check(
     "GATE_WORKERS=1 -> sequential", run_all.workers_from_env({"GATE_WORKERS": "1"}), 1

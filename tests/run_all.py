@@ -9,6 +9,7 @@ Exit code 0 only when every step passed.
 
 from __future__ import annotations
 
+import io
 import os
 import shutil
 import stat
@@ -99,42 +100,131 @@ TESTS = [
 ]
 
 
+# A module that hangs would otherwise hold the whole run (and CI) until someone ends it. Its
+# limit is three times what it took when measured, never under MIN_LIMIT_S. Measured
+# 2026-11-18 with 8 workers (seconds; the modules not listed took under 40 s; the CI runner
+# with 4 workers took no longer per module, run 44224210470). Re-measure with the list above.
+MIN_LIMIT_S = 120.0
+LIMIT_FACTOR = 3
+MEASURED_S = {
+    "test_approvals_v2": 465,
+    "test_discipline_d3": 403,
+    "test_discipline": 365,
+    "test_ledger": 335,
+    "test_prompt_approval": 261,
+    "test_worktree": 218,
+    "test_guard_corpus": 195,
+    "test_session_store": 170,
+    "test_approvals": 169,
+    "test_task_switch": 164,
+    "test_ci_status": 154,
+    "test_guard": 79,
+    "test_authz": 73,
+    "test_risk": 58,
+    "test_review_binding": 49,
+}
+VERDICT = "FAILURES: 0"  # the line every module prints last when all its checks passed
+TIMED_OUT = -9  # run_one's exit code for a module ended at its time limit
+KILL_WAIT_S = 15
+
+
+def time_limit(name: str) -> float:
+    return max(MIN_LIMIT_S, LIMIT_FACTOR * MEASURED_S.get(name, 0))
+
+
+def end_tree(p: subprocess.Popen[str]) -> None:
+    """End `p` and what it started (a test module starts hooks, git, shells)."""
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(p.pid), "/T", "/F"],
+                capture_output=True,
+                timeout=KILL_WAIT_S,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):  # then at least the module itself
+            p.kill()
+    else:
+        p.kill()
+
+
 def run_one(
-    name: str, cmd: list[str], env: Mapping[str, str] | None = None
+    name: str,
+    cmd: list[str],
+    env: Mapping[str, str] | None = None,
+    limit: float | None = None,
 ) -> tuple[str, int, str, float]:
     start = time.monotonic()
-    p = subprocess.run(
+    p = subprocess.Popen(
         cmd,
         cwd=ROOT,
         env=env,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
-        check=False,
     )
-    return name, p.returncode, p.stdout + p.stderr, time.monotonic() - start
+    try:
+        out, err = p.communicate(timeout=limit)
+        code = p.returncode
+    except subprocess.TimeoutExpired:
+        end_tree(p)
+        try:
+            out, err = p.communicate(timeout=KILL_WAIT_S)
+        except subprocess.TimeoutExpired:  # a survivor still holds the pipes
+            p.kill()
+            out, err = "", ""
+        code = TIMED_OUT
+        err += f"\nTIMEOUT: over its time limit of {limit:.0f}s; the process tree was ended"
+    return name, code, out + err, time.monotonic() - start
 
 
-def report(name: str, code: int, output: str, seconds: float) -> bool:
+def verdict(code: int, output: str) -> str | None:
+    """Why this result is not a pass (None when it is). The exit code alone is not enough:
+    a module that exits 0 before its checks ran, or prints nothing, has verified nothing."""
+    if code == TIMED_OUT:
+        return "ended at its time limit"
+    if code != 0:
+        return f"exit code {code}"
+    last = output.strip().splitlines()[-1:] or [""]
+    if last[0].strip() != VERDICT:
+        return f"exit code 0 but the last line is not {VERDICT!r}"
+    return None
+
+
+def checks(output: str) -> int:
+    """The checks a module reported as passed (its `OK ...` lines)."""
+    return sum(1 for ln in output.splitlines() if ln.startswith("OK "))
+
+
+def report(
+    name: str, code: int, output: str, seconds: float, plain: bool = False
+) -> bool:
+    """Print one result line (and the output of a failure). `plain`: a tool, not a test
+    module; its exit code is its verdict."""
+    why = (
+        (None if code == 0 else f"exit code {code}") if plain else verdict(code, output)
+    )
     tail = output.strip().splitlines()[-1:] or [""]
     print(
-        f"{'PASS' if code == 0 else 'FAIL'} {name}: {tail[0][:120]} ({seconds:.0f}s)",
+        f"{'FAIL' if why else 'PASS'} {name}: {tail[0][:120]} ({seconds:.0f}s)",
         flush=True,
     )
-    if code != 0 or name in ALWAYS_SHOW:
+    if why or name in ALWAYS_SHOW:
         tail = output[-3000:]
-        if code != 0:
+        if why:
+            print(f"  not a pass: {why}")
             # The failing checks themselves, wherever they are: the tail alone can miss them.
             early = output[: len(output) - len(tail)]
             for line in [ln for ln in early.splitlines() if ln.startswith("FAIL")][:20]:
                 print(line[:1000])
         print(tail)
-    return code == 0
+    return why is None
 
 
 def step(name: str, cmd: list[str]) -> bool:
-    return report(*run_one(name, cmd))
+    return report(*run_one(name, cmd), plain=True)
 
 
 def _retry_writable(func: Callable[[str], object], path: str, _exc: object) -> None:
@@ -162,7 +252,11 @@ def run_tests(names: list[str], workers: int, tests_dir: Path = ROOT / "tests") 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
                 n: pool.submit(
-                    run_one, n, [sys.executable, "-I", str(tests_dir / f"{n}.py")], env
+                    run_one,
+                    n,
+                    [sys.executable, "-I", str(tests_dir / f"{n}.py")],
+                    env,
+                    time_limit(n),
                 )
                 for n in order
             }
@@ -177,8 +271,10 @@ def run_tests(names: list[str], workers: int, tests_dir: Path = ROOT / "tests") 
         ok &= report(*results[n])
     # how close the run is to the time a foreground run may take (see DEFAULT_WORKERS)
     total = sum(seconds for _name, _code, _output, seconds in results.values())
+    passed = sum(checks(output) for _name, _code, output, _seconds in results.values())
     print(
-        f"gate: {len(names)} modules, sum {total:.0f}s, wall {wall:.0f}s, workers {workers}",
+        f"gate: {len(names)} modules, {passed} checks, sum {total:.0f}s, "
+        f"wall {wall:.0f}s, workers {workers}",
         flush=True,
     )
     return ok
@@ -197,7 +293,16 @@ def workers_from_env(env: Mapping[str, str]) -> int:
 ALWAYS_SHOW = {"test_powershell_semantics"}
 
 
+def console() -> None:
+    """A module's output can hold characters the console cannot encode (Korean check names
+    on cp1252 in CI): escape them instead of ending the run with UnicodeEncodeError."""
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(errors="backslashreplace")
+
+
 def main() -> None:
+    console()
     ruff = shutil.which("ruff")
     if not ruff:
         sys.exit("ruff is not on PATH")
