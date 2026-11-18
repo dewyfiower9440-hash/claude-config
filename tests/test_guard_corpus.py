@@ -12,7 +12,9 @@ from __future__ import annotations
 import collections
 import importlib.util
 import json
+import os
 import re
+import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -88,10 +90,40 @@ def commands() -> list[tuple[str, str]]:
     return list(seen)
 
 
+GUARD_FILES = ("hooks/guard.py", "hooks/shellparse.py", "hooks/shellwrites.py")
+BASE = "origin/main"
+
+
+def guard_differs(root: Path) -> bool:
+    """Whether the files that decide a command's fate differ from the released ones
+    (`origin/main`). Anything but git's plain "the same" counts as different: no such
+    ref, no git, no answer in time."""
+    try:
+        p = subprocess.run(
+            ["git", "diff", "--quiet", BASE, "--", *GUARD_FILES],
+            cwd=root,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    return p.returncode != 0
+
+
 def main() -> None:
     if not TRANSCRIPTS.is_dir():
         print("NOTICE: no local transcripts; corpus regression not run")
         print("FAILURES: 0")  # the line the gate reads as this module's verdict
+        return
+    # devenv-final 31: the replay (about four minutes) tells something only when the
+    # guard changed; with the released guard its answer is the one of the last release.
+    if os.environ.get("GATE_CORPUS") != "always" and not guard_differs(HOOKS.parent):
+        print(
+            f"NOTICE: {', '.join(GUARD_FILES)} are as on {BASE}; corpus regression not "
+            "run (GATE_CORPUS=always runs it)"
+        )
+        print("FAILURES: 0")
         return
     sys.path.insert(0, str(HOOKS))
     guard = load("guard")

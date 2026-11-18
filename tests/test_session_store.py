@@ -16,6 +16,11 @@ import time
 import uuid
 from pathlib import Path
 
+sys.path.insert(
+    0, str(Path(__file__).resolve().parent)
+)  # python -I drops the script's folder
+import inproc
+
 sys.stdout.reconfigure(
     errors="backslashreplace"
 )  # Korean values on a cp1252 console (CI)
@@ -70,15 +75,11 @@ def check(name: str, got: object, want: object) -> None:
 
 
 def hook(mode: str, s: str, env: dict | None = None, **payload: object) -> dict | None:
-    p = subprocess.run(
-        [sys.executable, "-I", str(HOOK), mode],
-        input=json.dumps({"session_id": s, "cwd": str(PROJ), **payload}),
+    p = inproc.run(
+        HOOK,
+        [mode],
+        json.dumps({"session_id": s, "cwd": str(PROJ), **payload}),
         env=env or ENV,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",  # a logged OS error message is in the console code page
-        check=False,
     )
     assert p.returncode == 0, (mode, p.returncode, p.stderr[-400:])
     return json.loads(p.stdout) if p.stdout.strip() else None

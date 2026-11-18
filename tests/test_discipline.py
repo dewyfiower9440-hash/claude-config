@@ -10,6 +10,11 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
+sys.path.insert(
+    0, str(Path(__file__).resolve().parent)
+)  # python -I drops the script's folder
+import inproc
+
 HOOK = str(Path(__file__).resolve().parent.parent / "hooks" / "discipline.py")
 # Plan approvals made by these tests go to an isolated store, never the real one.
 # Under the gate every run has its own folder for these (run_all.GATE_TMP_ROOT, inside
@@ -32,14 +37,7 @@ def call(mode: str, session: str, **payload: object) -> dict | None:
         # with the same tool_use_id. Tests that pass a tool_use_id drive PreToolUse themselves.
         payload["tool_use_id"] = uuid.uuid4().hex
         call("pre", session, **payload)
-    p = subprocess.run(
-        [sys.executable, "-I", HOOK, mode],
-        input=json.dumps({"session_id": session, **payload}),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=False,
-    )
+    p = inproc.run(Path(HOOK), [mode], json.dumps({"session_id": session, **payload}))
     assert p.returncode == 0, p.stderr
     return json.loads(p.stdout) if p.stdout.strip() else None
 

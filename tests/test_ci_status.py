@@ -16,6 +16,11 @@ import tempfile
 import uuid
 from pathlib import Path
 
+sys.path.insert(
+    0, str(Path(__file__).resolve().parent)
+)  # python -I drops the script's folder
+import inproc
+
 HERE = Path(__file__).resolve().parent
 HOOK = HERE.parent / "hooks" / "discipline.py"
 # Under the gate every run has its own folder for these (run_all.GATE_TMP_ROOT, inside
@@ -137,14 +142,7 @@ def call(mode: str, session: str, **payload: object) -> dict | None:
         # As in the real harness, every shell PostToolUse(Failure) follows its PreToolUse.
         payload["tool_use_id"] = uuid.uuid4().hex
         call("pre", session, **payload)
-    p = subprocess.run(
-        [sys.executable, "-I", str(HOOK), mode],
-        input=json.dumps({"session_id": session, **payload}),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=False,
-    )
+    p = inproc.run(HOOK, [mode], json.dumps({"session_id": session, **payload}))
     assert p.returncode == 0, p.stderr
     return json.loads(p.stdout) if p.stdout.strip() else None
 

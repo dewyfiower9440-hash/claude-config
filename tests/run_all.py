@@ -99,6 +99,7 @@ TESTS = [
     "test_docs_consistency",
     "test_format_lint",
     "test_guard_corpus",  # prints a notice and passes when no local transcripts exist
+    "test_inproc",
     "test_run_all",
 ]
 

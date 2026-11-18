@@ -19,6 +19,11 @@ import sys
 import uuid
 from pathlib import Path
 
+sys.path.insert(
+    0, str(Path(__file__).resolve().parent)
+)  # python -I drops the script's folder
+import inproc
+
 sys.stdout.reconfigure(errors="backslashreplace")
 HERE = Path(__file__).resolve().parent
 HOOK = HERE.parent / "hooks" / "discipline.py"
@@ -54,14 +59,8 @@ def check(name: str, got: object, want: object) -> None:
 
 
 def call(mode: str, session: str, **payload: object) -> dict | None:
-    p = subprocess.run(
-        [sys.executable, "-I", str(HOOK), mode],
-        input=json.dumps({"session_id": session, **payload}),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        env=ENV,
-        check=False,
+    p = inproc.run(
+        HOOK, [mode], json.dumps({"session_id": session, **payload}), env=ENV
     )
     assert p.returncode == 0, p.stderr
     return json.loads(p.stdout) if p.stdout.strip() else None

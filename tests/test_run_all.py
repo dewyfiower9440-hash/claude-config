@@ -315,6 +315,52 @@ check(
     ),
     ([], ["30"], True),
 )
+# devenv-final 31: the corpus replay runs when the guard differs from the released one
+import test_guard_corpus as corpus
+
+CORPUS = Path(tempfile.mkdtemp(prefix="gate-corpus-"))
+
+
+def cgit(*args: str) -> None:
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+        cwd=CORPUS,
+        check=True,
+        capture_output=True,
+    )
+
+
+(CORPUS / "hooks").mkdir()
+for name in corpus.GUARD_FILES:
+    (CORPUS / name).write_text("x = 1\n", encoding="utf-8")
+(CORPUS / "hooks" / "other.py").write_text("x = 1\n", encoding="utf-8")
+cgit("init", "-q")
+cgit("add", "-A")
+cgit("commit", "-q", "-m", "c")
+no_ref = corpus.guard_differs(CORPUS)
+cgit("update-ref", "refs/remotes/origin/main", "HEAD")
+same = corpus.guard_differs(CORPUS)
+(CORPUS / "hooks" / "other.py").write_text("x = 2\n", encoding="utf-8")
+other = corpus.guard_differs(CORPUS)
+(CORPUS / "hooks" / "shellparse.py").write_text("x = 2\n", encoding="utf-8")
+edited = corpus.guard_differs(CORPUS)
+cgit("commit", "-q", "-a", "-m", "d")
+committed = corpus.guard_differs(CORPUS)
+check(
+    "G-T14 the corpus replay is skipped only when git says the guard's files are the "
+    "released ones: no such ref, the same, another hook changed, an uncommitted change, "
+    "a committed one, a folder that is no repository",
+    (
+        no_ref,
+        same,
+        other,
+        edited,
+        committed,
+        corpus.guard_differs(CORPUS / "hooks" / "nowhere"),
+    ),
+    (True, False, False, True, True, True),
+)
+shutil.rmtree(CORPUS, ignore_errors=True)
 reset()
 script("ok_quiet", 'print("FAILURES: 0")\n')
 script("ok_show", 'print("FAILURES: 0")\n')

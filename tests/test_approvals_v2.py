@@ -17,6 +17,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 HOOKS = HERE.parent / "hooks"
+sys.path.insert(0, str(HERE))  # python -I drops the script's folder
+import inproc
+
 # Under the gate every run has its own folder for these (run_all.GATE_TMP_ROOT, inside
 # tests/ as before); alone, tests/ itself.
 TMP_ROOT = Path(os.environ.get("GATE_TMP_ROOT") or Path(__file__).resolve().parent)
@@ -46,13 +49,11 @@ def check(name: str, got: object, want: object) -> None:
 
 def call(mode: str, session: str, **payload: object) -> dict | None:
     payload.setdefault("cwd", str(REPO))
-    p = subprocess.run(
-        [sys.executable, "-I", str(HOOKS / "discipline.py"), mode],
-        input=json.dumps({"session_id": session, **payload}),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=False,
+    # inside this process (devenv-final 31); the first call of each mode is a real process
+    p = inproc.run(
+        HOOKS / "discipline.py",
+        [mode],
+        json.dumps({"session_id": session, **payload}),
     )
     assert p.returncode == 0, p.stderr
     return json.loads(p.stdout) if p.stdout.strip() else None

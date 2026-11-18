@@ -17,6 +17,11 @@ import sys
 import uuid
 from pathlib import Path
 
+sys.path.insert(
+    0, str(Path(__file__).resolve().parent)
+)  # python -I drops the script's folder
+import inproc
+
 sys.stdout.reconfigure(errors="backslashreplace")
 HERE = Path(__file__).resolve().parent
 HOOKS = HERE.parent / "hooks"
@@ -545,17 +550,11 @@ ENV = dict(
 def hook(
     mode: str, s: str, env: dict | None = None, **payload: object
 ) -> tuple[int, dict]:
-    p = subprocess.run(
-        [sys.executable, "-I", str(HOOKS / "discipline.py"), mode],
-        input=json.dumps(
-            {"session_id": s, "cwd": str(PROJ), "prompt_id": "p", **payload}
-        ),
+    p = inproc.run(
+        HOOKS / "discipline.py",
+        [mode],
+        json.dumps({"session_id": s, "cwd": str(PROJ), "prompt_id": "p", **payload}),
         env=env or ENV,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
     )
     return p.returncode, (json.loads(p.stdout) if p.stdout.strip() else {})
 

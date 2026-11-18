@@ -18,6 +18,11 @@ import sys
 import uuid
 from pathlib import Path
 
+sys.path.insert(
+    0, str(Path(__file__).resolve().parent)
+)  # python -I drops the script's folder
+import inproc
+
 sys.stdout.reconfigure(errors="backslashreplace")
 HERE = Path(__file__).resolve().parent
 HOOKS = HERE.parent / "hooks"
@@ -80,17 +85,13 @@ subprocess.run(["git", "init", "-q"], cwd=PROJ, check=True)
 
 
 def hook(mode: str, s: str, prompt_id: str = "p1", **payload: object) -> dict:
-    p = subprocess.run(
-        [sys.executable, "-I", str(HOOKS / "discipline.py"), mode],
-        input=json.dumps(
+    p = inproc.run(
+        HOOKS / "discipline.py",
+        [mode],
+        json.dumps(
             {"session_id": s, "cwd": str(PROJ), "prompt_id": prompt_id, **payload}
         ),
         env=ENV,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
     )
     assert p.returncode == 0, (mode, p.returncode, p.stderr[-300:])
     return json.loads(p.stdout) if p.stdout.strip() else {}
@@ -695,17 +696,13 @@ check(
 # for the stop record of a subagent this session started, outside the session lock, up to a
 # limit; the rule itself ("only after it ended") is unchanged.
 def hook_with(env: dict, mode: str, s: str, prompt_id: str, **payload: object) -> dict:
-    p = subprocess.run(
-        [sys.executable, "-I", str(HOOKS / "discipline.py"), mode],
-        input=json.dumps(
+    p = inproc.run(
+        HOOKS / "discipline.py",
+        [mode],
+        json.dumps(
             {"session_id": s, "cwd": str(PROJ), "prompt_id": prompt_id, **payload}
         ),
         env=env,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
     )
     assert p.returncode == 0, (mode, p.returncode, p.stderr[-300:])
     return json.loads(p.stdout) if p.stdout.strip() else {}
