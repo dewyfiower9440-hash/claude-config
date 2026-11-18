@@ -214,6 +214,53 @@ check(
     None,
 )
 
+
+# ---- devenv-final 12: a failed or unknown result is reported once, for the content it
+# was about. Changing the code afterwards without running the gate again is a new
+# unverified state, not "already reported".
+def failed_bash(session: str, command: str, cwd: Path) -> None:
+    payload = {
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+        "tool_use_id": uuid.uuid4().hex,
+        "cwd": str(cwd),
+    }
+    call("pre", session, **payload)
+    call("fail", session, error="Exit code 1", **payload)
+
+
+for label, run_gate in (
+    ("failed", lambda s, p: failed_bash(s, OLD, p)),
+    ("unknown", lambda s, p: bash(s, OLD + " | tail -3", p)),
+):
+    P = project(f"stale-{label}")
+    s = begin(P)
+    write(s, P / "src" / "a.py", "a = 1\n")
+    run_gate(s, P)
+    check(f"D-T1 a {label} gate blocks the stop", stop(s) is not None, True)
+    call("prompt", s, cwd=str(P), prompt="go on")
+    check(
+        "D-T1 ... once: reported, nothing changed, the next stop is quiet",
+        stop(s),
+        None,
+    )
+    call("prompt", s, cwd=str(P), prompt="fix it")
+    (P / "src" / "a.py").write_text("a = 2\n", encoding="utf-8")  # by a script, no Edit
+    bash(s, "python fix.py", P)
+    check(
+        f"D-T2 the code changed after the reported {label} result, no new run: blocked again",
+        stop(s) is not None,
+        True,
+    )
+    call("prompt", s, cwd=str(P), prompt="again")
+    check(
+        "D-T2 ... and at every stop until the gate runs on this content",
+        stop(s) is not None,
+        True,
+    )
+    bash(s, OLD, P)
+    check("D-T2 ... the gate passing on the new content ends it", stop(s), None)
+
 for p in (ROOT, BASE):
     shutil.rmtree(p, ignore_errors=True)
 print("FAILURES:", fails)

@@ -2570,7 +2570,10 @@ def record_evidence(
         if still_valid_pass and ev["outcome"] in ("partial", "unknown"):
             continue  # a later side run does not revoke a passed gate for unchanged code
         record: dict[str, Any] = {**ev, "at": now, "by": actor(data)}
-        if ev["outcome"] == "passed":
+        if ev["outcome"] in ("passed", "failed", "unknown"):
+            # The content the result is about. For a pass it is what makes it evidence; for
+            # a failed or unknown result it is what "already reported" refers to
+            # (devenv-final 12): every reader of these digests asks for a pass first.
             record["digests"] = evidence_digests(state, root, targets[-1])
         state["evidence"][root] = record
         if ev["outcome"] == "failed" and ev.get("kind") == "gate":
@@ -3965,6 +3968,15 @@ def _content_decision(
         and all(ev.get("digests", {}).get(t) == d for t, d in digests.items())
     ):
         if outcome in ("failed", "unknown"):
+            ran_on = ev.get("digests")
+            if (
+                isinstance(ran_on, dict)
+                and ran_on
+                and any(ran_on.get(t) != d for t, d in digests.items())
+            ):
+                # The content changed after that result: reporting it once does not cover
+                # what came later. Unverified until a check runs on this content.
+                return REASON_UNVERIFIED + where + edited_by, None
             key = f"{root}|{float(ev.get('at', 0))}"
             if not _not_yet_notified(state, key):
                 return None  # this failed/unknown result was already reported once
