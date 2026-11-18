@@ -88,6 +88,11 @@ No preamble, no restating the request, no self-praise, no long explanations unle
 - A test comparing a `%TEMP%` path with a key the hook recorded failed only on CI (same file, different spelling of the path) → compare both sides through `os.path.realpath` (2026-11-14)
 - `ruff check` sorts `import discipline` as first-party only where `~/.claude/discipline/` exists, so an import block that passes locally fails I001 on CI → keep `import approvals` and `import discipline` in separate blocks in test scripts, with a statement between them, not only a blank line (2026-11-15); to see what CI will see, lint from a folder that has no `discipline/`: `cd <an empty folder> && ruff check --isolated --select I <this repository>/tests` (2026-11-16: the trap came back)
 
+## Release (this config repository, ~/.claude itself)
+- The live hooks run from `~/.claude`'s working tree: never edit them there. Change them in the work tree `C:\dev\_wt\claude-config` (its own branch).
+- Only a commit that passed the gate in the work tree reaches `main`: `git -C ~/.claude merge --ff-only <branch>`, then push and follow CI.
+- In a hurry: run the changed module's tests, merge, and run the full gate right after. SessionStart announces uncommitted changes under `~/.claude/hooks` or in `settings.json`.
+
 ## Verification (applies only to this config repository, ~/.claude itself)
 <!-- Read by hooks/verification.py for edits under ~/.claude. Other projects declare their own in their CLAUDE.md. -->
 - gate: `python -I tests/run_all.py`

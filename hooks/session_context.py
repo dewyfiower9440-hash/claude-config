@@ -44,6 +44,10 @@ PLAN_READ_CHARS = 262144  # a plan's frontmatter and steps are near its top
 LISTED_PROJECTS = 30
 DEFAULT_PROJECTS_ROOT = "C:/dev"
 HEADER = "[session-context] 자동 주입된 작업 상태 (SessionStart hook)"
+# devenv-final 2: the live hooks run from the config home's working tree, so a change
+# there that is not committed runs without having passed the gate.
+CONFIG_GIT_TIMEOUT_S = 2
+CONFIG_WATCHED = ("hooks", "settings.json")
 
 
 # ---------------------------------------------------------------- pure core
@@ -226,6 +230,17 @@ def ledger_notes(
     return [line[:NOTE_LINE_CHARS] for line in out]
 
 
+def config_note(changed: int) -> list[str]:
+    """One line when the live hooks or settings hold uncommitted changes."""
+    if changed <= 0:
+        return []
+    note = (
+        f"주의: `~/.claude`의 hooks/·settings.json에 커밋되지 않은 변경 {changed}개 "
+        "(게이트를 거치지 않은 hook이 운영 중일 수 있음: 작업 트리에서 고쳐 병합하세요)"
+    )
+    return [note]
+
+
 def build_outside(cwd: str, root: str, names: list[str]) -> str:
     """Context for a session started outside every repository: the projects that exist."""
     shown = names[:LISTED_PROJECTS]
@@ -332,7 +347,7 @@ def build_context(
 
 
 # ---------------------------------------------------------------- I/O shell
-def git(cwd: Path, *args: str) -> str | None:
+def git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT_S) -> str | None:
     try:
         p = subprocess.run(
             ["git", "-c", "core.quotepath=false", *args],
@@ -341,7 +356,7 @@ def git(cwd: Path, *args: str) -> str | None:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=GIT_TIMEOUT_S,
+            timeout=timeout,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):  # git missing or hung: no context
@@ -511,6 +526,25 @@ def recurrence_notes(data: dict[str, object], root: Path) -> list[str]:
         return []
 
 
+def config_notes(data: dict[str, object]) -> list[str]:
+    """Uncommitted changes of the live hooks or settings, as one line. One git call with
+    its own short budget; a config home git cannot read (missing, slow) means no line.
+    Not after a compaction: the session was told at its start."""
+    if data.get("source") == "compact":
+        return []
+    home = Path(os.environ.get("CLAUDE_CONFIG_HOME") or Path.home() / ".claude")
+    out = git(
+        home,
+        "status",
+        "--short",
+        "--untracked-files=all",
+        "--",
+        *CONFIG_WATCHED,
+        timeout=CONFIG_GIT_TIMEOUT_S,
+    )
+    return config_note(len(out.splitlines())) if out else []
+
+
 def session_notes(data: dict[str, object], root: Path, info: GitInfo) -> list[str]:
     """P0-12: what the last session in this repository left behind (its handoff record, or
     another session's open marker), then this session's own marker is written. Only for a
@@ -559,6 +593,7 @@ def main() -> None:
         root, info = found
         plan, summaries = read_plans(root)
         notes = (
+            *config_notes(data),
             *session_notes(data, root, info),
             *plan_notes(summaries, plan.path if plan else None),
             # last: when the notes do not all fit, the ledger lines are the ones left out

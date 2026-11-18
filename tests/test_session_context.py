@@ -29,9 +29,19 @@ def check(name: str, got: object, want: object) -> None:
     )
 
 
-def run_hook(cwd: Path, source: str = "startup", projects: Path | None = None) -> str:
+def run_hook(
+    cwd: Path,
+    source: str = "startup",
+    projects: Path | None = None,
+    config: Path | None = None,
+) -> str:
     # The projects root is always a throw-away folder here: the real one is never listed.
-    env = dict(os.environ, CLAUDE_PROJECTS_ROOT=str(projects or ROOT / "no-projects"))
+    # The same for the config home: the real ~/.claude is never asked for its git state.
+    env = dict(
+        os.environ,
+        CLAUDE_PROJECTS_ROOT=str(projects or ROOT / "no-projects"),
+        CLAUDE_CONFIG_HOME=str(config or ROOT / "no-config"),
+    )
     p = subprocess.run(
         [sys.executable, "-I", str(HOOK)],
         input=json.dumps({"session_id": "t", "source": source, "cwd": str(cwd)}),
@@ -388,6 +398,44 @@ check(
     "C-T7 inside a repository the projects list is not injected",
     "- alpha" in run_hook(repo, projects=projects),
     False,
+)
+
+# ---- uncommitted changes of the live hooks or settings are announced (devenv-final 2)
+UNRELEASED = "커밋되지 않은 변경"
+home = ROOT / "config-home"
+home.mkdir()
+git(home, "init", "-b", "main")
+write(home / "hooks" / "guard.py", "x = 1\n")
+write(home / "settings.json", "{}\n")
+write(home / "notes.md", "n\n")
+git(home, "add", ".")
+git(home, "commit", "-m", "chore: config")
+write(home / "notes.md", "changed\n")
+check(
+    "R-T1 clean hooks and settings (another file changed): no line",
+    UNRELEASED in run_hook(repo, config=home),
+    False,
+)
+write(home / "hooks" / "guard.py", "x = 2\n")
+write(home / "settings.json", '{"a": 1}\n')
+write(home / "hooks" / "new_hook.py", "y = 1\n")
+ctx = run_hook(repo, config=home)
+check(
+    "R-T2 changed hook, changed settings, new hook file: one line with the count",
+    [ln for ln in ctx.splitlines() if UNRELEASED in ln and "3개" in ln] != []
+    and ctx.count(UNRELEASED),
+    1,
+)
+check(
+    "R-T2 ... not repeated after a compaction",
+    UNRELEASED in run_hook(repo, source="compact", config=home),
+    False,
+)
+ctx = run_hook(repo, config=ROOT / "config-missing")
+check(
+    "R-T3 config home that git cannot read: no line, the rest still injected",
+    (UNRELEASED in ctx, "2026-11-01-active.md" in ctx),
+    (False, True),
 )
 
 # ---- malformed payload never fails
