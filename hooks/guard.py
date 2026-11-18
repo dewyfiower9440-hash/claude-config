@@ -678,6 +678,15 @@ _HOME_FORM = re.compile(
     r"(?=$|[\\/])",
     re.IGNORECASE,
 )
+# The names a shell gives the temp folder (Git Bash's /tmp is the Windows temp folder).
+# Without them the session state under it was protected under its literal path only.
+_TEMP_FORM = re.compile(
+    r"^(/tmp|\$TMPDIR|\$TEMP|\$TMP|\$\{TMPDIR\}|\$\{TEMP\}|\$\{TMP\}|%TEMP%|%TMP%"
+    r"|\$env:TEMP|\$env:TMP|\$\{env:TEMP\}|\$\{env:TMP\})(?=$|[\\/])",
+    re.IGNORECASE,
+)
+# The state folder by name, in a word whose start cannot be told (another variable).
+_STATE_NAME = re.compile(r"(^|[\\/])claude-discipline($|[\\/])", re.IGNORECASE)
 
 
 # Programs whose plain-word arguments are files or folders. For any other program a word
@@ -709,6 +718,7 @@ def as_path(word: str, cwd: str, bare: bool = True) -> str | None:
     if not bare and not looks and text not in (".", ".."):
         return None
     text = _HOME_FORM.sub(lambda _m: HOME_DIR, text)
+    text = _TEMP_FORM.sub(lambda _m: _temp_root(), text)
     cut = re.search(r"[*?\[]", text)
     if cut:
         text = text[: cut.start()]
@@ -1033,6 +1043,14 @@ def check_isolation(
         for tok in re.split(r"[\s'\"<>|;&()=,]+", arg):
             path = as_path(tok, cwd, program in FILE_PROGRAMS) if tok else None
             if path and in_protected(path):
+                block(PROTECTED_REASON.format(path=tok))
+            # a variable the guard cannot expand, in front of the state folder's name
+            if (
+                tok
+                and path is None
+                and re.search(r"[$%`]", tok)
+                and _STATE_NAME.search(tok)
+            ):
                 block(PROTECTED_REASON.format(path=tok))
             # a pattern that can match a protected folder, or a secret file by name
             pathlike = program in FILE_PROGRAMS or "/" in tok or "\\" in tok

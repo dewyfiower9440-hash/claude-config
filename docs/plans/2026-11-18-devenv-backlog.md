@@ -40,6 +40,14 @@ task: devenv-backlog
 12. 보관된 계획 본문 안의 `docs/plans/…` 경로 표기는 옮기기 전 그대로다(단계 35; 기록이라 고치지 않았다).
 13. **`discipline.py` 분할의 나머지(단계 40)**: 226KB 한 파일이 남아 있다(`hooks/planscope.py`로 38개 이름만 나갔다). 9개 구획이 서로를 쓰고(순환) 파일이 `__main__`으로 실행되므로, 글자 그대로 옮기는 방식은 여기까지다. 다음 순서의 안: (1) 경로 도우미(`absolute`, `is_unc`, `may_be_repository`, `_inside`)를 바닥 모듈로, (2) 상태를 읽고 판정만 돌려주는 함수(Stop 판정, 프롬프트 분류)를 `state`를 인자로 받는 순수 함수로 바꿔 옮기고, (3) `global`로 다시 묶는 4개 이름을 실행 문맥 객체 하나로, (4) discipline.py는 입력 해석과 이벤트 분기만. 이음매마다 게이트와 bench로 확인. 같이 할 것: `_inside` 중복, CI 판정 두 벌, 계획 순회 4곳.
 14. `C:\dev\_iso_trial`: `.git` 밖에 `seed.txt`(5바이트)가 있어 지우지 않았다(단계 38). 필요 없으면 사용자가 지운다.
+15. **마감 리뷰가 찾은 가드·판정의 남은 입력(2026-11-18; 리뷰어가 가드를 실행해 확인했다고 보고, 주 세션은 재현하지 않음)**. 심각도 순:
+    - 보호 폴더: 임시 폴더 전체를 훑는 명령(`grep -r x /tmp`, `rg x $TEMP`, `tar -C <temp> .`, `Get-ChildItem -Recurse $env:TEMP`, Grep 도구의 `path`가 임시 폴더), `cd /tmp && cat claude-discipline/a`(cd 추적이 `/tmp`를 `C:\tmp`로 푼다), 중괄호 전개 `cat ~/.claude/{discipline,x}/key`, `$env:APPDATA\..\..\.claude\state\…`. 서명 키와 서명 없는 세션 상태가 걸려 있다.
+    - 비밀 파일 글롭: `cat .e*`, `cat .e??`, `cat .{env,x}`, `base64 .en*`, PowerShell `Get-Content *env`(PowerShell 와일드카드는 점 파일도 맞춘다), `cat ~/.s*/id*`, `cat ~/.aws/cred*`. 제안: 이름 추정 대신 패턴을 실제로 전개해 판정.
+    - 재귀 삭제: `rm -rf *`(cwd가 `C:\dev`나 홈), `rm -rf $PWD`, `cmd /c "rd /s /q C:\dev"`(따옴표로 한 단어), `Get-ChildItem C:\dev | Remove-Item -Recurse -Force`, `-Recurse:$true`.
+    - 라이브 설정 쓰기 확인(ask)이 빠지는 경우: 세션 폴더가 `~/.claude` 안일 때의 상대 경로(`echo x >> hooks/guard.py`), `cd ~/.cl*/hooks && …`, `git -C ~/.claude checkout <ref> -- hooks`, `skills`·`rules`·`settings.local.json`.
+    - read-only subagent에게 남은 쓰기: `git checkout-index -a -f`, `git read-tree`, `git -c alias.z=!… z`, `ruff format .`, `ruff check --fix .`, `npx prettier --write`, `uv sync`, `pnpm install`, `curl -o`, `mkdir`. 제안: git은 읽기 서브커맨드의 허용 목록으로.
+    - 오차단: `ls .env*`, `ls src/credentials*`, `git add src/id_*`, `rg -g /**/*.py`, 인터프리터 `-c` 문자열 안의 리터럴.
+    - 그 밖: 깨진 payload에서 guard가 exit 0(fail-closed의 예외), 줄바꿈이나 `;`로 끝나는 게이트 실행이 unknown, `format_lint`의 `--extend-ignore I001`이 RUF100을 켠 프로젝트에서 `# noqa: I001`을 오탐, `tests/inproc.py`가 `python -I`에 없는 `sys.path` 항목을 준다(지금 결함은 없음), CI의 `Install-Module PSScriptAnalyzer`에 버전 없음, `planscope.load_key`가 읽기 실패 때도 새 키를 비원자적으로 쓴다, `approvals.MIN_KEY_BYTES`(16)와 생성 길이(32)의 차이, `is_repo_root`의 주석("Asked from git")이 사실과 다를 수 있다, SubagentStart 안내의 "%TEMP% 아래에만"(변수로 적으면 거부된다), `%TEMP%\claude-discipline`에 상태 파일 2만 3천여 개(원인 미확인).
 
 ## C. 닫힌 계획에서 넘어온 것
 - 마스터의 미체크 4개: 3(P0 단계 계획 작성: 실제로는 P0 계획들이 끝났다, 표기만 남음), 5(P0-04 승인 수명), 12(P0-11 메모리를 전역·프로젝트로 분리, `verified_at`·`source`; 메모리 이동은 별도 승인), 26(P3-01, 위 A).

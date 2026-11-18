@@ -1,7 +1,8 @@
 """Part of the discipline hook (moved out of discipline.py, devenv-final 40):
 what a plan file says (its task, its scope, its hash), which plan a prompt names,
 and the first approval store's records. Nothing here needs the session state or the
-rest of the hook; discipline.py imports every name back under the same name.
+rest of the hook; discipline.py imports back, under the same names, the ones it or
+another module uses through it (26 of the 38).
 """
 
 from __future__ import annotations

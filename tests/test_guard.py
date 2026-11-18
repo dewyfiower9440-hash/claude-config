@@ -690,6 +690,32 @@ S_CASES = [
         ("Read", {"file_path": f"{TMP}/notes.txt"}),
         "allow",
     ),
+    # Found by the closing review: the same folder under the names a shell gives the temp
+    # folder (Git Bash's /tmp is it), and through a variable the guard cannot expand.
+    ("S-T3 /tmp", sh("cat /tmp/claude-discipline/x.json"), "deny"),
+    ("S-T3 /tmp, written", sh("echo {} > /tmp/claude-discipline/abc.json"), "deny"),
+    ("S-T3 /tmp, removed", sh("rm -rf /tmp/claude-discipline"), "deny"),
+    ("S-T3 $TEMP", sh("cat $TEMP/claude-discipline/x.json"), "deny"),
+    ("S-T3 ${TMP}", sh('cat "${TMP}/claude-discipline/x.json"'), "deny"),
+    # (forward slashes: in a Bash command line an unquoted backslash is an escape)
+    ("S-T3 %TEMP%", sh("cat %TEMP%/claude-discipline/x.json"), "deny"),
+    (
+        "S-T3 $env:TEMP",
+        ps("Get-Content $env:TEMP\\claude-discipline\\a.json"),
+        "deny",
+    ),
+    (
+        "S-T3 $env:TEMP, written",
+        ps("Set-Content $env:TEMP\\claude-discipline\\abc.json x"),
+        "deny",
+    ),
+    (
+        "S-T3 another variable in front of the folder's name",
+        sh("cat $LOCALAPPDATA/Temp/claude-discipline/x.json"),
+        "deny",
+    ),
+    ("S-T3 another file under /tmp", sh("cat /tmp/claude/scratch/out.txt"), "allow"),
+    ("S-T3 another file under $TEMP", sh("cat $TEMP/notes.txt"), "allow"),
     ("S-T2 a shell command on one", sh(f"cat {TMP}/claude/scratch/out.txt"), "allow"),
     (
         "S-T2 a folder of that name elsewhere",
