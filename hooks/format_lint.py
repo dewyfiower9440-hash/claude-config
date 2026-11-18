@@ -31,7 +31,12 @@ RUN_BUDGET_S = (
 CMD_META = re.compile(r'[&|<>^%!"`;,=()\n\r]')
 # Fixes ruff must not apply on its own: an import or a variable that is unused right now is
 # usually used by the next edit of the same change.
-UNFIXABLE = "F401,F841"
+UNFIXABLE = "F401,F841,I001"
+# Not judged at write time at all. Import order depends on which modules exist: ruff sorts
+# an import of a module it cannot find yet as third-party, so a test written before its
+# module had the import moved, and the project's gate failed on it once the module was
+# there (devenv-final 42). The gate judges it, on the complete tree.
+NOT_JUDGED = "I001"
 NO_FORMAT = ("docs/plans/",)  # repository-relative prefixes that are never rewritten
 
 _deadline: float | None = None
@@ -136,7 +141,18 @@ def python_file(path: Path, cwd: Path) -> list[str]:
     root = project_root(path, ("pyproject.toml", "ruff.toml", ".git"))
     run([ruff, "check", "--fix", "--unfixable", UNFIXABLE, "--quiet", str(path)], root)
     run([ruff, "format", str(path)], root)
-    res = run([ruff, "check", "--output-format", "concise", str(path)], root)
+    res = run(
+        [
+            ruff,
+            "check",
+            "--extend-ignore",
+            NOT_JUDGED,
+            "--output-format",
+            "concise",
+            str(path),
+        ],
+        root,
+    )
     if res and res.returncode != 0 and res.stdout.strip():
         return [f"ruff:\n{res.stdout.strip()}"]
     return []

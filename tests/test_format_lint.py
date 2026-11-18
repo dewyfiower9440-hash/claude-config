@@ -263,6 +263,38 @@ check(
     0,
 )
 
+# devenv-final 42 (found by the end-to-end trial): a test written before its module exists
+# imports a module ruff cannot find yet, and ruff sorts such an import as third-party.
+# The hook moved it, and the project's own gate then failed (I001) once the module was
+# there. Import order is judged by the gate, where the tree is complete: the hook neither
+# rewrites it nor reports it.
+PROJ = ROOT / "proj"
+write(
+    "proj/pyproject.toml",
+    '[tool.ruff]\nsrc = ["src"]\n[tool.ruff.lint]\nselect = ["E", "F", "I"]\n',
+)
+write("proj/src/pkg/__init__.py", "")
+write("proj/src/pkg/errors.py", "class E(Exception):\n    pass\n")
+FIRST = "import os\n\nfrom pkg.errors import E\nfrom pkg.notyet import f\n\nprint(os, E, f)\n"
+early = write("proj/tests/test_new.py", FIRST)
+r = edit(early, cwd=PROJ)
+check(
+    "F-T10 an import of a module that does not exist yet stays where it was written, and "
+    "nothing is reported about import order",
+    (early.read_text(encoding="utf-8"), r.returncode, "I001" in r.stderr),
+    (FIRST, 0, False),
+)
+late = write(
+    "proj/tests/test_mixed.py", "import sys\nimport os\nx=1\nprint(os, sys, x)\n"
+)
+r = edit(late, cwd=PROJ)
+check(
+    "F-T10 ... imports that are out of order are left for the gate too (the rest of the "
+    "file is still formatted)",
+    (late.read_text(encoding="utf-8"), r.returncode),
+    ("import sys\nimport os\n\nx = 1\nprint(os, sys, x)\n", 0),
+)
+
 shutil.rmtree(BASE, ignore_errors=True)
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)
