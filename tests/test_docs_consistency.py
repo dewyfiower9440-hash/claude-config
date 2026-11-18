@@ -384,13 +384,14 @@ listings = {
     name: re.findall(
         r"plans_dir\.(r?glob)\(([^)]*)\)", (HOOKS / name).read_text(encoding="utf-8")
     )
-    for name in ("discipline.py", "session_context.py", "handoff.py")
+    for name in ("discipline.py", "planscope.py", "session_context.py", "handoff.py")
 }
 check(
     "D10 the hooks list plan files in five places, each the top level of docs/plans only",
     listings,
     {
-        "discipline.py": [("glob", '"*.md"')] * 4,
+        "discipline.py": [("glob", '"*.md"')] * 3,
+        "planscope.py": [("glob", '"*.md"')],  # named_plans, moved in step 40
         "session_context.py": [("glob", '"*.md"')],
         "handoff.py": [],  # reads through session_context.read_plans
     },
