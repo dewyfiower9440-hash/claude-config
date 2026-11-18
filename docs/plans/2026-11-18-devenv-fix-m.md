@@ -143,3 +143,4 @@ task: devenv-fix-m
 - 바뀐 기존 기대값: `tests/test_guard_corpus.py`가 보호 폴더 문구로 막힌 과거 명령을 "새로 막힌 명령"에서 빼고 따로 센다(범주 면제). 건수의 상한이 없다: devenv-final 단계 21에서 고정한다.
 - guard 지연: 이 묶음 뒤 호출 한 번의 중앙값 약 120ms(Read, `git status`), `git commit`은 약 236ms(같은 날 측정). 묶음 전의 값은 재지 않았다(기준선 11-16의 p50 140ms는 다른 인터프리터로 잰 값이다).
 - 한계(그대로): 인터프리터 안의 쓰기·읽기·종료는 보이지 않는다. 임시 폴더 안의 쓰기는 허용된다. auto mode에서 종료 명령의 ask가 확인 창을 띄우는지는 주 세션에서 확인하지 않았다.
+- 단계 7: 커밋 `ca35280`(guard, 테스트, 정의 파일), `a808465`(이 기록). push 뒤 CI run 44224210470 성공(`hooks` 작업, `gate: 39 modules, sum 2773s, wall 699s, workers 4`, GATE PASSED). 상태: CI_VERIFIED. 이 줄은 CI가 끝난 뒤 `devenv-final` 브랜치에서 더했다.
