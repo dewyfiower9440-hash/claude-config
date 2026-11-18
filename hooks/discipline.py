@@ -4778,11 +4778,40 @@ def main() -> None:
     }.get(mode)
     if handler is None:
         sys.exit(0)
+    formatted = format_first(mode, data)
     try:
         run_hook(mode, data, handler, STATE_DIR / f"{session}.json")
     except Exception:  # outermost boundary: even the failure handling failed
         log.exception("discipline.hook_boundary_failure")
         hard_block(mode, data, REASON_HOOK_ERROR.format(why="오류 처리 중 오류"))
+    if formatted and formatted[1]:
+        sys.exit(2)  # lint problems the formatter left: its report is on stderr
+
+
+FORMAT_TOOLS = ("Edit", "Write", "MultiEdit")
+
+
+def format_first(mode: str, data: dict[str, Any]) -> tuple[bool, list[str]] | None:
+    """devenv-final 25: the formatter runs here, before this hook reads the edited file,
+    instead of as a hook of its own. Hooks of one event run in parallel, so the formatter
+    used to rewrite the file while this hook was hashing it: the content recorded for the
+    edit was sometimes the unformatted one, and the evidence bound to it went stale at
+    once. Its time is its own (it does not count against this hook's git and lock
+    budgets: settings.json gives the post hook the sum). A failure of the formatter is
+    logged and changes nothing about what this hook decides."""
+    global _T0
+    if mode != "post" or data.get("tool_name") not in FORMAT_TOOLS:
+        return None
+    try:
+        import format_lint
+
+        result = format_lint.process(data)
+        format_lint.report(result[0], result[1], data)
+    except Exception:  # hook boundary: the formatter is a convenience, not a gate
+        log.exception("discipline.format_failed")
+        result = None
+    _T0 = time.monotonic()
+    return result
 
 
 PROMPT_FAILED_PREFIX = "프롬프트 hook 처리 중 오류로 승인을 폐기함"

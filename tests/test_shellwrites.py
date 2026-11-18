@@ -491,12 +491,24 @@ check(
         ["Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell|Agent|Task|ExitPlanMode"],
     ),
 )
+# devenv-final 25 (changed expectation: format_lint.py had its own PostToolUse entry,
+# ["Edit|Write|MultiEdit"]). The formatter now runs inside the discipline post hook, before
+# that hook reads the file, so it has no entry of its own; the tools it formats for are the
+# hook's FORMAT_TOOLS.
+import discipline as _disc_for_format
+
 check(
-    "W-T14 the other matchers are unchanged",
-    (matchers("PreToolUse", "guard.py"), matchers("PostToolUse", "format_lint.py")),
+    "W-T14 the guard's matcher is unchanged; the formatter has no hook entry of its own "
+    "and runs for Edit, Write and MultiEdit inside the post hook",
+    (
+        matchers("PreToolUse", "guard.py"),
+        matchers("PostToolUse", "format_lint.py"),
+        _disc_for_format.FORMAT_TOOLS,
+    ),
     (
         ["Bash|PowerShell|Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob"],
-        ["Edit|Write|MultiEdit"],
+        [],
+        ("Edit", "Write", "MultiEdit"),
     ),
 )
 

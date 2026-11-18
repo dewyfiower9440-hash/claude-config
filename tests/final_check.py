@@ -123,7 +123,7 @@ try:
     hooks = s.get("hooks", {})
     want = {
         "PreToolUse": ["guard.py", "discipline.py pre"],
-        "PostToolUse": ["format_lint.py", "discipline.py post"],
+        "PostToolUse": ["discipline.py post"],  # the formatter runs inside it
         "UserPromptSubmit": ["notify.py start", "discipline.py prompt"],
         "Stop": ["notify.py stop", "discipline.py stop"],
         "Notification": ["notify.py attn"],
