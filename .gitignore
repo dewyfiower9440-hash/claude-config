@@ -18,6 +18,7 @@ __pycache__/
 !/.gitattributes
 !/.github/
 !/pyrightconfig.json
+!/ruff.toml
 # Approved plan files are tracked (their history is evidence); nothing else under docs/.
 !/docs/
 /docs/*

@@ -1,0 +1,8 @@
+# The gate (tests/run_all.py), the format hook and CI must judge the same code the same way.
+# The rule set is this ruff version's default one (no `select` here: naming rule families
+# would switch on rules the default leaves off), so the version is what is pinned. CI
+# installs the same version (.github/workflows/ci.yml; tests/test_run_all.py compares them).
+# To move to a newer ruff: change both, run the gate, fix what it reports.
+required-version = "==0.17.3"
+# The hooks run on Python 3.13 (settings.json and CI use 3.13).
+target-version = "py313"

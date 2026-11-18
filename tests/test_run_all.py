@@ -292,6 +292,29 @@ check(
     ),
     (1, [4], True, True),
 )
+# devenv-final 6: CI must lint with the ruff the gate uses here, and must not run on
+# whatever a tag points at today.
+RUFF_TOML = (HERE.parent / "ruff.toml").read_text(encoding="utf-8")
+pinned = re.findall(r'^required-version\s*=\s*"==([\d.]+)"', RUFF_TOML, re.MULTILINE)
+check(
+    "G-T13 ruff.toml pins one ruff version and CI installs exactly that one",
+    (len(pinned), re.findall(r"uv tool install ruff==([\d.]+)\s", WORKFLOW)),
+    (1, pinned),
+)
+check(
+    "G-T13 every action is pinned to a commit, the job has a time limit, runs are "
+    "grouped per branch",
+    (
+        [
+            u
+            for u in re.findall(r"uses:\s*(\S+)", WORKFLOW)
+            if not re.search(r"@[0-9a-f]{40}$", u)
+        ],
+        re.findall(r"^\s*timeout-minutes:\s*(\d+)", WORKFLOW, re.MULTILINE),
+        "concurrency:" in WORKFLOW,
+    ),
+    ([], ["30"], True),
+)
 reset()
 script("ok_quiet", 'print("FAILURES: 0")\n')
 script("ok_show", 'print("FAILURES: 0")\n')
