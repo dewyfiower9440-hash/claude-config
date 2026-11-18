@@ -93,7 +93,7 @@ No preamble, no restating the request, no self-praise, no long explanations unle
 - Only a commit that passed the gate in the work tree reaches `main`: `git -C ~/.claude merge --ff-only <branch>`, then push and follow CI.
 - In a hurry: run the changed module's tests, merge, and run the full gate right after. SessionStart announces uncommitted changes under `~/.claude/hooks` or in `settings.json`.
 
-## Verification (applies only to this config repository, ~/.claude itself)
-<!-- Read by hooks/verification.py for edits under ~/.claude. Other projects declare their own in their CLAUDE.md. -->
+## Verification
+<!-- Applies only to this config repository, ~/.claude itself. Read by hooks/verification.py for edits under ~/.claude; the heading must be exactly `## Verification`. Other projects declare their own in their CLAUDE.md. -->
 - gate: `python -I tests/run_all.py`
 - ci: required

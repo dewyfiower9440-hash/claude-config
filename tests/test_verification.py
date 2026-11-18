@@ -102,18 +102,38 @@ shutil.rmtree(tmp, ignore_errors=True)
 # ---- attribution
 gate = DECLARED["gate"]
 check("gate exact -> passed", outcome(gate, DECLARED), "passed")
-check("gate then && echo -> passed", outcome(gate + " && echo ok", DECLARED), "passed")
+# devenv-final 10: the three forms below counted as passed before; a declared gate now
+# counts only alone (V-T1). `set -e` / pipefail still make a runner's status reach the end
+# where no gate is declared.
+check(
+    "gate then && echo -> unknown", outcome(gate + " && echo ok", DECLARED), "unknown"
+)
 check("gate | tail -> unknown", outcome(gate + " | tail -3", DECLARED), "unknown")
 check("gate ; echo -> unknown", outcome(gate + "; echo done", DECLARED), "unknown")
 check(
-    "set -e makes ; safe",
+    "set -e does not make a declared gate with ; after it count",
     outcome("set -e; " + gate + "; echo done", DECLARED),
+    "unknown",
+)
+check(
+    "set -euo pipefail does not make a declared gate with | after it count",
+    outcome("set -euo pipefail; " + gate + " | tail -3", DECLARED),
+    "unknown",
+)
+check(
+    "undeclared: set -e makes ; safe for a runner",
+    outcome("set -e; uv run pytest -q; echo done"),
     "passed",
 )
 check(
-    "set -euo pipefail makes | safe",
-    outcome("set -euo pipefail; " + gate + " | tail -3", DECLARED),
+    "undeclared: set -euo pipefail makes | safe for a runner",
+    outcome("set -euo pipefail; uv run pytest -q | tail -3"),
     "passed",
+)
+check(
+    "undeclared: without them ; and | mask a runner",
+    (outcome("uv run pytest -q; echo done"), outcome("uv run pytest -q | tail -3")),
+    ("unknown", "unknown"),
 )
 check("gate || true -> unknown", outcome(gate + " || true", DECLARED), "unknown")
 check("gate failed event -> failed", outcome(gate, DECLARED, failed=True), "failed")
@@ -139,6 +159,97 @@ check(
     "unparseable line containing gate -> unknown",
     outcome('echo "x && ' + gate, DECLARED),
     "unknown",
+)
+
+# ---- devenv-final 9/10: a declared gate counts only when the whole command line is the
+# gate, or a literal `cd <policy root> &&` and the gate. Each form below ran "the gate"
+# and reported success without the gate having decided the exit status.
+BYPASSES = [
+    ("true || gate", "true || " + gate, ROOT),
+    ("exit 0; gate", "exit 0; " + gate, ROOT),
+    ("gate &", gate + " &", ROOT),
+    ("trap ... EXIT; gate", "trap 'exit 0' EXIT; " + gate, ROOT),
+    ("a function named like a tool, then gate", "uv() { true; }; " + gate, ROOT),
+    ("export PATH=... && gate", "export PATH=/tmp/fake:$PATH && " + gate, ROOT),
+    ('cd "$VAR" && gate', 'cd "$VAR" && ' + gate, ROOT),
+    ("cd sub && gate", "cd sub && " + gate, ROOT),
+    ("gate from a folder below the root", gate, ROOT + "/pkg/sub"),
+    ("gate && echo", gate + " && echo ok", ROOT),
+    ("set -e; gate; echo", "set -e; " + gate + "; echo done", ROOT),
+    ("set -euo pipefail; gate | tail", "set -euo pipefail; " + gate + " | tail", ROOT),
+    ("cd root; gate (not &&)", f"cd {ROOT}; " + gate, "C:/other"),
+    ("cd root && cd root && gate", f"cd {ROOT} && cd {ROOT} && " + gate, "C:/other"),
+    ("cd -P root && gate", f"cd -P {ROOT} && " + gate, "C:/other"),
+]
+for label, line, where in BYPASSES:
+    check(f"V-T1 {label} -> unknown", outcome(line, DECLARED, cwd=where), "unknown")
+check(
+    "V-T1 ... and a failed event is still a failure, whatever the form",
+    outcome("true || " + gate, DECLARED, failed=True),
+    "failed",
+)
+ev = v.evaluate(
+    gate + " && echo ok", "bash", ROOT, DECLARED, failed=False, background=False
+)
+check(
+    "V-T1 the reason says what to run instead",
+    ev is not None and gate in ev["why"] and "cd " in ev["why"],
+    True,
+)
+for label, declared in (
+    ("stages joined by ;", "uv run ruff check .; uv run pytest -q"),
+    ("stages joined by ||", "uv run ruff check . || uv run pytest -q"),
+    ("a stage piped", "uv run pytest -q | tee log.txt"),
+):
+    staged = {"root": ROOT, "gate": declared, "ci": "none", "validate": None}
+    check(
+        f"V-T2 a declared gate with {label}, run as declared -> unknown",
+        outcome(declared, staged),
+        "unknown",
+    )
+check(
+    "V-T3 the two forms that count: the gate alone at the root; a literal cd to the root",
+    (
+        outcome(gate, DECLARED),
+        outcome(f"cd {ROOT} && " + gate, DECLARED, cwd="C:/other"),
+        outcome('cd "C:/proj" && ' + gate, DECLARED, cwd=ROOT + "/pkg"),
+        outcome("cd /c/proj && " + gate, DECLARED, cwd="C:/other"),
+    ),
+    ("passed", "passed", "passed", "passed"),
+)
+check(
+    "V-T3 a heading that only starts with Verification declares nothing",
+    (
+        v.parse_policy("## Verification notes\n- gate: `true`\n", "C:/p"),
+        v.parse_policy("## Verification history\n- gate: `true`\n", "C:/p"),
+        v.parse_policy("##  Verification  \n- gate: `make t`\n", "C:/p")["gate"],
+    ),
+    (None, None, "make t"),
+)
+# Without a declared policy only a command that runs checks counts as a runner.
+for line in (
+    "pytest --version",
+    "uv run pytest --collect-only -q",
+    "pytest --co",
+    "python -m pytest --help",
+    "ruff check --exit-zero .",
+    "uvx ruff check . --exit-zero",
+    "pnpm build",
+    "npm run build",
+    "cargo build",
+    "tsc --showConfig",
+    "eslint --print-config x.js",
+):
+    check(f"V-T4 {line} is not a check -> None", outcome(line), None)
+check(
+    "V-T4 ... the runs themselves still count",
+    (
+        outcome("pytest -q"),
+        outcome("ruff check ."),
+        outcome("pnpm test"),
+        outcome("cargo test"),
+    ),
+    ("passed", "passed", "passed", "passed"),
 )
 
 # ---- runners when no policy is declared

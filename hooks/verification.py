@@ -41,8 +41,10 @@ class Evidence(TypedDict):
 
 
 UNDECLARED: Policy = {"root": "", "gate": None, "ci": "undeclared", "validate": None}
+# The heading is `## Verification` and nothing else: "## Verification notes" (or a history
+# section quoting an old gate) declares no policy.
 SECTION = re.compile(
-    r"^##\s+Verification\b[^\n]*\n(.*?)(?=^##\s|\Z)", re.MULTILINE | re.DOTALL
+    r"^##[ \t]+Verification[ \t]*\n(.*?)(?=^##\s|\Z)", re.MULTILINE | re.DOTALL
 )
 FIELD = re.compile(
     r"^\s*(?:[-*]\s+)?(gate|ci|validate|watch)\s*:\s*(.+?)\s*$", re.IGNORECASE
@@ -52,7 +54,14 @@ RUNNERS = {
     "pytest", "pyright", "mypy", "vitest", "jest", "mocha", "tsc", "eslint",
     "invoke-pester", "invoke-scriptanalyzer",
 }  # fmt: skip
-PACKAGE_SCRIPTS = re.compile(r"^(test|lint|typecheck|check|build)(:[\w-]+)?$")
+# A build is not a check (it says nothing about tests, lint or types).
+PACKAGE_SCRIPTS = re.compile(r"^(test|lint|typecheck|check)(:[\w-]+)?$")
+# Options with which a runner checks nothing (it prints something and exits 0) or reports
+# success whatever it found.
+NOT_A_RUN = {
+    "--version", "--help", "-h", "--collect-only", "--co", "--setup-plan", "--fixtures",
+    "--markers", "--exit-zero", "--showconfig", "--init", "--print-config", "--listtests",
+}  # fmt: skip
 
 
 # ---------------------------------------------------------------- policy (reads files)
@@ -121,6 +130,8 @@ def silent_on_failure(cmd: SimpleCommand) -> bool:
 def is_runner(cmd: SimpleCommand) -> bool:
     program, args = program_and_args(cmd)
     low = [a.lower() for a in args]
+    if NOT_A_RUN & set(low):
+        return False
     if program in RUNNERS:
         return True
     if program == "ruff":
@@ -145,7 +156,7 @@ def is_runner(cmd: SimpleCommand) -> bool:
         rest = low[1:] if low[:1] == ["run"] else low
         return bool(rest) and bool(PACKAGE_SCRIPTS.match(rest[0]))
     if program in ("cargo", "go", "dotnet"):
-        return bool(low) and low[0] in ("test", "check", "clippy", "vet", "build")
+        return bool(low) and low[0] in ("test", "check", "clippy", "vet")
     return False
 
 
@@ -231,6 +242,55 @@ def _inside(path: str, root: str) -> bool:
     return p == r or p.startswith(r.rstrip("\\/") + os.sep)
 
 
+CD = ("cd", "set-location", "sl", "pushd", "chdir")
+LITERAL_PATH = re.compile(r"^(?:~|\$HOME)?[^$`%*?~]*$")
+
+
+def _same(a: str, b: str) -> bool:
+    return os.path.normcase(os.path.normpath(a)) == os.path.normcase(
+        os.path.normpath(b)
+    )
+
+
+def gate_form(
+    cmds: list[SimpleCommand],
+    start: int,
+    length: int,
+    cwd: str,
+    root: str,
+    declared: str,
+) -> str | None:
+    """Why this command line is not a run of the declared check that can be trusted (None
+    when it is). The whole line must be the check, or one literal `cd <root> &&` and the
+    check, run at the policy's root: anything before it can decide what the words of the
+    check start (PATH, a function, a trap) or where, and anything after it, or an operator
+    other than `&&` inside it, can decide the exit status instead of the check."""
+    how = f"run the gate as declared and nothing else: `{declared}` at {root}, or `cd {root} && {declared}`"
+    before, after = cmds[:start], cmds[start + length :]
+    place = cwd
+    if before:
+        program, args = program_and_args(before[0])
+        literal = (
+            len(before) == 1
+            and before[0].op_after == "&&"
+            and program in CD
+            and len(args) == 1
+            and bool(LITERAL_PATH.match(args[0]))
+        )
+        if not literal:
+            return f"something runs before the gate ({how})"
+        place = _resolve(cwd, args[0])
+    if after:
+        return f"something runs after the gate ({how})"
+    if cmds[-1].op_after:
+        return f"the gate does not end the command line ({how})"
+    if any(c.op_after != "&&" for c in cmds[start:-1]):
+        return "the declared gate joins its stages with something other than &&: a failing stage does not fail it"
+    if not _same(place, root):
+        return f"not run at the policy's root ({how})"
+    return None
+
+
 def evaluate(
     command: str,
     dialect: Dialect,
@@ -254,7 +314,9 @@ def evaluate(
             }
         return None
 
-    def verdict(kind: str, index: int, start: int | None = None) -> Evidence:
+    def verdict(
+        kind: str, index: int, start: int | None = None, form: str | None = None
+    ) -> Evidence:
         silent = [
             c
             for c in cmds[index if start is None else start : index + 1]
@@ -281,6 +343,13 @@ def evaluate(
                 "cmd": command[:200],
                 "why": "ran in the background",
             }
+        if form:
+            return {
+                "outcome": "unknown",
+                "kind": kind,
+                "cmd": command[:200],
+                "why": form,
+            }
         if not attributable(cmds, index):
             return {
                 "outcome": "unknown",
@@ -300,7 +369,8 @@ def evaluate(
             continue
         k = _find_sequence(cmds, target)
         if k is not None and _inside(cwd_at(cmds, k, cwd), root):
-            return verdict(kind, k + len(target) - 1, start=k)
+            form = gate_form(cmds, k, len(target), cwd, root, declared)
+            return verdict(kind, k + len(target) - 1, start=k, form=form)
 
     for i, c in enumerate(cmds):
         if is_runner(c) and (not root or _inside(cwd_at(cmds, i, cwd), root)):
