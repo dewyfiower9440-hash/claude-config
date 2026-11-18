@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 task: devenv-final
 ---
 
@@ -91,6 +91,7 @@ task: devenv-final
 - `C:/dev/tools/docs/plans/**`
 - `C:/dev/memo-board/.mcp.json`
 - `C:/dev/memo-board/docs/plans/**`
+- `C:/Users/user/.claude/**` (운영본. Edit·Write나 셸로 고치지 않는다: `git -C ~/.claude merge --ff-only devenv-final`이 바꾸는 파일만 해당한다. 2026-11-18 추가: Stop hook이 병합으로 바뀐 운영본 파일 145개를 "범위 밖"으로 판정했다. 본문은 처음부터 병합을 적고 있었으나 이 목록에 경로가 없었다)
 
 (`~/.claude` 자체는 편집하지 않는다. 병합으로만 바뀐다. 준비 단계의 `~/.claude` 변경은 묶음 M의 이미 있는 변경을 커밋하는 것과 fix-m 계획의 체크·기록뿐이다.)
 
@@ -162,7 +163,7 @@ task: devenv-final
 - [ ] 34. `CLAUDE.md` 축약(목표 8KB 이하): 언어 규칙과 겹치는 문장 제거, hook 내부 동작 설명은 `hooks/retention.md`로 옮기고 포인터만 남김, warn 모드 문장과 도구 목록을 실제와 맞춤. `## Verification`과 Gotchas는 그대로. 지우거나 약해지는 규칙 후보는 적용하지 않고 목록으로 보고.
 - [x] 35. 계획 정리: done 계획을 `docs/plans/archive/`로 옮기고 `.gitignore` 허용 목록을 맞춘다(계획을 읽는 5곳이 최상위만 본다는 것을 테스트로 고정). 마스터는 "현재 상태 요약"으로 줄여 `done`. 미뤄진 항목 약 30건, 이 계획의 비목표, 미달 목표, 단계 16에서 미룬 가드 입력, pyright 오류 110건을 `docs/plans/2026-11-18-devenv-backlog.md`(`status: draft`)에 분류해 적는다. 80점 표를 다시 채점한다.
 - [x] 36. 스킬: `SKILLS.md` 갱신. 각 description에 쓰지 말아야 할 조건 한 구절. `/implement`와 `/deep-review`에서 "게이트는 주 세션이 포그라운드로 직접 실행한다. test-runner의 결과는 진단용이며 증거가 아니다"로 고치고, deep-review는 code-reviewer + security-auditor 2개 병렬 뒤 주 세션의 게이트로. `/plan`의 틀을 hook이 받는 형식(frontmatter의 `status`·`task`)과 맞추고 "세션은 그 저장소 루트에서 시작한다"를 승인 절에 적는다. `/commit`의 heredoc 문구를 `-F <file>`로. 새 skill 하나: `release-hooks`(작업 트리 → 게이트 → bench 비교 → ff 병합 → push → CI, `SKILL.md`만).
-- [ ] 37. 에이전트: `test-runner`의 낡은 문장 정리, `code-reviewer`·`security-auditor`에 "확인용 실행은 `python -I -c` 또는 `%TEMP%` 아래 파일만" 명시. — 검증: 격리 시험 1회.
+- [x] 37. 에이전트: `test-runner`의 낡은 문장 정리, `code-reviewer`·`security-auditor`에 "확인용 실행은 `python -I -c` 또는 `%TEMP%` 아래 파일만" 명시. — 검증: 격리 시험 1회.
 - [x] 38. MCP·tools: `C:\dev\.claude\settings.local.json`의 allow 4개 삭제. `mcp_inventory.py`로 `mcp_tools.json` 갱신. `C:\dev\tools`: `is_read_only`가 문자열을 먼저 지우고 주석을 지우게(테스트 먼저, 4형태), 스캐폴드의 PowerShell 게이트(`-EnableExit; Invoke-Pester`)를 임시 프로젝트에서 실행해 린트 통과 시 Pester가 도는지·실패가 종료 코드에 나오는지 확인하고 틀리면 고친다, tools CI의 ruff 버전 고정, `github-mcp-server/VERSION`에 SHA256, `CLAUDE.md`에 inventory 갱신 절차 → 각 하위 프로젝트 게이트 → 커밋 → push → CI. `memo-board/.mcp.json`의 `--allow-write` 삭제 → 게이트 → 커밋 → push → CI. `C:\dev` 잔해 삭제(확인 뒤).
 - [ ] 39. **구간 6 마감**: 게이트 → 커밋 → main ff → push → CI.
 
@@ -171,9 +172,9 @@ task: devenv-final
 - [ ] 41. **구간 7 마감**: 게이트 → 커밋 → main ff → push → CI.
 
 ### 구간 8 — 종단 확인과 마감
-- [ ] 42. 종단 시험: `new_project.py`로 `C:\dev\_e2e-final`(python)을 만들고, headless 실행(`claude -p`, 작업 폴더는 그 프로젝트)으로 "계획 → 승인 없는 편집 시도 → 작은 기능 구현 → 게이트 → 커밋(push 없음) → 종료" 과제를 한 번 돌린다. hook 기록으로 확인: 세션 시작 주입, 가드, 범위 관측, 포매터, 게이트 판정, Stop 판정, 각 hook의 지연. 기대와 다른 것은 고치고 다시 한다. 끝나면 폴더를 지운다.
-- [ ] 43. 수용 기준 표: 리뷰의 재현 입력 전체를 운영본에 넣어 기록, subagent 격리 시험 1회, bench 최종값, 게이트·CI 최종 run id.
-- [ ] 44. 마감 기록: 구간별 커밋, 바뀐 기존 기대값 전체 목록, 미달 목표와 이유, 백로그, 사용자 할 일. `status: done`. 작업 트리는 다음 패치용으로 남긴다.
+- [x] 42. 종단 시험: `new_project.py`로 `C:\dev\_e2e-final`(python)을 만들고, headless 실행(`claude -p`, 작업 폴더는 그 프로젝트)으로 "계획 → 승인 없는 편집 시도 → 작은 기능 구현 → 게이트 → 커밋(push 없음) → 종료" 과제를 한 번 돌린다. hook 기록으로 확인: 세션 시작 주입, 가드, 범위 관측, 포매터, 게이트 판정, Stop 판정, 각 hook의 지연. 기대와 다른 것은 고치고 다시 한다. 끝나면 폴더를 지운다.
+- [x] 43. 수용 기준 표: 리뷰의 재현 입력 전체를 운영본에 넣어 기록, subagent 격리 시험 1회, bench 최종값, 게이트·CI 최종 run id.
+- [x] 44. 마감 기록: 구간별 커밋, 바뀐 기존 기대값 전체 목록, 미달 목표와 이유, 백로그, 사용자 할 일. `status: done`. 작업 트리는 다음 패치용으로 남긴다.
 
 ## 검증
 - 구간마다: `python -I tests/run_all.py`(작업 트리 루트, 포그라운드, exit 0) → main ff 뒤 push → CI 전 작업 green(run id 기록). 목표 상태: CI Verified.
@@ -283,3 +284,11 @@ task: devenv-final
   그리고 `planscope.py`의 머리말(38개 중 26개만 다시 import)을 사실대로 고쳤다. 전체 게이트 exit 0: `gate: 41 modules, 2178 checks, sum 2450s, wall 316s, workers 8`(가드가 `origin/main`과 달라 코퍼스 재생 포함).
   **고치지 않고 백로그로 보낸 것**(계획 밖의 가드 입력: 사용자 결정 2026-11-18; 모두 리뷰어가 가드를 직접 실행해 통과를 확인했다고 보고했고, 주 세션은 다시 재현하지 않았다 = **미확인**): 임시 폴더 전체를 훑는 명령(`grep -r x /tmp`, `Get-ChildItem -Recurse $env:TEMP`, `cd /tmp && cat claude-discipline/a`), 중괄호 전개(`cat ~/.claude/{discipline,x}/key`, `cat .{env,x}`), 짧은 글롭(`cat .e*`), PowerShell 와일드카드의 점 파일, 재귀 삭제의 남은 형태(`rm -rf *`, 따옴표로 묶은 `cmd /c "rd /s /q …"`, 파이프로 받는 `Remove-Item -Recurse`), 세션 폴더가 `~/.claude` 안일 때 빠지는 라이브 설정 쓰기 확인, read-only subagent에게 남은 쓰기 명령(`git checkout-index`, `ruff format .`, `uv sync` 등), 정상 명령의 오차단(`ls .env*`, `ls src/credentials*`), 깨진 payload에서 guard가 exit 0, 줄바꿈이나 `;`로 끝나는 게이트가 unknown, `--extend-ignore I001`과 RUF100, `tests/inproc.py`의 `sys.path` 차이, CI의 PSScriptAnalyzer 버전 미고정, v1 키 파일의 비원자적 쓰기 → 백로그 B-15. 문제 없음으로 본 것: `os.urandom` 교체(키 32바이트·CSPRNG 유지), 새 허용 규칙 10개(임의 실행 경로 없음; `python -I tests/run_all.py`는 `pytest:*`와 같은 급), 주입 인용, 액션 SHA(상류 태그와 일치).
 - 2026-11-18 **Stop hook 차단(사용자 결정 필요)**: "이번 턴의 변경 중 145개가 승인된 계획의 변경 범위 밖: .gitignore, CLAUDE.md, code-reviewer.md, security-auditor.md, test-runner.md". 작업 트리 안의 파일은 범위 `**`에 들어가므로 `merge --ff-only`로 바뀐 운영본(`C:\Users\user\.claude`)의 파일로 판단한다(**미확인**: hook 상태는 읽지 않았다). 계획 본문은 운영본이 병합으로만 바뀐다고 적었지만 `## 변경 범위`에 그 경로가 없다. 되돌리지 않았고, 이 뒤의 수정 커밋(리뷰 3건)은 **운영본에 병합하지 않고** 브랜치 `devenv-final`에만 두었다. 범위에 `C:/Users/user/.claude/**`를 더해 다시 승인받거나 사용자가 달리 정할 때까지 병합·push·`status: done`은 보류한다.
+- 2026-11-18 재승인: Stop hook이 같은 지적을 되풀이해, `## 변경 범위`에 `C:/Users/user/.claude/**`(병합이 바꾸는 파일만) 한 줄을 더해 ExitPlanMode로 다시 승인받았다. 리뷰 수정 3건의 게이트(커밋 `dc7d6ea`의 내용, 원형 그대로 실행): exit 0, `gate: 41 modules, 2178 checks, sum 2414s, wall 313s, workers 8`.
+- 2026-11-18 단계 44(마감 기록).
+  - **구간별 커밋**(태그 `pre-final-2026-11-18` 뒤): 구간 1 `7924003`까지(CI Verified, run 44234749277) · 구간 2 `901657c`까지(CI Verified, run 44244742849) · 구간 3 `42c2ac8`까지(CI Verified, run 44252531019) · 구간 4 `24048a0`(CI Verified, run 44256083119), `fa90718`, `5c93360`, `1888a1f`, `06f57bd`, `cce56bc`(CI 실패 run 44267474940: 테스트 출력 인코딩) · 구간 5 `f9ac4f8`, `17f1ffc`, `227258b` · 구간 6 `c3a34d4`, `746d8dc`, `5c0bfc9` · 구간 7 `99bd950` · 구간 8 `a63be2e`, 리뷰 수정 `5a5b6fc`, `9c605f7`, `dc7d6ea`, 그리고 이 마감 커밋. 다른 저장소: dev-tools `7b8fbff`, `7afd668`; memo-board `cf9ed48`.
+  - **도달 상태**: 구간 1~3과 단계 23(a)(b)는 CI Verified. `fa90718` 이후는 **Locally Verified**(마지막 게이트 2178 checks)이고 CI는 계정의 Actions 문제로 시작되지 않았다(run 44274768513, 44281868140, 44289558473 외).
+  - **바뀐 기존 기대값 전체**: `test_run_all` gate 줄 정규식 2곳(단계 3) · `test_verification`의 `gate && echo`·`set -e; gate; echo`·`set -euo pipefail; gate | tail` passed → unknown(단계 10) · `test_format_lint` F-T3 미사용 import 삭제 → 남기고 보고(단계 25), S-T12 hook 시간 한도(단계 25) · `test_review_binding` V-T10 증인 격리(단계 23) · v1 테스트의 `plan_task` 규칙(단계 23) · `test_docs_consistency` D10 목록(단계 40) · hook이 import를 정렬하던 동작 → 정렬하지 않음(단계 42, 새 사례 F-T10). 그 밖의 사례는 추가뿐이다.
+  - **미달 목표와 이유**: `CLAUDE.md` 8KB(15.8KB; 규칙을 지우지 않고는 불가: 단계 34) · `discipline.py` 분할(1/7 이음매, 225KB; 순환 의존: 단계 40) · hook 지연 30%(pre −20%: 단계 30) · CI 5분(측정 불가) · CI Verified(구간 4 후반 이후).
+  - **체크하지 않은 단계**: 28·33·39·41(마감 기준의 CI 확인 불가), 34, 40. 남은 일은 모두 `docs/plans/2026-11-18-devenv-backlog.md`에 있다(A: 사용자 조치, B-1·B-13·B-15 등). 이 계획은 여기서 닫는다(`status: done`): 남은 것은 새 계획으로 한다.
+  - **사용자 할 일**: GitHub Billing & plans 확인 뒤 마지막 run 재실행 · 백로그 B-15(가드의 남은 입력)의 우선순위 · `CLAUDE.md` 축약 후보 결정 · enforce 전환 시점 · `/doctor`·`/context`·`/skill-doctor` 확인 · `C:\dev\_iso_trial` 처리. 작업 트리 `C:\dev\_wt\claude-config`는 다음 패치용으로 남긴다(`/release-hooks`).
