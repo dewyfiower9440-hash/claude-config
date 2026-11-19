@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 task: devenv-v1-1-closeout
 ---
 
@@ -28,8 +28,8 @@ v1.1(`docs/plans/2026-11-19-devenv-v1-1.md`, done)은 CI Verified(run 4456477882
 - [x] 1. Skill의 PostToolUse 실측 — 임시 저장소 `C:\dev\_e2e-v11b`(git init, CLAUDE.md에 `gate: \`python -I -c "print(1)"\``, `ci: none`)에 `.py` 3개를 쓰고 `git add`를 따로 실행한 뒤, Skill 도구로 `commit` 스킬을 호출하고 같은 턴에 `git commit`을 실행한다. 기대: 거부 없음, PostToolUse 알림에 code-reviewer 문구가 있고 `/commit` 안내는 없음(= Skill 기록이 남았다는 관측 증거). 반대로 거부되고 `/commit` 안내가 나오면 Skill PostToolUse가 오지 않는 것이다 → 아래 "멈춤 조건".
 - [x] 2. 재시도 커밋 실측 — 같은 저장소에서 내용을 새로 바꿔 `git add`(따로) → Skill 없이 `git commit` → 1회 거부 확인 → 같은 명령 재실행 → `git log`에 그 커밋이 생겼는지 확인. 그 뒤 선언한 게이트를 실행하고 저장소를 삭제한다.
 - [x] 3. 문서 반영 — `docs/guides/release-v1.1.md` §3·§5(실측 결과, 태그 위치), `docs/plans/2026-11-19-devenv-v1-1.md` 진행 기록에 한 줄, 이 계획 파일 진행 기록. 검증: `python -I tests/run_all.py` GATE PASSED.
-- [ ] 4. 릴리스 — 커밋 → 게이트 → `git -C ~/.claude merge --ff-only devenv-final` → push main → CI run을 끝까지 확인(green이어야 함).
-- [ ] 5. 태그 — `git -C ~/.claude tag -a v1.1-pre bd2365f` push, 그 뒤 `git -C ~/.claude tag -f -a v1.1 <4의 커밋>` → `git push --force origin refs/tags/v1.1`. 검증: `git ls-remote --tags origin`에서 `v1.1^{}`이 4의 커밋, `v1.1-pre^{}`이 bd2365f; 그 커밋의 CI run이 success.
+- [x] 4. 릴리스 — 커밋 → 게이트 → `git -C ~/.claude merge --ff-only devenv-final` → push main → CI run을 끝까지 확인(green이어야 함).
+- [x] 5. 태그 — `git -C ~/.claude tag -a v1.1-pre bd2365f` push, 그 뒤 `git -C ~/.claude tag -f -a v1.1 <4의 커밋>` → `git push --force origin refs/tags/v1.1`. 검증: `git ls-remote --tags origin`에서 `v1.1^{}`이 4의 커밋, `v1.1-pre^{}`이 bd2365f; 그 커밋의 CI run이 success.
 
 ## 멈춤 조건
 - 1에서 Skill PostToolUse가 오지 않으면: 문서의 "미확인"을 "실측: 오지 않음"으로 바꾸고, 강등·/plan 알림 로직의 수정(예: PreToolUse에서 Skill을 기록)은 별도 계획으로 남긴 채 보고한다(설계 결정이 필요).
@@ -47,3 +47,5 @@ v1.1(`docs/plans/2026-11-19-devenv-v1-1.md`, done)은 CI Verified(run 4456477882
 - 2026-11-20 단계 1: Skill 도구로 commit 스킬 호출 → 같은 턴 `git commit`(3파일, 따로 `git add`) → 거부 없음, PostToolUse 알림 "방금 커밋한 C:\dev\_e2e-v11b의 변경은 리뷰 기준(코드 파일 3개)에 해당 … (알림이며 차단이 아닙니다.)"에 `/commit` 안내 없음 → Skill PostToolUse 발생·기록 확인. 커밋 0f96a8f — 계획대로.
 - 2026-11-20 단계 2: 계획과 다른 점: 이 턴에 이미 Skill(commit) 기록이 있어 거부가 생기지 않으므로, 운영 hook 스크립트(`~/.claude/hooks/discipline.py`)를 새 세션 id로 직접 구동(상태는 scratchpad의 격리 폴더). 결과: 1차 pre deny("커밋 전 독립 리뷰가 없습니다 … missing"), 2차 pre 결정 없음(허용), 실제 git 커밋 0f96a8f→c767393 생성. 선언 게이트 `python -I -c "print(1)"` 통과 뒤 `C:\dev\_e2e-v11b` 삭제.
 - 2026-11-20 단계 3: release-v1.1.md(태그 위치와 bd2365f가 green이 될 수 없는 근거, 실측 2행, 알려진 한계에서 Skill 미확인 삭제·`/이름` 직접 입력은 hook을 거치지 않음 추가), v1.1 계획 진행 기록 한 줄 — 게이트 GATE PASSED(43 모듈, 2502 검사). 계획대로.
+- 2026-11-20 단계 4: c72dc04 커밋 → 게이트 GATE PASSED → `merge --ff-only` → push main → CI run 44572290207 success — 계획대로.
+- 2026-11-20 단계 5: `v1.1-pre`(bd2365f) push, `v1.1`을 c72dc04로 옮김. 원격 force push는 가드가 Claude를 막아 사용자가 자기 터미널에서 실행(03ba4b4→f4d9658). `ls-remote`: `v1.1^{}` c72dc04, `v1.1-pre^{}` bd2365f — 계획과 다른 점: force push 실행 주체만 사용자.
