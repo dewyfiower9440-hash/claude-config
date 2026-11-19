@@ -934,6 +934,35 @@ B15_CASES: list[tuple[str, tuple[str, dict], str | None, str, str]] = [
     ("B15-R10 $env:HOMEDRIVE$env:HOMEPATH", ps("Get-Content $env:HOMEDRIVE$env:HOMEPATH\\.claude\\state\\x.json"), None, ELSEWHERE, "deny"),
     ("B15-R10 $env:HOMEDRIVE$env:HOMEPATH, discipline", ps("Get-Content $env:HOMEDRIVE$env:HOMEPATH\\.claude\\discipline\\key"), None, ELSEWHERE, "deny"),
     ("B15-R10 another folder behind a variable", sh("cat /c/Users/$USER/.claude/hooks/guard.py"), None, ELSEWHERE, "allow"),
+    # B15-R2 a brace sequence `{e..e}` expands too
+    ("B15-R2 {e..e} in a protected name", sh("cat ~/.claude/disciplin{e..e}/k.txt"), None, ELSEWHERE, "deny"),
+    ("B15-R2 {a..a} in a protected name", sh("cat ~/.claude/st{a..a}te/x.json"), None, ELSEWHERE, "deny"),
+    ("B15-R2 {d..d} first", sh("cat ~/.claude/{d..d}iscipline/key"), None, ELSEWHERE, "deny"),
+    ("B15-R2 a numeric sequence elsewhere", sh("echo {1..3}"), None, ELSEWHERE, "allow"),
+    ("B15-R2 a letter sequence over ordinary files", sh("cat f{a..c}.txt"), None, ELSEWHERE, "allow"),
+    # B15-R5/R6 Git Bash spells cmd's switch `//c` (MSYS turns `/c` into C:\); `del /s`
+    ("B15-R5 cmd //c rd", sh('cmd //c "rd /s /q C:\\dev"'), None, ELSEWHERE, "deny"),
+    ("B15-R5 cmd //c rd, words", sh("cmd //c rd /s /q C:/dev"), None, ELSEWHERE, "deny"),
+    ("B15-R5 cmd //c dir", sh("cmd //c dir C:/dev"), None, ELSEWHERE, "allow"),
+    ("B15-R6 del /s over the projects folder", ps('cmd /c "del /s /q C:\\dev\\*"'), None, ELSEWHERE, "deny"),
+    ("B15-R6 del /s from Bash", sh('cmd //c "del /s /q C:\\dev"'), None, ELSEWHERE, "deny"),
+    ("B15-R6 erase /s over the home", ps("cmd /c erase /s /q %USERPROFILE%"), None, ELSEWHERE, "deny"),
+    ("B15-R6 del /s of a build folder", ps('cmd /c "del /s /q C:\\dev\\app\\build\\*"'), None, ELSEWHERE, "allow"),
+    ("B15-R6 del without /s", ps('cmd /c "del /q C:\\dev\\x.txt"'), None, ELSEWHERE, "allow"),
+    # B15-R7 every tail that empties a folder, not only `X/*`
+    ("B15-R7 X/*/*", sh("rm -rf C:/dev/*/*"), None, ELSEWHERE, "deny"),
+    ("B15-R7 X/*/", sh("rm -rf C:/dev/*/"), None, ELSEWHERE, "deny"),
+    ("B15-R7 ~/*/", sh("rm -rf ~/*/"), None, ELSEWHERE, "deny"),
+    ("B15-R7 ~/.*", sh("rm -rf ~/.*"), None, ELSEWHERE, "deny"),
+    ("B15-R7 ~/?*", sh("rm -rf ~/?*"), None, ELSEWHERE, "deny"),
+    ("B15-R7 ~/*?", sh("rm -rf ~/*?"), None, ELSEWHERE, "deny"),
+    ("B15-R7 a pattern below a project", sh("rm -rf C:/dev/app/build/*/*"), None, ELSEWHERE, "allow"),
+    ("B15-R7 a named folder pattern", sh("rm -rf C:/dev/app/dist-*"), None, ELSEWHERE, "allow"),
+    # B15-R8 a pipeline with stages between the lister and the delete, or a subexpression
+    ("B15-R8 Sort-Object between", ps("Get-ChildItem C:\\dev | Sort-Object | Remove-Item -Recurse -Force"), None, ELSEWHERE, "deny"),
+    ("B15-R8 Where-Object between", ps("gci C:\\dev | ? { $_ } | ri -r -fo"), None, ELSEWHERE, "deny"),
+    ("B15-R8 a subexpression", ps("Remove-Item -Recurse -Force (gci C:\\dev)"), None, ELSEWHERE, "deny"),
+    ("B15-R8 a pipeline below a project", ps("gci .\\dist | sort | ri -r -fo"), None, ELSEWHERE, "allow"),
 ]  # fmt: skip
 # the pure helpers of guard-b15, called in process
 import importlib.util

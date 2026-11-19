@@ -13,7 +13,12 @@ import json
 import os
 import re
 import sys
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from shellparse import SimpleCommand
 
 # python -I drops the script dir; os.path instead of pathlib keeps this hook's startup fast
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -526,7 +531,8 @@ def nested_scripts(program: str, args: list[str]) -> list[tuple[str, Dialect]]:
         return []
     if program == "cmd":
         for j, a in enumerate(args):
-            if a.lower() in ("/c", "/k"):
+            # `//c` is how Git Bash spells it (MSYS turns a lone `/c` into C:\)
+            if a.lower() in ("/c", "/k", "//c", "//k"):
                 # guard-b15 4: read as PowerShell, which is nearer to cmd (a backslash is
                 # not an escape, `/s` stays a switch); as Bash, `rd /s /q C:\dev` lost the
                 # backslash and named no folder the guard knew
@@ -806,40 +812,65 @@ def _env_value(m: re.Match[str]) -> str:
 BRACE_LIMIT = 64
 
 
-def _first_brace(word: str) -> tuple[int, list[int], int] | None:
-    """(start, top-level comma positions, end) of the leftmost `{a,b}` in `word` that has a
-    comma at its own level, braces inside it left as they are; None when there is none."""
-    start = word.find("{")
-    while start != -1:
-        depth, commas = 0, []
-        for i in range(start, len(word)):
-            c = word[i]
-            if c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
-                    if commas:
-                        return start, commas, i
-                    break
-            elif c == "," and depth == 1:
-                commas.append(i)
-        start = word.find("{", start + 1)
-    return None
+_SEQUENCE = re.compile(r"^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])$")
+
+
+def _sequence(body: str, limit: int) -> list[str] | None:
+    """The words of a Bash sequence `x..y` (`{1..3}`, `{a..c}`, `{e..e}`), at most `limit`."""
+    m = _SEQUENCE.match(body)
+    if not m:
+        return None
+    lo, hi = m.group(1), m.group(2)
+    if lo.lstrip("-").isdigit() != hi.lstrip("-").isdigit():
+        return None
+    if lo.lstrip("-").isdigit():
+        a, b = int(lo), int(hi)
+        step = 1 if a <= b else -1
+        return [str(n) for n in itertools.islice(range(a, b + step, step), limit)]
+    a, b = ord(lo), ord(hi)
+    step = 1 if a <= b else -1
+    return [chr(n) for n in itertools.islice(range(a, b + step, step), limit)]
+
+
+def _first_brace(word: str, limit: int) -> tuple[int, list[str], int] | None:
+    """(start, alternatives, end) of the leftmost brace Bash expands in `word`: `{a,b}`
+    with a comma at its own level, or a sequence `{x..y}`; braces inside it are left as
+    they are. One pass over the word (the closing review timed the earlier rescans at
+    O(n^2) on a word of two thousand braces)."""
+    stack: list[tuple[int, list[int]]] = []
+    best: tuple[int, list[str], int] | None = None
+    for i, c in enumerate(word):
+        if c == "{":
+            stack.append((i, []))
+        elif c == "," and stack:
+            stack[-1][1].append(i)
+        elif c == "}" and stack:
+            start, commas = stack.pop()
+            if best is not None and best[0] < start:
+                continue  # a brace further left already expands
+            if commas:
+                bounds = [start, *commas, i]
+                alts = [word[a + 1 : b] for a, b in itertools.pairwise(bounds)]
+            else:
+                found = _sequence(word[start + 1 : i], limit)
+                if found is None:
+                    continue  # `{x}`: literal, as in Bash
+                alts = found
+            best = (start, alts, i)
+    return best
 
 
 def brace_alternatives(word: str, limit: int = BRACE_LIMIT) -> list[str]:
     """The words Bash makes of `word` by brace expansion (the word itself when it has no
-    `{a,b}`), at most `limit` of them: the leftmost brace first, each alternative then
-    expanded in turn (`{a,b{1,2}}` -> a, b1, b2)."""
-    found = _first_brace(word)
+    `{a,b}` or `{x..y}`), at most `limit` of them: the leftmost brace first, each
+    alternative then expanded in turn (`{a,b{1,2}}` -> a, b1, b2)."""
+    found = _first_brace(word, limit)
     if found is None:
         return [word]
-    start, commas, end = found
+    start, alts, end = found
     out: list[str] = []
-    bounds = [start, *commas, end]
-    for a, b in itertools.pairwise(bounds):
-        rest = word[:start] + word[a + 1 : b] + word[end + 1 :]
+    for alt in alts:
+        rest = word[:start] + alt + word[end + 1 :]
         for expanded in brace_alternatives(rest, limit):
             out.append(expanded)
             if len(out) >= limit:
@@ -1185,6 +1216,40 @@ DELETE_REASON = (
 
 
 PS_LISTERS = {"get-childitem", "gci", "ls", "dir", "get-item", "gi"}
+# PowerShell stages that pass the lister's objects on unchanged in kind (closing review:
+# `gci X | Sort-Object | Remove-Item -Recurse` passed because only the stage just before
+# the delete was looked at)
+PS_PASSTHROUGH = {
+    "sort-object", "sort", "where-object", "where", "?", "select-object", "select",
+    "foreach-object", "foreach", "%", "tee-object", "tee", "out-null",
+}  # fmt: skip
+
+
+def _feeder(
+    commands: Sequence[SimpleCommand], index: int
+) -> tuple[str, list[str]] | None:
+    """The command whose output reaches commands[index] through the pipe, looking back past
+    pass-through stages; None when nothing is piped in."""
+    from shellparse import program_and_args
+
+    j = index - 1
+    if j >= 0 and commands[j].nested:
+        # `Remove-Item -Recurse (gci X)`: the subexpression is the argument, parsed just
+        # before the command it belongs to
+        program, args = program_and_args(commands[j])
+        if program in PS_LISTERS:
+            return program, args
+    while j >= 0:
+        if commands[j].nested:
+            j -= 1  # a script block inside a stage (`? { $_ }`): part of that stage
+            continue
+        if commands[j].op_after != "|":
+            return None
+        program, args = program_and_args(commands[j])
+        if program not in PS_PASSTHROUGH:
+            return program, args
+        j -= 1
+    return None
 
 
 def _delete_targets(
@@ -1196,10 +1261,12 @@ def _delete_targets(
     """The words a recursive delete names ([] when the command is not one). `fed_by` is the
     command piped into this one: `Get-ChildItem X | Remove-Item -Recurse` empties X."""
     low = [a.lower() for a in args]
-    if program == "cmd" and "/c" in low:  # cmd /c rd /s /q X
-        rest = args[low.index("/c") + 1 :]
+    switch = next((s for s in ("/c", "//c", "/k", "//k") if s in low), None)
+    if program == "cmd" and switch:  # cmd /c rd /s /q X; Git Bash spells it cmd //c
+        rest = args[low.index(switch) + 1 :]
         return _delete_targets(_basename(rest[0]), rest[1:], dialect) if rest else []
-    if program in ("rd", "rmdir") and "/s" in low:
+    if program in ("rd", "rmdir", "del", "erase") and "/s" in low:
+        # rd /s removes the tree; del /s removes every file below (the folders stay)
         return [a for a in args if not re.fullmatch(r"/[A-Za-z]", a)]
     if dialect == "powershell" and program in (
         "remove-item", "ri", "rm", "rmdir", "rd", "del", "erase",
@@ -1236,9 +1303,16 @@ def check_recursive_delete(
         for target in _delete_targets(program, args, dialect, fed_by)
         for w in _words(target, dialect, cwd)
     ):
-        text = re.sub(r"[\\/]\*+$", "", word.strip("'\"")) or word  # X/* empties X
-        if re.fullmatch(r"\.?[\\/]?\*+[\\/]?", text):
-            text = "."  # `*`, `./*`: everything in the current folder
+        text = word.strip("'\"")
+        # `X/*`, `X/*/*`, `X/*/`, `X/.*`, `X/?*` all empty X (closing review: only one
+        # trailing `*` was stripped): every trailing segment made of pattern characters goes
+        while True:
+            shorter = re.sub(r"[\\/][*?.]*[*?][*?.]*[\\/]?$", "", text)
+            if shorter == text:
+                break
+            text = shorter
+        if not text or re.fullmatch(r"\.?[\\/]?[*?.]*[*?][*?.]*[\\/]?", text):
+            text = "."  # `*`, `./*`, `.*`: everything in the current folder
         text = _CWD_FORM.sub(lambda _m: cwd, text)
         text = _HOME_FORM.sub(lambda _m: HOME_DIR, text)
         if re.search(r"[$%`*?\[]", text):
@@ -1484,11 +1558,7 @@ def check_parsed(
                     )
         if program == "git" and git_names_only(cmd, args):
             data = set(range(len(args)))  # names a file, cannot print it
-        fed_by = (
-            program_and_args(commands[index - 1])
-            if index and commands[index - 1].op_after == "|"
-            else None
-        )
+        fed_by = _feeder(commands, index)
         check_isolation(program, args, dialect, here, data, fed_by)
         for k, arg in enumerate(args):
             if k in data or program in LISTING_PROGRAMS:
