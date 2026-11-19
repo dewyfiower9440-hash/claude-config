@@ -2,7 +2,7 @@
 
 v1.1은 세션이 서브에이전트·스킬·MCP를 **실제로 쓰도록** hook이 그 행동이 일어나는 순간에 알리거나 한 번 막게 한 패치다. 규칙 문서만으로는 호출이 일어나지 않는다는 것이 확인됐기 때문이다. 2026-11-19 프로젝트 세션(5시간, 도구 호출 596회, 파일 87개, 커밋 3건)에서 서브에이전트·스킬 호출은 0회, MCP는 2회였다.
 
-- 태그: `v1.1`은 커밋 `bd2365f`를 가리킨다(훅 코드 기준). 운영 main은 그 뒤 문서·CI 설정 커밋을 더 담고 있으며 훅 코드는 같다.
+- 태그: `v1.1`은 CI가 통과한 마무리 커밋을 가리킨다(`docs/plans/2026-11-20-devenv-v1-1-closeout.md`, 2026-11-20에 옮김). 처음 붙였던 `bd2365f`는 `v1.1-pre`로 남겼다. `bd2365f`는 CI가 green이 될 수 없다: 그 커밋의 workflow에는 `~/.claude/hooks` 폴더 단계가 없고, 같은 훅·테스트인 `6b156ab`의 run 44551185583(attempt 2)이 가드 검사 4개로 실패했다. 두 커밋 사이에 훅 코드(`hooks/`, `settings.json`)는 바뀌지 않았다.
 - 계획과 진행 기록: `docs/plans/2026-11-19-devenv-v1-1.md`(status: done)
 - 이전 버전: `v1.0`(`6a423d2`), 기록은 `docs/plans/2026-11-19-v1-release.md`
 
@@ -35,7 +35,8 @@ v1.1은 세션이 서브에이전트·스킬·MCP를 **실제로 쓰도록** hoo
 | CI | run 44559313607 성공(커밋 `f9a72c7`, windows-latest, 43 모듈·2503 검사; 로컬보다 1개 많은 것은 CI 출력에 그대로 적힌 수): **CI Verified** |
 | 훅 지연(p50) | 느려지지 않음. 다만 측정 환경 차이가 크다: v1.0 기준선 `2026-11-19-guard-b15-final.json`은 Python 3.14.2, `2026-11-19-v1-1.json`은 3.13.5로 쟀고, 바뀌지 않은 guard도 191→131ms로 나왔다. 같은 3.13.5로 잰 `2026-11-18-final-step30.json`과는 guard 121→131ms, pre 328→320ms, post 504→495ms(릴리스 기준인 +20% 안). 차이는 측정 잡음 범위로 보며, 빨라졌다는 뜻이 아니다 |
 | 승인 공격·정상 corpus | 종전과 같음(A7·A8은 enforce에서만 통과하는 사례) |
-| 실측 | 임시 프로젝트에서 리뷰 없는 3파일 커밋이 1회 거부되고, 다시 실행하면 훅이 통과시킴 |
+| 실측: 커밋 거부와 재시도 | 임시 프로젝트에서 리뷰 없는 3파일 커밋이 1회 거부되고, 다시 실행하면 통과해 git이 실제로 커밋을 만듦(0f96a8f→c767393, 2026-11-20). 재시도 부분은 운영 hook 스크립트를 새 세션 id로 직접 구동해 확인했다(같은 턴에 이미 `Skill(commit)` 기록이 있어 그 턴에서는 거부가 알림으로 바뀌기 때문) |
+| 실측: Skill의 PostToolUse | 발생한다. Skill 도구로 `commit`을 부른 턴에서 `git commit`이 거부되지 않고, 커밋 뒤 알림에 code-reviewer 문구만 있고 `/commit` 안내는 없었다(= hook이 그 턴의 Skill 호출을 기록함, 2026-11-20) |
 | 리뷰 | code-reviewer(1차 fix first → 수정 → 2차 ship), security-auditor(low만) |
 
 새 테스트: `tests/test_usage_state.py`, `tests/test_commit_review.py`; 확장: `test_output_size`, `test_approvals_store`, `test_approvals_v2`, `test_shellwrites`.
@@ -51,7 +52,7 @@ v1.1은 세션이 서브에이전트·스킬·MCP를 **실제로 쓰도록** hoo
 - `Skill(commit)`을 같은 턴에 부르기만 해도 거부가 알림으로 바뀐다(`/commit` 스킬 체크리스트에는 리뷰 단계가 없다).
 - PowerShell에서 `git -C /c/...`를 Git Bash식으로 해석한다.
 - 가드의 패턴 판정은 `~/.claude`가 디스크에 있어야 막는다(실제 PC에는 항상 있다).
-- Skill 도구가 PostToolUse를 발생시키는지는 실측하지 않았다(미확인). 공식 문서는 PreToolUse만 명시한다.
+- 사용자가 `/스킬이름`을 직접 입력해 실행한 스킬은 hook을 거치지 않는다(공식 문서). 그 턴에는 스킬 기록이 없어 `/plan` 알림이 나올 수 있다.
 - MCP 호출마다 post hook이 돈다. MCP 호출의 지연은 따로 재지 않았다.
 - `CLAUDE.md`가 100줄 한도에 닿아 Gotchas를 더할 수 없다(백로그 B-1).
 
