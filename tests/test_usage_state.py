@@ -323,6 +323,24 @@ rc, out = post(
     content="n",
 )
 check("U-T25b not a markdown file: no hint", said(out), "")
+hook("prompt", s, prompt_id="p5", prompt="next")
+post(s, "ExitPlanMode", prompt_id="p5")
+rc, out = post(s, "Write", prompt_id="p5", file_path=str(plan_file), content="# z\n")
+check(
+    "U-T25c (review finding 6) the approved plan saved in the turn of its ExitPlanMode: no hint",
+    said(out),
+    "",
+)
+check(
+    "U-T25d (review finding 7) a context7 server under another name counts as context7",
+    [
+        disc.context7_used({"mcp": {"plugin_context7_context7": {"count": 1}}}),
+        disc.context7_used({"mcp": {"claude_ai_Context7": {"count": 1}}}),
+        disc.context7_used({"mcp": {"github": {"count": 1}}}),
+        disc.context7_used({"mcp": []}),
+    ],
+    [True, True, False, False],
+)
 
 # ---------------------------------------------------------------- settings.json wiring
 settings = json.loads((HERE.parent / "settings.json").read_text(encoding="utf-8"))

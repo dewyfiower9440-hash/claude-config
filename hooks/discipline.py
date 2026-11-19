@@ -1035,7 +1035,9 @@ def commit_commands(command: object, dialect: str, cwd: str) -> list[str]:
         globals_ = args[: len(args) - len(sub)]
         for j, a in enumerate(globals_):
             if a == "-C" and j + 1 < len(globals_):
-                where = os.path.join(where, globals_[j + 1])
+                # as the shell hands it to git: /c/dev, ~ and relative paths (review
+                # finding 1: a Git Bash path used to miss every project)
+                where = resolve_dir(where, globals_[j + 1])
         out.append(where)
     return out
 
@@ -1180,7 +1182,7 @@ def note_dependency_add(data: dict[str, Any], state: dict[str, Any]) -> None:
     context7 lookup gets the hint, once per turn."""
     if actor(data) != "main" or state.get("dep_advice_turn") == state.get("turn"):
         return
-    if "context7" in (state.get("mcp") or {}):
+    if context7_used(state):
         return
     dialect = "powershell" if data.get("tool_name") == "PowerShell" else "bash"
     try:
@@ -1199,8 +1201,26 @@ def note_plan_by_hand(data: dict[str, Any], state: dict[str, Any], path: str) ->
         return
     if not PLAN_DIR.search(path) or skill_used_this_turn(state, "plan", "implement"):
         return
+    if state.get("plan_approved_turn") == state.get("turn") or state.get("approval"):
+        # review finding 6: the approved plan saved in its own turn, or a plan worked
+        # under an approval (checkboxes, the progress log) is the prescribed flow
+        return
     state["plan_advice_turn"] = state.get("turn") or 0
     add_post_note(PLAN_BY_HAND_NOTE)
+
+
+def context7_used(state: Mapping[str, Any]) -> bool:
+    """Whether the session called a context7 server under any name it is connected by
+    (`context7`, `plugin_context7_context7`, `claude_ai_Context7`; review finding 7)."""
+    seen = state.get("mcp")
+    return isinstance(seen, dict) and any("context7" in str(s).lower() for s in seen)
+
+
+def resolve_dir(cwd: str, target: str) -> str:
+    """A directory argument as the shell hands it over (verification's reading of `cd`)."""
+    from verification import _resolve
+
+    return _resolve(cwd, target)
 
 
 # ---------------------------------------------------------------- PostToolUse notes
@@ -1758,6 +1778,7 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
             state["last_review"] = now  # a review, not verification
         note_launched_agent(data, state)
     elif tool == "ExitPlanMode":
+        state["plan_approved_turn"] = state.get("turn") or 0
         # PostToolUse only fires once the user approved the plan.
         changed = keep_covered_changes(data, state)
         record_approval(data, state)
@@ -4906,6 +4927,8 @@ def main() -> None:
     except Exception:  # outermost boundary: even the failure handling failed
         log.exception("discipline.hook_boundary_failure")
         hard_block(mode, data, REASON_HOOK_ERROR.format(why="오류 처리 중 오류"))
+    if mode == "post":
+        flush_post_notes()  # what on_post did not print (it never ran, or failed early)
     if formatted and formatted[1]:
         sys.exit(2)  # lint problems the formatter left: its report is on stderr
 
@@ -4928,8 +4951,11 @@ def format_first(mode: str, data: dict[str, Any]) -> tuple[bool, list[str]] | No
         import format_lint
 
         result = format_lint.process(data)
-        # this hook prints nothing else on stdout for an edit, so the note is its output
-        format_lint.report(result[0], result[1], data, as_json=True)
+        # v1.1 (review finding 5): the note joins the other PostToolUse notes, so the hook
+        # still writes one JSON object; the lint problems go to stderr as before
+        if result[0]:
+            add_post_note(format_lint.changed_note(data))
+        format_lint.report(False, result[1], data)
     except Exception:  # hook boundary: the formatter is a convenience, not a gate
         log.exception("discipline.format_failed")
         result = None

@@ -90,6 +90,20 @@ check(
     ],
     [[TOP], [SUB], [SUB], [], [], [], [], [TOP], [], []],
 )
+HOME_DIR = os.path.normcase(os.path.normpath(os.path.expanduser("~/proj")))
+check(
+    "C-T1b (review finding 1) `git -C` takes a Git Bash path, ~ and an absolute path as the shell does",
+    [
+        norm(commits("git -C /c/dev/x commit -m y", "bash", HERE_CWD)),
+        norm(commits("git -C ~/proj commit -m y", "bash", HERE_CWD)),
+        norm(commits("git -C D:/w commit -m y", "bash", HERE_CWD)),
+    ],
+    [
+        [os.path.normcase(os.path.normpath("C:/dev/x"))],
+        [HOME_DIR],
+        [os.path.normcase(os.path.normpath("D:/w"))],
+    ],
+)
 check(
     "C-T2 the mode: unset and junk are block; notify and off are themselves",
     [mode_of(None), mode_of("notify"), mode_of("OFF"), mode_of("x"), mode_of("")],
