@@ -1296,13 +1296,10 @@ def check_isolation(
             path = as_path(tok, cwd, program in FILE_PROGRAMS) if tok else None
             if path and in_protected(path):
                 block(PROTECTED_REASON.format(path=tok))
-            # a variable the guard cannot expand, in front of the state folder's name
-            if (
-                tok
-                and path is None
-                and re.search(r"[$%`]", tok)
-                and _STATE_NAME.search(tok)
-            ):
+            # a variable in front of the state folder's name: refused whether or not the
+            # guard can expand the variable (guard-b15: `$env:LOCALAPPDATA\Temp\…` resolved
+            # to a path outside the temp folder the gate had moved, and passed)
+            if tok and re.search(r"[$%`]", tok) and _STATE_NAME.search(tok):
                 block(PROTECTED_REASON.format(path=tok))
             # a pattern that can match a protected folder, or a secret file by name
             pathlike = program in FILE_PROGRAMS or "/" in tok or "\\" in tok
