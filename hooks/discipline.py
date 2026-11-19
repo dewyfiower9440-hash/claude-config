@@ -325,6 +325,10 @@ def default_state() -> dict[str, Any]:
         # already counted in the repository's recurrence file
         "failures_noted": [],
         "output_advice_turn": 0,  # P1-04: the turn that already got the delegation hint
+        # v1.1 steps 4 and 5: the turn that already got the context7 hint (a dependency
+        # added) and the /plan hint (a plan file written by hand)
+        "dep_advice_turn": 0,
+        "plan_advice_turn": 0,
         "turn_cover_off": 0,  # 1: not known what an approval started from; cover nothing
         # the last cover_valid: {at, n, why}; for diagnosis, never read to decide
         "cover_last": None,
@@ -1119,6 +1123,85 @@ def take_commit_review_note(data: dict[str, Any], state: dict[str, Any]) -> None
         add_post_note(str(note.get("text") or ""))
 
 
+# ---------------------------------------------------------------- v1.1: context7 and /plan hints
+DEPENDENCY_ADDS = {
+    ("uv", "add"),
+    ("pip", "install"),
+    ("pip3", "install"),
+    ("pnpm", "add"),
+    ("npm", "install"),
+    ("npm", "i"),
+    ("cargo", "add"),
+}
+DEPENDENCY_NOTE = (
+    "[discipline] 의존성을 추가하는 명령({what})을 실행했는데 이 세션에는 context7 조회 기록이 "
+    "없습니다. 패키지의 현재 버전·API는 기억이 아니라 `researcher` 에이전트(Agent "
+    "subagent_type=researcher; Context7 MCP를 씀)나 context7 도구로 확인하세요. "
+    "(알림이며 차단이 아닙니다.)"
+)
+PLAN_DIR = re.compile(r"[\\/]docs[\\/]plans[\\/][^\\/]+\.md$", re.IGNORECASE)
+PLAN_BY_HAND_NOTE = (
+    "[discipline] docs/plans/ 아래 계획 파일을 /plan·/implement 스킬 없이 직접 썼습니다. 계획은 "
+    "`/plan` 스킬(Skill plan)로 세우고, 파일은 Write 도구로 저장하세요(셸 리다이렉트 `>`로 쓰는 "
+    "것은 분류기가 막습니다). 승인은 ExitPlanMode로 받으며, 승인 뒤 `## 변경 범위`·`## 단계`를 "
+    "고치면 승인이 취소되어 재승인이 필요합니다. (알림이며 차단이 아닙니다.)"
+)
+
+
+def dependency_adds(command: object, dialect: str) -> list[str]:
+    """The dependency-adding commands (`uv add`, `pip install`, `pnpm add`, `npm install
+    <pkg>`, `cargo add`) a shell command runs, as "program subcommand"; a bare `npm install`
+    installs the lock file and adds nothing. Unparsable: none."""
+    if not isinstance(command, str):
+        return []
+    from shellparse import ParseError, parse, program_and_args
+
+    try:
+        cmds = parse(command, "powershell" if dialect == "powershell" else "bash")
+    except ParseError:
+        return []
+    out: list[str] = []
+    for cmd in cmds:
+        if cmd.nested:
+            continue
+        program, args = program_and_args(cmd)
+        sub = args[0] if args else ""
+        if (program, sub) not in DEPENDENCY_ADDS:
+            continue
+        if not any(not a.startswith("-") for a in args[1:]):
+            continue  # nothing named: a lock-file install
+        out.append(f"{program} {sub}")
+    return out
+
+
+def note_dependency_add(data: dict[str, Any], state: dict[str, Any]) -> None:
+    """v1.1 step 4: a dependency added by the main conversation in a session without any
+    context7 lookup gets the hint, once per turn."""
+    if actor(data) != "main" or state.get("dep_advice_turn") == state.get("turn"):
+        return
+    if "context7" in (state.get("mcp") or {}):
+        return
+    dialect = "powershell" if data.get("tool_name") == "PowerShell" else "bash"
+    try:
+        what = dependency_adds((data.get("tool_input") or {}).get("command"), dialect)
+    except RecursionError:  # the parser on an absurdly nested command
+        return
+    if what:
+        state["dep_advice_turn"] = state.get("turn") or 0
+        add_post_note(DEPENDENCY_NOTE.format(what=", ".join(sorted(set(what)))))
+
+
+def note_plan_by_hand(data: dict[str, Any], state: dict[str, Any], path: str) -> None:
+    """v1.1 step 5: a plan file (docs/plans/*.md) written with an edit tool in a turn that
+    ran neither the /plan nor the /implement skill gets the hint, once per turn."""
+    if actor(data) != "main" or state.get("plan_advice_turn") == state.get("turn"):
+        return
+    if not PLAN_DIR.search(path) or skill_used_this_turn(state, "plan", "implement"):
+        return
+    state["plan_advice_turn"] = state.get("turn") or 0
+    add_post_note(PLAN_BY_HAND_NOTE)
+
+
 # ---------------------------------------------------------------- PostToolUse notes
 _post_notes: list[str] = []
 
@@ -1623,6 +1706,8 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
     if tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
         path = edit_target(ti)
         cwd = str(data.get("cwd") or os.getcwd())
+        if path:
+            note_plan_by_hand(data, state, absolute(path, cwd))
         if path and not ignored_path(state, path, cwd):
             path = absolute(path, cwd)
             if path not in state["turn_files"]:
@@ -1666,6 +1751,7 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
                 state["approval_warning"] = v2_failure(e)
         note_output_size(data, state, failed=False)
         take_commit_review_note(data, state)
+        note_dependency_add(data, state)
     elif tool in ("Agent", "Task"):
         if ti.get("subagent_type") in REVIEW_AGENTS:
             state["last_review"] = now  # a review, not verification

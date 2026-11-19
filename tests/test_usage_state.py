@@ -210,6 +210,120 @@ check(
     (None, "skills", "mcp"),
 )
 
+# ---------------------------------------------------------------- step 4: a dependency added
+adds = getattr(disc, "dependency_adds", lambda command, dialect: None)
+check(
+    "U-T15 commands that add a dependency, and those that do not",
+    [
+        adds("uv add httpx", "bash"),
+        adds("uv add --dev pytest ruff", "bash"),
+        adds("cd app && pip install requests", "bash"),
+        adds("pnpm add -D vitest", "bash"),
+        adds("npm install zod", "bash"),
+        adds("cargo add serde", "bash"),
+        adds("uv run pytest -q", "bash"),
+        adds("npm install", "bash"),
+        adds("pnpm install", "bash"),
+        adds("echo uv add x", "bash"),
+        adds("uv add 'x", "bash"),
+        adds("uv add httpx", "powershell"),
+        adds(None, "bash"),
+    ],
+    [
+        ["uv add"],
+        ["uv add"],
+        ["pip install"],
+        ["pnpm add"],
+        ["npm install"],
+        ["cargo add"],
+        [],
+        [],
+        [],
+        [],
+        [],
+        ["uv add"],
+        [],
+    ],
+)
+
+
+def said(out: dict) -> str:
+    return str(out.get("hookSpecificOutput", {}).get("additionalContext") or "")
+
+
+CONTEXT7 = "context7"
+s = uuid.uuid4().hex
+hook("prompt", s, prompt="work")
+rc, out = post(s, "Bash", command="uv add httpx")
+check(
+    "U-T16 a dependency added without a context7 lookup this session: the hint, once",
+    (CONTEXT7 in said(out), "researcher" in said(out)),
+    (True, True),
+)
+rc, out = post(s, "Bash", command="uv add anyio")
+check("U-T17 again in the same turn: no second hint", said(out), "")
+hook("prompt", s, prompt_id="p2", prompt="next")
+rc, out = post(s, "Bash", prompt_id="p2", command="uv run pytest -q")
+check("U-T18 a command that adds nothing: no hint", said(out), "")
+rc, out = post(s, "Bash", prompt_id="p2", command="pnpm add zod")
+check("U-T18b the next turn's addition: the hint again", CONTEXT7 in said(out), True)
+post(s, "mcp__context7__query-docs", prompt_id="p2", libraryId="/x", query="q")
+hook("prompt", s, prompt_id="p3", prompt="next")
+rc, out = post(s, "Bash", prompt_id="p3", command="uv add httpx")
+check("U-T19 after a context7 lookup in this session: no hint", said(out), "")
+s = uuid.uuid4().hex
+hook("prompt", s, prompt="work")
+rc, out = hook(
+    "post",
+    s,
+    tool_name="Bash",
+    tool_input={"command": "uv add httpx"},
+    tool_use_id=uuid.uuid4().hex,
+    tool_response={},
+    agent_id="g1",
+    agent_type="general-purpose",
+)
+check("U-T20 inside a subagent: no hint", said(out), "")
+
+# ---------------------------------------------------------------- step 5: a plan written by hand
+PLAN_HINT = "/plan"
+(PROJ / "docs" / "plans").mkdir(parents=True, exist_ok=True)
+plan_file = PROJ / "docs" / "plans" / "2026-11-19-x.md"
+plan_file.write_text("---\nstatus: draft\n---\n# x\n", encoding="utf-8")
+s = uuid.uuid4().hex
+hook("prompt", s, prompt="work")
+rc, out = post(s, "Write", file_path=str(plan_file), content="# x\n")
+check(
+    "U-T21 a plan file written without /plan or /implement this turn: the hint, naming Write and ExitPlanMode",
+    (PLAN_HINT in said(out), "Write" in said(out), "ExitPlanMode" in said(out)),
+    (True, True, True),
+)
+rc, out = post(s, "Edit", file_path=str(plan_file), old_string="x", new_string="y")
+check("U-T22 again in the same turn: no second hint", said(out), "")
+hook("prompt", s, prompt_id="p2", prompt="next")
+post(s, "Skill", prompt_id="p2", skill="plan")
+rc, out = post(s, "Write", prompt_id="p2", file_path=str(plan_file), content="# y\n")
+check("U-T23 after the /plan skill this turn: no hint", said(out), "")
+hook("prompt", s, prompt_id="p3", prompt="next")
+post(s, "Skill", prompt_id="p3", skill="implement")
+rc, out = post(
+    s, "Edit", prompt_id="p3", file_path=str(plan_file), old_string="a", new_string="b"
+)
+check("U-T24 after the /implement skill this turn: no hint", said(out), "")
+hook("prompt", s, prompt_id="p4", prompt="next")
+rc, out = post(
+    s, "Write", prompt_id="p4", file_path=str(PROJ / "docs" / "notes.md"), content="n"
+)
+check("U-T25 another folder: no hint", said(out), "")
+rc, out = post(
+    s,
+    "Write",
+    prompt_id="p4",
+    file_path=str(PROJ / "docs" / "plans" / "README.txt"),
+    content="n",
+)
+check("U-T25b not a markdown file: no hint", said(out), "")
+
 # ---------------------------------------------------------------- settings.json wiring
 settings = json.loads((HERE.parent / "settings.json").read_text(encoding="utf-8"))
 post_matchers = [h.get("matcher", "") for h in settings["hooks"]["PostToolUse"]]
