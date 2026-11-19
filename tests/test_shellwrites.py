@@ -174,10 +174,51 @@ for name, command, dialect, want in (
     ("W-T6 glob target", "rm *.py", "bash", ([], 1)),
     (
         "W-T6 PowerShell variable",
-        "Set-Content $p x; a > $env:TEMP\\x.txt",
+        "Set-Content $p x; a > $env:OUT\\x.txt",
         "powershell",
         ([], 2),
     ),
+    # guard-b15 6: the shell's temp variable is the temp folder (the earlier form of the
+    # case above used $env:TEMP as an unresolvable example)
+    (
+        "W-T16 $env:TEMP is the temp folder",
+        "a > $env:TEMP\\x.txt",
+        "powershell",
+        ([f"{TEMPDIR}/x.txt"], 0),
+    ),
+    (
+        "W-T16 $TEMP is the temp folder",
+        "echo x > $TEMP/x.txt",
+        "bash",
+        ([f"{TEMPDIR}/x.txt"], 0),
+    ),
+    ("W-T16 ${TMP} too", 'echo x > "${TMP}/x.txt"', "bash", ([f"{TEMPDIR}/x.txt"], 0)),
+    (
+        "W-T16 a variable below it stays unresolved",
+        "echo x > $TEMP/$name.txt",
+        "bash",
+        ([], 1),
+    ),
+    ("W-T16 $TEMPX is another variable", "echo x > $TEMPX/x.txt", "bash", ([], 1)),
+    (
+        "W-T16 Bash does not expand $env:TEMP",
+        "echo x > $env:TEMP/x.txt",
+        "bash",
+        ([], 1),
+    ),
+    (
+        "W-T16 mkdir makes folders",
+        "mkdir -p -m 755 d1 d2/d3",
+        "bash",
+        ([f"{P}/d1", f"{P}/d2/d3"], 0),
+    ),
+    (
+        "W-T16 PowerShell mkdir is New-Item",
+        "mkdir newdir",
+        "powershell",
+        ([f"{P}/newdir"], 0),
+    ),
+    ("W-T16 md too", "md -Path newdir", "powershell", ([f"{P}/newdir"], 0)),
     ("W-T6 unbalanced quote", "echo 'x > f", "bash", ([], 1)),
     ("W-T7 reads only", "cat a; git status; ls > /dev/null", "bash", ([], 0)),
     ("W-T7 the gate", "python -I tests/run_all.py", "bash", ([], 0)),

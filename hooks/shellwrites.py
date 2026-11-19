@@ -91,6 +91,8 @@ PS_ONLY_ALIASES = {
     "cp": "copy-item",
     "mv": "move-item",
     "tee": "tee-object",
+    "mkdir": "new-item",  # a function over New-Item -ItemType Directory
+    "md": "new-item",
 }
 
 
@@ -168,6 +170,8 @@ def _unix_targets(program: str, args: list[str]) -> list[str]:
         return _positionals(args, set())
     if program == "touch":
         return _positionals(args, {"-d", "-r", "-t", "--date", "--reference"})
+    if program == "mkdir":  # guard-b15 6: a folder made is a write (`mkdir -m 755 d`)
+        return _positionals(args, {"-m", "--mode", "-Z", "--context"})
     if program == "truncate":
         return _positionals(args, {"-s", "--size", "-r", "--reference"})
     if program == "dd":
@@ -254,9 +258,28 @@ def _command_targets(cmd: SimpleCommand, dialect: Dialect) -> list[str]:
     return found + _unix_targets(program, args)
 
 
+# The temp folder by the variable each shell gives it (guard-b15 6: a read-only subagent
+# told to write under the temp folder wrote `$TEMP/x` and was refused for naming no target).
+TEMP_FORMS = {
+    "bash": re.compile(
+        r"^(\$TMPDIR|\$TEMP|\$TMP|\$\{TMPDIR\}|\$\{TEMP\}|\$\{TMP\})(?=$|[\\/])"
+    ),
+    "powershell": re.compile(
+        r"^(\$env:TEMP|\$env:TMP|\$\{env:TEMP\}|\$\{env:TMP\})(?=$|[\\/])",
+        re.IGNORECASE,
+    ),
+}
+
+
 def _posix_special(target: str, dialect: Dialect) -> str | None:
-    """Git Bash paths that are not what they look like on Windows: "" for a device (nothing
-    to judge), the real temp folder for /tmp, None for an ordinary path."""
+    """Paths that are not what they look like on Windows: "" for a Git Bash device (nothing
+    to judge), the real temp folder for /tmp and for the shell's temp variable, None for an
+    ordinary path."""
+    form = TEMP_FORMS[dialect].match(target)
+    if form:
+        import tempfile
+
+        return tempfile.gettempdir() + target[form.end() :]
     if dialect != "bash":
         return None
     low = target.lower()
@@ -289,13 +312,14 @@ def write_targets(command: str, dialect: Dialect, cwd: str) -> tuple[list[str], 
         for target in raw:
             if target.lower() in NOT_A_FILE:
                 continue
-            if UNRESOLVABLE.search(target) or len(paths) >= MAX_TARGETS:
-                unresolved += 1
-                continue
             special = _posix_special(target, dialect)
             if special == "":
                 continue
-            resolved = _resolve(here, special if special is not None else target)
+            text = special if special is not None else target
+            if UNRESOLVABLE.search(text) or len(paths) >= MAX_TARGETS:
+                unresolved += 1
+                continue
+            resolved = _resolve(here, text)
             if resolved not in seen:
                 seen.add(resolved)
                 paths.append(resolved)

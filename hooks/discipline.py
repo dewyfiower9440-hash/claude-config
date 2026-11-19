@@ -676,8 +676,9 @@ def owner_note(names: object, agents: object = None) -> str:
 MAX_AGENTS = 50
 AGENT_START_NOTE = (
     "[discipline] This subagent's tool calls are recorded in the main session's "
-    "verification tracking. Create scratch repositories and temporary files under %TEMP% "
-    "only. Do not delete or move a repository that existed before you started."
+    "verification tracking. Create scratch repositories and temporary files under the "
+    "temp folder only ({temp}; `$TEMP` in Bash, `$env:TEMP` in PowerShell). Do not delete "
+    "or move a repository that existed before you started."
 )
 
 
@@ -731,7 +732,7 @@ def on_agent_start(data: dict[str, Any], state: dict[str, Any]) -> None:
             {
                 "hookSpecificOutput": {
                     "hookEventName": "SubagentStart",
-                    "additionalContext": AGENT_START_NOTE,
+                    "additionalContext": AGENT_START_NOTE.format(temp=temp_root()),
                 }
             }
         )

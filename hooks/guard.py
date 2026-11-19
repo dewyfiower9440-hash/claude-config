@@ -592,10 +592,14 @@ READ_ONLY_REASON = (
     "to the main session"
 )
 KILLERS = {"kill", "pkill", "killall", "taskkill", "tskill", "stop-process", "spps"}
-GIT_WRITES = {
-    "add", "am", "apply", "bisect", "checkout", "cherry-pick", "clean", "clone", "commit",
-    "fetch", "gc", "init", "merge", "mv", "pull", "push", "rebase", "reset", "restore",
-    "revert", "rm", "switch", "update-index", "update-ref",
+# guard-b15 6: an allow-list. The deny-list before it missed checkout-index, read-tree,
+# update-ref, reflog expire, and any alias set on the line (`-c alias.z=!… z`): a
+# subcommand the list does not know writes until shown otherwise.
+GIT_READS = {
+    "blame", "cat-file", "check-attr", "check-ignore", "count-objects", "describe",
+    "diff", "diff-index", "diff-tree", "for-each-ref", "grep", "help", "log", "ls-files",
+    "ls-remote", "ls-tree", "merge-base", "name-rev", "rev-list", "rev-parse", "shortlog",
+    "show", "show-ref", "status", "var", "version", "whatchanged",
 }  # fmt: skip
 GIT_READ_FORMS = {  # subcommands that write unless used in one of these read forms
     "branch": {"", "-a", "-r", "-v", "-vv", "-l", "--list", "--all", "--remotes",
@@ -606,6 +610,7 @@ GIT_READ_FORMS = {  # subcommands that write unless used in one of these read fo
     "remote": {"", "-v", "show", "get-url"},
     "config": {"--get", "--get-all", "--list", "-l", "--show-origin"},
     "notes": {"", "list", "show"},
+    "reflog": {"", "show"},
 }  # fmt: skip
 
 
@@ -630,12 +635,12 @@ def git_writes(sub: list[str]) -> bool:
     if not sub:
         return False
     head, rest = sub[0], sub[1:]
-    if head in GIT_WRITES:
-        return True
     forms = GIT_READ_FORMS.get(head)
     if forms is None:
-        return False
+        return head not in GIT_READS
     first = rest[0] if rest else ""
+    if first.startswith("-") and head == "reflog":
+        first = ""  # `git reflog -5` shows
     if first not in forms:
         return True
     # `git branch --list x` reads; `git branch -l` followed by nothing else reads too
@@ -643,6 +648,89 @@ def git_writes(sub: list[str]) -> bool:
         a in ("-d", "-D", "-m", "-M", "-c", "-C", "-f", "--delete", "--move", "--copy")
         for a in rest
     )
+
+
+# Programs that write files without a target on the command line (a formatter, an
+# installer, a downloader, a folder maker): what a read-only subagent may not run. The
+# check forms (`--check`, `--diff`) read only.
+RUNNERS_OF_OTHERS = {
+    "uv": "run",
+    "pnpm": "exec",
+    "npx": None,
+    "pipx": "run",
+    "poetry": "run",
+}
+PACKAGE_WRITES = {
+    "uv": {"sync", "add", "remove", "lock", "pip", "tool", "python", "venv", "init", "build", "publish", "cache"},
+    "pnpm": {"install", "i", "add", "remove", "rm", "uninstall", "update", "up", "ci", "dlx", "link", "prune", "rebuild", "store"},
+    "npm": {"install", "i", "add", "remove", "rm", "uninstall", "update", "up", "ci", "link", "prune", "rebuild", "cache"},
+    "yarn": {"install", "add", "remove", "up", "upgrade", "link", "cache"},
+    "pip": {"install", "uninstall", "download", "cache"},
+    "pipx": {"install", "uninstall", "upgrade", "inject"},
+    "poetry": {"install", "add", "remove", "update", "lock", "build", "publish"},
+    "cargo": {"build", "install", "update", "add", "remove", "fmt", "fix", "clean"},
+    "go": {"build", "install", "get", "mod", "fmt", "generate", "clean"},
+}  # fmt: skip
+FETCHERS = {"iwr", "invoke-webrequest", "irm", "invoke-restmethod"}
+# (mkdir, touch, New-Item and ln name what they make: shellwrites sees them as writes)
+
+
+def hidden_writer(program: str, args: list[str]) -> str | None:
+    """Why this command writes files it does not name as a target (None when it does not)."""
+    low = [a.lower() for a in args]
+    plain = [a for a in args if not a.startswith("-")]
+    if program in RUNNERS_OF_OTHERS and plain:
+        verb = RUNNERS_OF_OTHERS[program]
+        if verb is None or plain[0].lower() == verb:
+            # `uv run ruff format`, `npx prettier --write`: the program it runs decides
+            rest = args[args.index(plain[0]) + (0 if verb is None else 1) :]
+            if rest and not rest[0].startswith("-"):
+                inner = hidden_writer(_basename(rest[0]), rest[1:])
+                if inner:
+                    return inner
+            if verb is not None:
+                return None  # `uv run pytest`: what runs is judged above, not `uv`
+    checks = {"--check", "--diff", "--check-only", "--dry-run"}
+    if program == "ruff" and plain[:1] == ["format"] and not checks & set(low):
+        return "ruff format"
+    if (
+        program == "ruff"
+        and plain[:1] == ["check"]
+        and {"--fix", "--unsafe-fixes", "--fix-only"} & set(low)
+    ):
+        return "ruff check --fix"
+    if program in ("black", "isort", "autopep8", "yapf") and not checks & set(low):
+        return program
+    if (
+        program in ("prettier", "biome")
+        and {"--write", "-w", "format"} & set(low)
+        and not checks & set(low)
+    ):
+        return f"{program} --write"
+    if program == "eslint" and "--fix" in low:
+        return "eslint --fix"
+    if (
+        program in PACKAGE_WRITES
+        and plain
+        and plain[0].lower() in PACKAGE_WRITES[program]
+    ):
+        return f"{program} {plain[0].lower()}"
+    if program == "curl" and any(
+        a in ("--output", "--remote-name", "--remote-name-all")
+        or re.fullmatch(r"-[a-zA-Z]*[oO][a-zA-Z]*", a)
+        for a in args
+    ):
+        return "curl -o"
+    if program == "wget" and not any(
+        a in ("-O-", "-qO-", "--output-document=-", "--spider")
+        or re.fullmatch(r"-[a-zA-Z]*O-", a)
+        or (a in ("-O", "--output-document") and args[k + 1 : k + 2] == ["-"])
+        for k, a in enumerate(args)
+    ):
+        return "wget"
+    if program in FETCHERS and any(a.startswith("-outf") for a in low):
+        return f"{program} -OutFile"
+    return None
 
 
 # The folders of the approval store and of the session records. settings.json denies the
@@ -1195,6 +1283,9 @@ def check_isolation(
         _asks.append(f"`{program}` ends processes")
     if agent and program == "git" and git_writes(git_subcommand(args)):
         block(READ_ONLY_REASON.format(agent=agent, what="change a git repository"))
+    hidden = hidden_writer(program, args) if agent else None
+    if agent and hidden:
+        block(READ_ONLY_REASON.format(agent=agent, what=f"write files ({hidden})"))
     data = data | script_indexes(program, args)
     for k, arg in enumerate(args):
         if k in data:
