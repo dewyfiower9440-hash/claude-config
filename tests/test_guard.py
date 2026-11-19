@@ -796,11 +796,13 @@ B15_CASES: list[tuple[str, tuple[str, dict], str | None, str, str]] = [
     ("B15-T3 listing look-alikes", sh("ls src/credentials*"), None, SECRETS_DIR, "allow"),
     ("B15-T3 Test-Path on a secret", ps("Test-Path .env"), None, SECRETS_DIR, "allow"),
     ("B15-T3 a search filter is not a path", sh("rg -g '/**/*.py' foo"), None, SECRETS_DIR, "allow"),
-    ("B15-T3 a search filter is not a path, = form", sh("rg --glob='**/*.env' foo src"), None, SECRETS_DIR, "allow"),
-    ("B15-T3 a search type is not a path", sh("grep -r --include='*.env' x src"), None, SECRETS_DIR, "allow"),
+    # (= form: not a path, but the filter selects .env files: a read of them, B15-R1)
+    ("B15-T3 a search filter is not a path, = form", sh("rg --glob='**/*.env' foo src"), None, SECRETS_DIR, "deny"),
+    ("B15-T3 a search filter is not a path, = form, harmless", sh("rg --glob='**/*.toml' foo src"), None, SECRETS_DIR, "allow"),
+    ("B15-T3 a search type is not a path", sh("grep -r --include='*.txt' x src"), None, SECRETS_DIR, "allow"),
     ("B15-T3 rg -f reads a file", sh("rg -f .env x"), None, SECRETS_DIR, "deny"),
     ("B15-T3 the folder cannot be seen: name rule stays", sh("cat .en*"), None, ELSEWHERE, "deny"),
-    ("B15-T3 the folder cannot be seen: too short for the name rule", sh("cat .e*"), None, ELSEWHERE, "allow"),
+    ("B15-T3 the folder cannot be seen: too short for the name rule", sh("cat .*"), None, ELSEWHERE, "allow"),
     ("B15-T3 reading the secret by name is still refused", sh("cat .env"), None, SECRETS_DIR, "deny"),
     # a folder a pattern matches is not read (a bare `*` in a line of code, run in ~/.claude,
     # matched the discipline folder: 7 corpus commands)
@@ -908,6 +910,30 @@ B15_CASES: list[tuple[str, tuple[str, dict], str | None, str, str]] = [
     ("B15-T6 gh pr view", sh("gh pr view 1"), REVIEWER, ELSEWHERE, "allow"),
     ("B15-T6 the main session installs", sh("uv sync"), None, ELSEWHERE, "allow"),
     ("B15-T6 the main session formats", sh("ruff format ."), None, ELSEWHERE, "allow"),
+    # B15-R1 (closing review, 2026-11-19) a search's include filter selects files to read:
+    # a secret file named or matched by it is a read of it; exclude filters are not paths
+    ("B15-R1 rg -g .env", sh("rg -g .env ."), None, SECRETS_DIR, "deny"),
+    ("B15-R1 rg . -g .env", sh("rg . -g .env"), None, SECRETS_DIR, "deny"),
+    ("B15-R1 grep --include=.env", sh('grep -r "" --include=.env .'), None, SECRETS_DIR, "deny"),
+    ("B15-R1 rg --iglob '.En?'", sh("rg --iglob '.En?' ."), None, SECRETS_DIR, "deny"),
+    ("B15-R1 grep --include='*.env' matches .env", sh("grep -r --include='*.env' x src"), None, SECRETS_DIR, "deny"),
+    ("B15-R1 rg -g '*.py'", sh("rg -g '*.py' foo"), None, SECRETS_DIR, "allow"),
+    ("B15-R1 rg -g '/**/*.py'", sh("rg -g '/**/*.py' foo"), None, SECRETS_DIR, "allow"),
+    ("B15-R1 rg -t py", sh("rg -t py foo"), None, SECRETS_DIR, "allow"),
+    ("B15-R1 rg --glob='**/*.json'", sh("rg --glob='**/*.json' foo src"), None, SECRETS_DIR, "allow"),
+    ("B15-R1 rg --exclude-dir", sh("grep -r --exclude-dir=.git x ."), None, SECRETS_DIR, "allow"),
+    # B15-R9 the current folder by other names in front of a pattern; a dotted segment
+    # needs only two literals for the name rule
+    ("B15-R9 $PWD/.e*", sh("cat $PWD/.e*"), None, SECRETS_DIR, "deny"),
+    ("B15-R9 ~+/.e*", sh("cat ~+/.e*"), None, SECRETS_DIR, "deny"),
+    ("B15-R9 $(pwd)/.e*", sh('cat "$(pwd)"/.e*'), None, SECRETS_DIR, "deny"),
+    ("B15-R9 .e* where the folder cannot be seen", sh("cat .e*"), None, ELSEWHERE, "deny"),
+    ("B15-R9 $PWD/*.py", sh("cat $PWD/*.py"), None, SECRETS_DIR, "allow"),
+    # B15-R10 .claude/state and .claude/discipline behind a variable the guard cannot expand
+    ("B15-R10 $USER", sh("cat /c/Users/$USER/.claude/state/x.json"), None, ELSEWHERE, "deny"),
+    ("B15-R10 $env:HOMEDRIVE$env:HOMEPATH", ps("Get-Content $env:HOMEDRIVE$env:HOMEPATH\\.claude\\state\\x.json"), None, ELSEWHERE, "deny"),
+    ("B15-R10 $env:HOMEDRIVE$env:HOMEPATH, discipline", ps("Get-Content $env:HOMEDRIVE$env:HOMEPATH\\.claude\\discipline\\key"), None, ELSEWHERE, "deny"),
+    ("B15-R10 another folder behind a variable", sh("cat /c/Users/$USER/.claude/hooks/guard.py"), None, ELSEWHERE, "allow"),
 ]  # fmt: skip
 # the pure helpers of guard-b15, called in process
 import importlib.util

@@ -778,7 +778,15 @@ _TEMP_FORM = re.compile(
     re.IGNORECASE,
 )
 # The state folder by name, in a word whose start cannot be told (another variable).
-_STATE_NAME = re.compile(r"(^|[\\/])claude-discipline($|[\\/])", re.IGNORECASE)
+_STATE_NAME = re.compile(
+    r"(^|[\\/])(claude-discipline|\.claude[\\/](discipline|state))($|[\\/])",
+    re.IGNORECASE,
+)
+# The current folder by the names a shell gives it (`rm -rf $PWD`, `cat ~+/.e*`); `$(pwd)`
+# is substituted before the word is split (see _words).
+_CWD_FORM = re.compile(
+    r"^(\$PWD|\$\{PWD\}|\$env:PWD|\$\{env:PWD\}|%CD%|~\+)(?=$|[\\/])", re.IGNORECASE
+)
 # guard-b15: the profile folders a shell names by variable (`$env:APPDATA\..\..\.claude`),
 # resolved from the environment like the home forms above.
 _ENV_FORM = re.compile(
@@ -839,9 +847,13 @@ def brace_alternatives(word: str, limit: int = BRACE_LIMIT) -> list[str]:
     return out
 
 
-def _words(arg: str, dialect: Dialect) -> list[str]:
-    """What the shell makes of one argument before the program sees it."""
-    return brace_alternatives(arg) if dialect == "bash" and "{" in arg else [arg]
+def _words(arg: str, dialect: Dialect, cwd: str) -> list[str]:
+    """What the shell makes of one argument before the program sees it: `$(pwd)` is the
+    current folder, a brace names several words."""
+    if dialect != "bash":
+        return [arg]
+    arg = re.sub(r'"?\$\(pwd\)"?', lambda _m: cwd, arg)
+    return brace_alternatives(arg) if "{" in arg else [arg]
 
 
 # Programs whose plain-word arguments are files or folders. For any other program a word
@@ -860,12 +872,21 @@ FILE_PROGRAMS = {
 # Programs that print a file's name or metadata, never its content (guard-b15 3: `ls .env*`
 # is not a read of .env).
 LISTING_PROGRAMS = {"ls", "dir", "gci", "get-childitem", "test-path", "stat"}
-# Search flags whose value is a filter over names, not a path the search reads (`rg -g`,
-# `grep --include`); `-f`/`--file` reads a pattern file and is not here on purpose.
-FILTER_FLAGS = {
-    "-g", "--glob", "--iglob", "-t", "--type", "-T", "--type-not", "--include",
-    "--exclude", "--exclude-dir", "-include", "-exclude",
-}  # fmt: skip
+# Search flags whose value is a filter over names, not a path the search walks (`rg -g`,
+# `grep --include`). An include filter still selects files to read, so a secret file it
+# names or matches is a read of it (closing review: `rg -g .env .` had passed); an exclude
+# filter reads nothing. `-f`/`--file` reads a pattern file and is in neither set on purpose.
+INCLUDE_FILTER_FLAGS = {
+    "-g",
+    "--glob",
+    "--iglob",
+    "-t",
+    "--type",
+    "--include",
+    "-include",
+}
+EXCLUDE_FILTER_FLAGS = {"-T", "--type-not", "--exclude", "--exclude-dir", "-exclude"}
+FILTER_FLAGS = INCLUDE_FILTER_FLAGS | EXCLUDE_FILTER_FLAGS
 GLOB_MATCH_LIMIT = 200
 
 
@@ -885,6 +906,7 @@ def as_path(word: str, cwd: str, bare: bool = True) -> str | None:
     text = _HOME_FORM.sub(lambda _m: HOME_DIR, text)
     text = _TEMP_FORM.sub(lambda _m: _temp_root(), text)
     text = _ENV_FORM.sub(_env_value, text)
+    text = _CWD_FORM.sub(lambda _m: cwd, text)
     cut = re.search(r"[*?\[]", text)
     if cut:
         text = text[: cut.start()]
@@ -1005,9 +1027,11 @@ def expand_glob(
     return [p for p in paths if os.path.isfile(p)] if files_only else paths
 
 
-def glob_reaches_secret(word: str) -> str | None:
+def glob_reaches_secret(word: str, dot_free: bool = False) -> str | None:
     """The secret file name a pattern word (`.en*`, `./.e[n]v`, `id_*`) can match, or None.
-    As in a shell, a pattern that does not start with a dot does not match a dot file."""
+    As in a shell, a pattern that does not start with a dot does not match a dot file,
+    unless `dot_free` (a search's include filter: `--include='*.env'` selects .env). A
+    dotted segment needs two literals (`.e*` is an attempt on .env), others three."""
     import fnmatch
 
     text = word.strip("'\"").rstrip(",")
@@ -1017,10 +1041,12 @@ def glob_reaches_secret(word: str) -> str | None:
         if not re.search(r"[*?\[]", segment):
             continue
         literals = len(re.sub(r"\[[^\]]*\]|[*?]", "", segment))
-        if literals < GLOB_MIN_LITERALS:
+        if literals < (
+            GLOB_MIN_LITERALS - 1 if segment.startswith(".") else GLOB_MIN_LITERALS
+        ):
             continue
         for name in SECRET_NAMES:
-            if name.startswith(".") and not segment.startswith("."):
+            if name.startswith(".") and not segment.startswith(".") and not dot_free:
                 continue
             share = GLOB_MIN_SHARE_DOT if name.startswith(".") else GLOB_MIN_SHARE
             if (
@@ -1159,9 +1185,6 @@ DELETE_REASON = (
 
 
 PS_LISTERS = {"get-childitem", "gci", "ls", "dir", "get-item", "gi"}
-_CWD_FORM = re.compile(
-    r"^(\$PWD|\$\{PWD\}|\$env:PWD|\$\{env:PWD\}|%CD%)(?=$|[\\/])", re.IGNORECASE
-)
 
 
 def _delete_targets(
@@ -1211,7 +1234,7 @@ def check_recursive_delete(
     for word in (
         w
         for target in _delete_targets(program, args, dialect, fed_by)
-        for w in _words(target, dialect)
+        for w in _words(target, dialect, cwd)
     ):
         text = re.sub(r"[\\/]\*+$", "", word.strip("'\"")) or word  # X/* empties X
         if re.fullmatch(r"\.?[\\/]?\*+[\\/]?", text):
@@ -1291,7 +1314,9 @@ def check_isolation(
         if k in data:
             continue
         for tok in (
-            t for w in _words(arg, dialect) for t in re.split(r"[\s'\"<>|;&()=,]+", w)
+            t
+            for w in _words(arg, dialect, cwd)
+            for t in re.split(r"[\s'\"<>|;&()=,]+", w)
         ):
             path = as_path(tok, cwd, program in FILE_PROGRAMS) if tok else None
             if path and in_protected(path):
@@ -1439,6 +1464,24 @@ def check_parsed(
                 k for k, a in enumerate(args) if a.lower().split("=")[0] in FILTER_FLAGS
             }
             data |= flagged | {k + 1 for k in flagged if "=" not in args[k]}
+            for k in flagged:
+                if args[k].lower().split("=")[0] not in INCLUDE_FILTER_FLAGS:
+                    continue
+                value = (
+                    args[k].partition("=")[2]
+                    if "=" in args[k]
+                    else " ".join(args[k + 1 : k + 2])
+                )
+                chosen = value.strip("'\"")
+                hit = (
+                    chosen
+                    if is_secret_path(chosen)
+                    else glob_reaches_secret(chosen, dot_free=True)
+                )
+                if hit:
+                    block(
+                        f"command touches a secret file (the filter {chosen} selects {hit})"
+                    )
         if program == "git" and git_names_only(cmd, args):
             data = set(range(len(args)))  # names a file, cannot print it
         fed_by = (
@@ -1452,7 +1495,7 @@ def check_parsed(
                 continue
             for tok in (
                 t
-                for w in _words(arg, dialect)
+                for w in _words(arg, dialect, here)
                 for t in re.split(r"[\s'\"<>|;&()=,]+", w)
             ):
                 if tok and is_secret_path(tok):
