@@ -433,6 +433,28 @@ check(
     v._resolve("C:/x", "/tmpx"),
     os.path.normpath("C:/tmpx"),
 )
+# guard-b15 5: a pattern that the shell expands to one folder is followed
+_pat = Path(tempfile.mkdtemp(prefix="verification-cd-"))
+(_pat / "only-one").mkdir()
+(_pat / "two-a").mkdir()
+(_pat / "two-b").mkdir()
+(_pat / "two-c.txt").write_text("", encoding="utf-8")
+check(
+    "_resolve: a pattern matching one folder goes there",
+    v._resolve(str(_pat), "only-*/sub"),
+    os.path.normpath(str(_pat / "only-one" / "sub")),
+)
+check(
+    "_resolve: a pattern matching two folders stays a pattern",
+    v._resolve(str(_pat), "two-*"),
+    os.path.normpath(str(_pat / "two-*")),
+)
+check(
+    "_resolve: a pattern matching only a file stays a pattern",
+    v._resolve(str(_pat), "two-c.*"),
+    os.path.normpath(str(_pat / "two-c.*")),
+)
+shutil.rmtree(_pat, ignore_errors=True)
 
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

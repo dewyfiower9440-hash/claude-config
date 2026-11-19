@@ -1443,8 +1443,10 @@ def changes_policy(tool: str, ti: dict[str, object], full: str) -> bool:
 # in every session. They are changed in the work tree and reach ~/.claude by a merge of a
 # commit that passed the gate (CLAUDE.md, Release); a change made in place is the user's
 # to confirm.
-LIVE_FOLDERS = ("hooks", "agents")
-LIVE_FILES = ("settings.json",)
+LIVE_FOLDERS = ("hooks", "agents", "skills", "rules")
+LIVE_FILES = ("settings.json", "settings.local.json")
+# git subcommands that rewrite the working files of the repository they run in
+LIVE_GIT_VERBS = {"checkout", "switch", "restore", "clean", "cherry-pick", "revert", "am", "apply"}  # fmt: skip
 LIVE_REASON = (
     "this changes {path} in place: the live hooks, settings and agents of ~/.claude are "
     "changed in the work tree and merged after the gate (CLAUDE.md, Release)"
@@ -1463,20 +1465,61 @@ def is_live_config(full: str) -> bool:
     )
 
 
+def _git_live_writes(command: str, dialect: Dialect, cwd: str) -> list[str]:
+    """guard-b15 5: a git command that rewrites the working files of ~/.claude (`checkout
+    <ref> -- hooks`, `restore`, `reset --hard`, `stash pop`, `clean`) changes the live
+    configuration as surely as a redirect does. `merge`, `pull` and `fetch` are not here:
+    the fast-forward merge is how a gated commit reaches ~/.claude (CLAUDE.md, Release)."""
+    from shellparse import ParseError, parse, program_and_args
+    from verification import _inside, cwd_at
+
+    try:
+        cmds = parse(command, dialect)
+    except ParseError:
+        return []
+    out: list[str] = []
+    for i, c in enumerate(cmds):
+        program, args = program_and_args(c)
+        if program != "git":
+            continue
+        sub = git_subcommand(args)
+        verb, rest = (sub[0] if sub else ""), sub[1:]
+        writes = (
+            verb in LIVE_GIT_VERBS
+            or (
+                verb == "reset"
+                and any(a in ("--hard", "--merge", "--keep") for a in rest)
+            )
+            or (verb == "stash" and rest[:1] in (["pop"], ["apply"]))
+        )
+        if writes and _inside(_git_folder(args, cwd_at(cmds, i, cwd)), CLAUDE_HOME):
+            out.append(
+                LIVE_REASON.format(path=f"the working files of ~/.claude (git {verb})")
+            )
+    return out
+
+
 def shell_guarded_writes(command: str, dialect: Dialect, cwd: str) -> list[str]:
     """Reasons to ask about what a command line visibly writes (best effort, see
     shellwrites): a CLAUDE.md, or the live configuration under ~/.claude."""
+    from verification import _inside
+
     low = command.lower()
-    if POLICY_FILE not in low and ".claude" not in low:
+    # `.cl` also catches `~/.cl*`; a relative path from inside ~/.claude names nothing
+    if POLICY_FILE not in low and ".cl" not in low and not _inside(cwd, CLAUDE_HOME):
         return []
     from shellwrites import write_targets
 
     targets, _unknown = write_targets(command, dialect, cwd)
-    return [
-        POLICY_SHELL_REASON.format(path=t)
-        for t in targets
-        if os.path.basename(t).lower() == POLICY_FILE
-    ] + [LIVE_REASON.format(path=t) for t in targets if is_live_config(t)]
+    return (
+        [
+            POLICY_SHELL_REASON.format(path=t)
+            for t in targets
+            if os.path.basename(t).lower() == POLICY_FILE
+        ]
+        + [LIVE_REASON.format(path=t) for t in targets if is_live_config(t)]
+        + _git_live_writes(command, dialect, cwd)
+    )
 
 
 # What the protected folders hold, by name form: a Grep `glob` without a folder part

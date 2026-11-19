@@ -256,6 +256,22 @@ def _resolve(cwd: str, target: str) -> str:
         import tempfile
 
         target = tempfile.gettempdir() + target[4:]
+    if re.search(r"[*?\[]", target):
+        # guard-b15 5: `cd ~/.cl*/hooks` goes where the shell's expansion leads, when the
+        # first pattern segment names one folder; otherwise the pattern stays and
+        # resolves to nothing real
+        import glob
+
+        parts = re.split(r"([\\/])", target)  # segments and their separators
+        first = next(i for i, p in enumerate(parts) if re.search(r"[*?\[]", p))
+        head = "".join(parts[: first + 1])
+        try:
+            found = glob.glob(head, root_dir=cwd)
+        except (OSError, ValueError, re.error):
+            found = []
+        dirs = [f for f in found if os.path.isdir(os.path.join(cwd, f))]
+        if len(dirs) == 1:
+            target = dirs[0] + "".join(parts[first + 1 :])
     return os.path.normpath(os.path.join(cwd, target))
 
 

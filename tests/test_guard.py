@@ -828,6 +828,31 @@ B15_CASES: list[tuple[str, tuple[str, dict], str | None, str, str]] = [
     ("B15-T4 -Recurse:$false", ps("Remove-Item C:\\dev -Recurse:$false"), None, ELSEWHERE, "allow"),
     ("B15-T4 cmd /c dir", ps("cmd /c dir C:\\dev"), None, ELSEWHERE, "allow"),
     ("B15-T4 cmd /c rd of a build folder", sh('cmd /c "rd /s /q C:\\dev\\app\\build"'), None, ELSEWHERE, "allow"),
+    # B15-T5 writes to the live configuration of ~/.claude are the user's to confirm,
+    # also by a relative path, a pattern in `cd`, git, and in skills, rules, settings.local.json
+    ("B15-T5 relative path from ~/.claude", sh("echo x >> hooks/guard.py"), None, CLAUDE, "ask"),
+    ("B15-T5 relative path from ~/.claude/hooks", sh("echo x >> guard.py"), None, f"{CLAUDE}/hooks", "ask"),
+    ("B15-T5 cd with a pattern", sh("cd ~/.cl*/hooks && echo x >> guard.py"), None, ELSEWHERE, "ask"),
+    ("B15-T5 git checkout into ~/.claude", sh("git -C ~/.claude checkout HEAD~1 -- hooks"), None, ELSEWHERE, "ask"),
+    ("B15-T5 git restore in ~/.claude", sh("git restore hooks/guard.py"), None, CLAUDE, "ask"),
+    # (`reset --hard` and `clean -fd` are refused everywhere by the older command rules)
+    ("B15-T5 git reset --hard in ~/.claude", sh("git -C ~/.claude reset --hard HEAD~1"), None, ELSEWHERE, "deny"),
+    ("B15-T5 git stash pop in ~/.claude", sh("git -C ~/.claude stash pop"), None, ELSEWHERE, "ask"),
+    ("B15-T5 git clean in ~/.claude", sh("git -C ~/.claude clean -fd"), None, ELSEWHERE, "deny"),
+    ("B15-T5 git reset --keep in ~/.claude", sh("git -C ~/.claude reset --keep HEAD~1"), None, ELSEWHERE, "ask"),
+    ("B15-T5 a skill", sh("echo x >> ~/.claude/skills/plan/SKILL.md"), None, ELSEWHERE, "ask"),
+    ("B15-T5 a rule", sh("echo x >> ~/.claude/rules/python.md"), None, ELSEWHERE, "ask"),
+    ("B15-T5 settings.local.json", sh("echo x >> ~/.claude/settings.local.json"), None, ELSEWHERE, "ask"),
+    ("B15-T5 a rule, by the Edit tool", edit(f"{CLAUDE}/rules/python.md", "a", "b"), None, ELSEWHERE, "ask"),
+    ("B15-T5 a skill, by the Write tool", ("Write", {"file_path": f"{CLAUDE}/skills/plan/SKILL.md", "content": "x"}), None, ELSEWHERE, "ask"),
+    ("B15-T5 the release merge is not asked about", sh("git -C ~/.claude merge --ff-only devenv-final"), None, ELSEWHERE, "allow"),
+    ("B15-T5 fetch is not asked about", sh("git -C ~/.claude fetch -q origin"), None, ELSEWHERE, "allow"),
+    ("B15-T5 git log in ~/.claude", sh("git -C ~/.claude log --oneline -3"), None, ELSEWHERE, "allow"),
+    ("B15-T5 the same write in the work tree", sh("echo x >> hooks/guard.py"), None, "C:/dev/_wt/claude-config", "allow"),
+    ("B15-T5 git checkout in another repository", sh("git -C C:/dev/memo-board checkout -- src"), None, ELSEWHERE, "allow"),
+    ("B15-T5 git restore in another repository", sh("git restore src/a.py"), None, ELSEWHERE, "allow"),
+    ("B15-T5 a plan file in ~/.claude", sh("echo x >> ~/.claude/docs/plans/x.md"), None, ELSEWHERE, "allow"),
+    ("B15-T5 cd with a pattern elsewhere", sh("cd C:/dev/memo-*/src && echo x >> a.py"), None, ELSEWHERE, "allow"),
 ]  # fmt: skip
 # the pure helpers of guard-b15, called in process
 import importlib.util
