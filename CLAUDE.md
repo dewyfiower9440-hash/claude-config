@@ -28,7 +28,7 @@
 - If the same lesson applies to several projects, propose promoting it to `~/.claude/rules/` or this file; do not promote without approval.
 
 ## 2b. Context hygiene
-- Delegate broad searches and long outputs to subagents (`Explore` for code sweeps, `test-runner` for long suites) so only the conclusion enters the main context.
+- Delegate broad searches and long outputs to subagents (`Explore` for code sweeps, `test-runner` for long suites) so only the conclusion enters the main context. The post hook says so once per turn after a large shell output (`CLAUDE_OUTPUT_ADVICE_CHARS`, default 8000) or one saved to a file (`<persisted-output>`), and suggests `researcher`/context7 when a dependency is added in a session that has not looked anything up there.
 - Work from the plan file for anything multi-step; keep progress in its checkboxes, not in long chat summaries. Keep tool output small: filter (`-q`, `| tail`, `head_limit`), do not re-read files you just edited, and end each step with a one-line status.
 - Auto-memory is stored per working directory (`~/.claude/projects/<cwd-slug>/memory/`): a session started in another folder does not see it. Start sessions from the project root. To look through the memory of other folders, run `python -I ~/.claude/hooks/memory_search.py <words> --all` from Git Bash (PowerShell does not expand `~`); it only reads.
 
@@ -75,7 +75,7 @@ No preamble, no restating the request, no self-praise, no long explanations unle
 
 ## 8. Skills & subagents
 - Skill registry and acquisition policy: `~/.claude/skills/SKILLS.md`. When a task would clearly benefit from a skill that does not exist (a recurring workflow done 2+ times, or a missing capability), **propose** it: search the official Anthropic plugin marketplace first, otherwise draft our own. Third-party skills are read in full and reviewed (scripts, commands, network calls) before proposing. Install only after my approval, then update SKILLS.md.
-- Subagents: `code-reviewer` (after non-trivial changes), `test-runner` (long suites), `researcher` (library/API questions; uses Context7), `security-auditor` (before deploys; auth/secrets/deps changes). `/deep-review` runs the two reviewers together, then the gate in the main session. `/predeploy` gates every deploy.
+- Subagents: `code-reviewer` (after non-trivial changes), `test-runner` (long suites), `researcher` (library/API questions; uses Context7), `security-auditor` (before deploys; auth/secrets/deps changes). `/deep-review` runs the two reviewers together, then the gate in the main session. `/predeploy` gates every deploy. Before a `git commit` of a change the review rules apply to (3+ code files, 150+ lines, a risky path, tests together with implementation), run `code-reviewer` on it. The pre hook refuses such a commit once when no ended reviewer saw this content (`CLAUDE_COMMIT_REVIEW=block`, default; `notify` or `off` to relax), and the Stop hook asks for the review too (`CLAUDE_REVIEW_GATE=1`). Commit through `/commit` also when you decide to commit yourself.
 
 ## 9. Working preferences (apply in every project)
 - **Requirement interviews:** one `AskUserQuestion` at a time, numbered `[n/N]`, recommended option first, choices plus free text. Never a long list of questions in one message.

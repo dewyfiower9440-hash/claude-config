@@ -24,7 +24,7 @@ Built-in or plugin skills used as-is: `code-review`, `simplify`, `security-revie
 
 Account-synced skills: `skills/synced/` is written by claude.ai (anthropic-skills such as docx, pdf, pptx, xlsx, docs, deep-research, browser/computer-use guides). It is gitignored and managed outside this repository; do not edit it here.
 
-Usage evidence: in transcripts 2026-07-22..2026-11-07 (34 sessions) none of the own skills had been invoked through the Skill tool. In the final-check session of 2026-11-16 (a task that named no tool) `new-project`, `plan`, `implement` and `debug` were invoked unprompted (`docs/plans/archive/2026-11-16-devenv-p4.md`, progress record). `/skill-doctor` shows skills never invoked. Judge additions and pruning from real project use.
+Usage evidence: in transcripts 2026-07-22..2026-11-07 (34 sessions) none of the own skills had been invoked through the Skill tool. In the final-check session of 2026-11-16 (a task that named no tool) `new-project`, `plan`, `implement` and `debug` were invoked unprompted (`docs/plans/archive/2026-11-16-devenv-p4.md`, progress record). In a 5-hour project session of 2026-11-19 (596 tool calls, 87 files written, 3 commits; `C:\dev\work\analysis-2026-11-19-session-2ea67f50.md`) there were 0 skill calls, 0 subagent calls and 2 MCP calls: v1.1 (`docs/plans/2026-11-19-devenv-v1-1.md`) records Skill and MCP calls in the hook state and asks for them at the moment of the act (a commit, a large output, a dependency added, a plan written by hand). `/skill-doctor` shows skills never invoked. Judge additions and pruning from real project use.
 
 ## Acquisition policy (what Claude does when a skill is missing)
 

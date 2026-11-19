@@ -36,12 +36,22 @@
 | 때 | hook | 하는 일 |
 |---|---|---|
 | 도구 호출 직전 | `guard.py` | 비밀 파일(`.env`, 키, `~/.aws/credentials`…) 읽기·쓰기 거부, 보호 폴더(`~/.claude/discipline`·`state`, `%TEMP%\claude-discipline`) 접근 거부, 홈·`C:\dev`·드라이브 루트의 재귀 삭제 거부, `~/.claude`의 hooks·agents·skills·rules·settings·commands 직접 쓰기는 **확인 창(ask)**, read-only subagent의 쓰기 거부. 패턴(`.e*`, `{a,b}`, `$TEMP`)과 표기 변형도 같이 본다 |
-| 도구 호출 직전 | `discipline.py pre` | 계획 범위 밖 편집 기록(warn), 5개 초과 편집 차단, 승인 상태 확인 |
-| 도구 호출 직후 | `discipline.py post` | 코드 편집·검증 실행·계획 승인 기록; `.py`·`.md`를 저장할 때 **포매터**(ruff format, 미사용 import 보고; import 정렬은 하지 않음) |
+| 도구 호출 직전 | `discipline.py pre` | 계획 범위 밖 편집 기록(warn), 5개 초과 편집 차단, 승인 상태 확인; 리뷰 기준에 해당하는 변경을 `code-reviewer` 없이 `git commit`하면 **한 번 막는다**(같은 내용으로 다시 실행하면 통과) |
+| 도구 호출 직후 | `discipline.py post` | 코드 편집·검증 실행·계획 승인·스킬·MCP 호출 기록; `.py`·`.md`를 저장할 때 **포매터**(ruff format, 미사용 import 보고; import 정렬은 하지 않음); 알림(턴당 1회씩): 큰 셸 출력 → `test-runner`/`Explore`, 의존성 추가 → `researcher`(context7), docs/plans를 스킬 없이 작성 → `/plan`과 Write 도구 |
 | 프롬프트 제출 | `discipline.py prompt` | 턴 시작, 위험 점수 안내, 프롬프트 첫 줄의 `task:<id>`·`ack-missing <경로>` 처리 |
 | 턴 종료 | `discipline.py stop` | 마지막 검증 뒤 코드가 바뀌었으면 **게이트를 다시 돌리라고 한 번 막는다**; `ci: required`인데 push 안 됨/CI 실패면 한 번 알린다; 추적 중 저장소가 사라지면 "미확인"으로 알린다 |
 | subagent 시작·종료 | `discipline.py agent-start/stop` | 임시 폴더 안내 주입, 결과 기록 |
 | 세션 종료 | `handoff.py` | 종료 기록(다음 SessionStart가 보여 준다) |
+
+v1.1의 알림·차단을 조절하는 환경변수(`settings.json`의 `env`):
+
+| 변수 | 기본값 | 뜻 |
+|---|---|---|
+| `CLAUDE_COMMIT_REVIEW` | `block` | 미리뷰 커밋을 한 번 막음. `notify`는 커밋 뒤 알림만, `off`는 검사 안 함 |
+| `CLAUDE_REVIEW_GATE` | `1` | Stop에서 리뷰 기준에 해당하는 변경의 리뷰를 한 번 요구. 빼면 기록만 |
+| `CLAUDE_OUTPUT_ADVICE_CHARS` | `8000` | 큰 출력 알림의 기준(1000~1000000자) |
+
+승인이 `plan_changed(<부분>)`로 취소되면 괄호 안이 승인 뒤 바뀐 부분이다. 범위·단계를 바꾼 것이면 ExitPlanMode로 다시 승인받고, 표기만 고치려던 것이면 본문 대신 `## 진행 기록`에 적는다.
 
 가드에 막혔을 때: **우회하지 않는다**(따옴표·변수·다른 표기로 다시 시도하지 않는다). 그 명령이 정말 필요하면 "사용자가 직접 실행"으로 넘긴다. 막힌 것이 명백한 오차단이면 그 명령과 메시지를 보고에 적는다(백로그로 간다).
 
@@ -55,7 +65,7 @@
 
 - **스킬**: `/plan`(설계·3+ 파일) → `/implement`(승인된 계획 실행) → `/commit`(커밋·push·CI). 버그는 `/debug`(재현·실패 테스트·최소 수정), 구조 변경은 `/refactor`, 큰 변경 뒤 `/deep-review`, 배포 전 `/predeploy`, 새 프로젝트 `/new-project`, hook 반영은 `/release-hooks`. headless(`claude -p`)에서는 모델이 스킬을 부르지 않고 직접 계획을 쓰는 것이 관측됐으므로 대화형에서 `/plan`을 명시해 부르는 편이 확실하다.
 - **subagent**(모두 읽기 전용, 가드가 강제; 보고는 단서이고 증거가 아니다 — 게이트는 주 세션이 돌린다):
-  - `code-reviewer`: 커밋 전·큰 변경 뒤 diff 리뷰. v1.0 시험에서 실행으로 확인한 결함을 `파일:줄`로 냈다.
+  - `code-reviewer`: 커밋 전·큰 변경 뒤 diff 리뷰. v1.0 시험에서 실행으로 확인한 결함을 `파일:줄`로 냈다. v1.1부터 커밋 직전 hook이 미리뷰를 한 번 막으므로, 커밋하기 전에 먼저 부른다.
   - `test-runner`: 긴 테스트의 진단 요약(결과를 그대로 검증으로 쓰지 않는다).
   - `researcher`: 라이브러리·API 질문(Context7 우선, 출처 URL 포함).
   - `security-auditor`: 배포 전, 인증·비밀·의존성·CI 변경 때.

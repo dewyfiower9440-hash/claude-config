@@ -1,6 +1,6 @@
 ---
 name: commit
-description: Self-review the working changes against a checklist, split them into logical Conventional Commits on main, and (after confirmation) push and watch CI, diagnosing failures. Use when the user says commit, save my work, push, or asks for a commit message. Can also draft a PR when asked. Not for reviewing a change (/deep-review), for a release check (/predeploy), or for releasing this hooks repository (/release-hooks).
+description: Self-review the working changes against a checklist, split them into logical Conventional Commits on main, and (after confirmation) push and watch CI, diagnosing failures. Use when the user says commit, save my work, push, or asks for a commit message, and also whenever Claude itself is about to run git commit (an /implement step included). Can also draft a PR when asked. Not for reviewing a change (/deep-review), for a release check (/predeploy), or for releasing this hooks repository (/release-hooks).
 argument-hint: [push] [pr] [hint about the change]
 ---
 
