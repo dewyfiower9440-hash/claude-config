@@ -159,9 +159,8 @@ def plan_task(text: str) -> str | None:
     return None
 
 
-def normalize_core(text: str) -> str:
-    """What an approval covers: every frontmatter key except `status`, and the whole body
-    except checkbox state and the progress-log section."""
+def _core_halves(text: str) -> tuple[list[str], list[str]]:
+    """The covered frontmatter lines and body lines (see normalize_core)."""
     fm, body = _split(text)
     keys = [
         ln.rstrip()
@@ -169,7 +168,13 @@ def normalize_core(text: str) -> str:
         if ln.strip() and not STATUS_LINE.match(ln.strip())
     ]
     body = PROGRESS.sub("", CHECKED.sub(r"\1[ ]", body))
-    lines = [ln.rstrip() for ln in body.strip().splitlines()]
+    return keys, [ln.rstrip() for ln in body.strip().splitlines()]
+
+
+def normalize_core(text: str) -> str:
+    """What an approval covers: every frontmatter key except `status`, and the whole body
+    except checkbox state and the progress-log section."""
+    keys, lines = _core_halves(text)
     return "---\n" + "\n".join(keys) + "\n---\n" + "\n".join(lines)
 
 
@@ -190,13 +195,13 @@ STEPS_HEADINGS = r"(단계|Steps)"
 def _parts(text: str) -> dict[str, str]:
     from planscope import DATA_SCOPE_HEADINGS, SCOPE_HEADINGS
 
-    core = normalize_core(text)
-    _, fm, body = core.split("---\n", 2)
+    keys, lines = _core_halves(text)
+    fm = "\n".join(keys)
     out = {PART_FRONTMATTER: fm, PART_SCOPE: "", PART_STEPS: "", PART_REST: ""}
     scope = re.compile(rf"^##\s*({SCOPE_HEADINGS}|{DATA_SCOPE_HEADINGS})\s*$")
     steps = re.compile(rf"^##\s*{STEPS_HEADINGS}\s*$")
     part = PART_REST
-    for line in body.split("\n"):
+    for line in lines:
         if line.startswith("##") and not line.startswith("###"):
             part = (
                 PART_SCOPE

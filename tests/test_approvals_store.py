@@ -229,6 +229,23 @@ check(
     [changed(None, PLAN), changed("x", PLAN), changed({}, PLAN)],
     [[], [], []],
 )
+DASHED = PLAN.replace("task: widget\n", "task: widget\ntitle: a---\n")
+check(
+    "P-T4b (review finding 9) a frontmatter value ending in --- stays in the frontmatter part",
+    (
+        changed(parts_of(DASHED), DASHED.replace("title: a---", "title: b---")),
+        changed(parts_of(DASHED), DASHED.replace("1. a", "1. z")),
+    ),
+    (["frontmatter"], ["단계"]),
+)
+check(
+    "P-T4c ... and no frontmatter line leaks into the other parts",
+    (
+        "title: a---" in ap._parts(DASHED)["frontmatter"],
+        "---" in ap._parts(DASHED)["그 밖"],
+    ),
+    (True, False),
+)
 rp = rec_for(part_hashes=ph)
 check(
     "P-T5 check: a record with part hashes names the changed part in its reason",
