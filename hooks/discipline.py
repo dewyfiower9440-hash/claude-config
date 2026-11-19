@@ -885,6 +885,9 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
         refusal = shell_write_denial(data, state, str(ti.get("command", "")), cwd)
         if refusal:
             emit_pre("deny", refusal)
+        refusal = commit_review_denial(data, state, str(ti.get("command", "")), cwd)
+        if refusal:
+            emit_pre("deny", refusal)
         tests = deleted_test_files(ti.get("command", ""))
         if tests:
             emit_pre(
@@ -968,6 +971,182 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
         )
 
 
+# ---------------------------------------------------------------- v1.1: the commit check
+COMMIT_REVIEW_MODES = ("block", "notify", "off")
+MAX_COMMIT_REVIEW_ROOTS = 10
+REASON_COMMIT_REVIEW = (
+    "[discipline] 커밋 전 독립 리뷰가 없습니다: {root}의 변경이 리뷰 기준({why})에 해당하는데 "
+    "리뷰 상태가 {state}입니다({state_why}). 커밋하기 전에 `code-reviewer` 에이전트"
+    "(Agent subagent_type=code-reviewer)로 이 변경을 리뷰하고 CONFIRMED 지적을 고치세요.{skill} "
+    "이 커밋은 한 번만 막습니다: 그대로 다시 실행하면 통과하며, 그때는 리뷰 없이 커밋했음을 보고에 "
+    "적으세요. (CLAUDE_COMMIT_REVIEW=notify|off 로 완화)"
+)
+COMMIT_REVIEW_NOTE = (
+    "[discipline] 방금 커밋한 {root}의 변경은 리뷰 기준({why})에 해당하는데 리뷰 상태가 "
+    "{state}입니다({state_why}). `code-reviewer` 에이전트(Agent subagent_type=code-reviewer)로 "
+    "리뷰하고 CONFIRMED 지적은 고쳐서 커밋하세요.{skill} (알림이며 차단이 아닙니다.)"
+)
+COMMIT_SKILL_HINT = " 커밋 절차 전체(자체 점검·분할·메시지)는 `/commit` 스킬(Skill commit)로 실행하세요."
+REVIEW_STATE_WHY = {
+    "missing": "이 변경을 본 리뷰어 없음",
+    "stale": "리뷰 뒤에 코드가 다시 바뀜",
+    "running": "리뷰어가 아직 끝나지 않음",
+}
+
+
+def commit_review_mode(raw: object) -> str:
+    """CLAUDE_COMMIT_REVIEW: block (default), notify or off; anything else is block."""
+    if isinstance(raw, str) and raw.strip().lower() in COMMIT_REVIEW_MODES:
+        return raw.strip().lower()
+    return "block"
+
+
+def commit_commands(command: object, dialect: str, cwd: str) -> list[str]:
+    """The working directory of every `git commit` a shell command runs (as git reads it:
+    `git -C x commit`, after `cd`), none for a dry run, a nested command or a command that
+    cannot be parsed."""
+    if not isinstance(command, str):
+        return []
+    from shellparse import ParseError, parse, program_and_args
+    from verification import cwd_at
+
+    try:
+        cmds = [
+            c
+            for c in parse(command, "powershell" if dialect == "powershell" else "bash")
+            if not c.nested
+        ]
+    except ParseError:
+        return []
+    out: list[str] = []
+    for i, cmd in enumerate(cmds):
+        program, args = program_and_args(cmd)
+        if program != "git" or _git_subcommand(args)[:1] != ["commit"]:
+            continue
+        sub = _git_subcommand(args)
+        if "--dry-run" in sub:
+            continue
+        where = cwd_at(cmds, i, cwd)
+        globals_ = args[: len(args) - len(sub)]
+        for j, a in enumerate(globals_):
+            if a == "-C" and j + 1 < len(globals_):
+                where = os.path.join(where, globals_[j + 1])
+        out.append(where)
+    return out
+
+
+def commit_review_roots(state: dict[str, Any], top: str) -> list[str]:
+    """The edited projects whose files the repository at `top` holds (a project is its
+    policy root, "" when none is declared, so a file of the entry decides)."""
+    out: list[str] = []
+    for root, entry in sorted((state.get("dirty") or {}).items()):
+        if not isinstance(entry, dict):
+            continue
+        files = [str(f) for f in entry.get("files") or []]
+        if (root and _inside(root, top)) or any(_inside(f, top) for f in files):
+            out.append(root)
+    return out[:MAX_COMMIT_REVIEW_ROOTS]
+
+
+def commit_review_problem(
+    state: dict[str, Any], cwd: str, where: str
+) -> tuple[str, dict[str, str]] | None:
+    """(once-key, message fields) for the first edited project in the repository the commit
+    runs in whose change needs a review it does not have; None when every one is reviewed
+    (or needs none)."""
+    top = _v2_root(where)
+    for root in commit_review_roots(state, top):
+        entry = (state.get("dirty") or {}).get(root) or {}
+        why = review_triggers(entry, root)
+        if not why:
+            continue
+        digests = evidence_digests(state, root, cwd)
+        verdict = review_state(state, root, digests)
+        if verdict in ("none", "current"):
+            continue
+        content = (
+            "|".join(sorted(digests.values())) if digests else str(entry.get("at"))
+        )
+        key = f"{root}|commit-review|{content}"
+        return key, {
+            "root": root or top,
+            "why": ", ".join(why),
+            "state": verdict,
+            "state_why": REVIEW_STATE_WHY.get(verdict, verdict),
+        }
+    return None
+
+
+def commit_review_denial(
+    data: dict[str, Any], state: dict[str, Any], command: str, cwd: str
+) -> str | None:
+    """v1.1 step 2: the main conversation's `git commit` of a change that needs an
+    independent review and has none is refused once (block), or noted after the commit
+    (notify; also inside the /commit skill, whose run is recorded this turn). A problem in
+    the check itself refuses nothing: the commit is not what the hook protects."""
+    mode = commit_review_mode(os.environ.get("CLAUDE_COMMIT_REVIEW"))
+    if mode == "off" or actor(data) != "main":
+        return None
+    try:
+        dialect = "powershell" if data.get("tool_name") == "PowerShell" else "bash"
+        for where in commit_commands(command, dialect, cwd):
+            found = commit_review_problem(state, cwd, where)
+            if found is None:
+                continue
+            key, fields = found
+            told = state.setdefault("notified", {})
+            if key in told:
+                return None  # once per content
+            told[key] = state.get("turn")
+            in_skill = skill_used_this_turn(state, "commit")
+            fields["skill"] = "" if in_skill else COMMIT_SKILL_HINT
+            if mode == "block" and not in_skill:
+                return REASON_COMMIT_REVIEW.format(**fields)
+            state["commit_review_note"] = {
+                "id": str(data.get("tool_use_id") or ""),
+                "text": COMMIT_REVIEW_NOTE.format(**fields),
+            }
+            return None
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+        log.exception("discipline.commit_review_failed")
+    return None
+
+
+def take_commit_review_note(data: dict[str, Any], state: dict[str, Any]) -> None:
+    """The note the commit's PreToolUse prepared, said after that very tool call only."""
+    note = state.pop("commit_review_note", None)
+    if isinstance(note, dict) and note.get("id") == str(data.get("tool_use_id") or ""):
+        add_post_note(str(note.get("text") or ""))
+
+
+# ---------------------------------------------------------------- PostToolUse notes
+_post_notes: list[str] = []
+
+
+def add_post_note(text: str) -> None:
+    """Queue one additionalContext line; on_post prints them together as the one JSON
+    object a hook may write."""
+    if text and text not in _post_notes:
+        _post_notes.append(text)
+
+
+def flush_post_notes() -> None:
+    if not _post_notes:
+        return
+    text = "\n\n".join(_post_notes)
+    _post_notes.clear()
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": text,
+                }
+            }
+        )
+    )
+
+
 OUTPUT_OBSERVE_MIN = 2000  # smaller outputs are not worth a row
 OUTPUT_ADVICE_DEFAULT = 8000  # initial prior; re-tune from output-size-observe.jsonl
 OUTPUT_ADVICE_NOTE = (
@@ -1048,18 +1227,7 @@ def note_output_size(
             and state.get("output_advice_turn") != state.get("turn")
         ):
             state["output_advice_turn"] = state.get("turn") or 0
-            print(
-                json.dumps(
-                    {
-                        "hookSpecificOutput": {
-                            "hookEventName": "PostToolUse",
-                            "additionalContext": OUTPUT_ADVICE_NOTE.format(
-                                n=size, limit=limit
-                            ),
-                        }
-                    }
-                )
-            )
+            add_post_note(OUTPUT_ADVICE_NOTE.format(n=size, limit=limit))
         row = {
             "at": time.time(),
             "chars": size,
@@ -1473,6 +1641,7 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
                 state["approval"] = None
                 state["approval_warning"] = v2_failure(e)
         note_output_size(data, state, failed=False)
+        take_commit_review_note(data, state)
     elif tool in ("Agent", "Task"):
         if ti.get("subagent_type") in REVIEW_AGENTS:
             state["last_review"] = now  # a review, not verification
@@ -1521,6 +1690,7 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
             left = state.get("ledger_closed")
             if isinstance(left, dict):
                 left.pop("pin", None)
+    flush_post_notes()
 
 
 def observe_authz(reason: str, path: str, tool: object, base: object = None) -> None:
@@ -4065,17 +4235,24 @@ MAX_REVIEW_OBSERVED = 50
 MAX_REVIEW_ROOTS = 10
 
 
-def review_state(state: dict[str, Any], root: str) -> str:
+def review_state(
+    state: dict[str, Any], root: str, digests: dict[str, str] | None = None
+) -> str:
     """Whether the change in project `root` has had its independent review (P1-02):
     "none" (no review rule applies), "current" (a reviewer that has ended saw exactly this
     content), "running" (one that saw it has not ended), "stale" (reviewed, changed since),
-    "missing". A project whose content git does not track is judged by time, as before."""
+    "missing". A project whose content git does not track is judged by time, as before.
+    `digests` given: the content as it is now (the commit check, between two Stops), in
+    place of what the last refresh recorded."""
     entry = (state.get("dirty") or {}).get(root)
     if not isinstance(entry, dict) or not review_triggers(entry, root):
         return "none"
-    content = (state.get("content") or {}).get(root)
-    digests = content.get("digests") if isinstance(content, dict) else None
-    if not digests or root not in (state.get("content_tracked_roots") or []):
+    if digests is None:
+        content = (state.get("content") or {}).get(root)
+        digests = content.get("digests") if isinstance(content, dict) else None
+        if root not in (state.get("content_tracked_roots") or []):
+            digests = None
+    if not digests:
         reviewed_at = _number(state.get("last_review")) or 0.0
         return (
             "current" if reviewed_at >= (_number(entry.get("at")) or 0.0) else "missing"
