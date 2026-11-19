@@ -733,6 +733,16 @@ for label, (tool, ti), want in S_CASES:
 # against the live guard on 2026-11-19 (all came back "allow" or, for the over-blocks,
 # "deny"). Each case names who runs it, where, and what the guard must answer.
 APPDATA = os.environ.get("APPDATA", f"{HOME}/AppData/Roaming").replace("/", "\\")
+# B15-T3 runs in real folders: a pattern is judged by what it expands to there
+SECRETS = Path(tempfile.mkdtemp(prefix="guard-secrets-"))
+(SECRETS / ".env").write_text("TOKEN=x\n", encoding="utf-8")
+(SECRETS / "a.py").write_text("x = 1\n", encoding="utf-8")
+(SECRETS / "src").mkdir()
+(SECRETS / "src" / "id_token.py").write_text("x = 1\n", encoding="utf-8")
+(SECRETS / "src" / "credentials_view.py").write_text("x = 1\n", encoding="utf-8")
+EMPTY = Path(tempfile.mkdtemp(prefix="guard-empty-"))
+(EMPTY / "a.py").write_text("x = 1\n", encoding="utf-8")
+SECRETS_DIR, EMPTY_DIR = str(SECRETS), str(EMPTY)
 B15_CASES: list[tuple[str, tuple[str, dict], str | None, str, str]] = [
     # B15-T1 a walk over the temp folder reaches the session state under it; `cd /tmp`
     # is the temp folder too; APPDATA forms resolve like the home forms
@@ -766,6 +776,36 @@ B15_CASES: list[tuple[str, tuple[str, dict], str | None, str, str]] = [
     ("B15-T2 ordinary brace paths", sh("cp src/{a,b}.py dst/"), None, ELSEWHERE, "allow"),
     ("B15-T2 brace in a message", sh('git commit -m "fix {a,b}"'), None, ELSEWHERE, "allow"),
     ("B15-T2 PowerShell has no brace expansion", ps("Get-Content .{env,x}"), None, ELSEWHERE, "allow"),
+    # B15-T3 a pattern is judged by the files it matches where the command runs; the
+    # name-share rule is only for a folder the guard cannot see
+    ("B15-T3 cat .e*", sh("cat .e*"), None, SECRETS_DIR, "deny"),
+    ("B15-T3 cat .e??", sh("cat .e??"), None, SECRETS_DIR, "deny"),
+    ("B15-T3 cat ./.e*", sh("cat ./.e*"), None, SECRETS_DIR, "deny"),
+    ("B15-T3 head .[e]nv", sh("head .[e]nv"), None, SECRETS_DIR, "deny"),
+    ("B15-T3 a program the guard does not know", sh("base64 .en*"), None, SECRETS_DIR, "deny"),
+    ("B15-T3 PowerShell wildcards match dot files", ps("Get-Content *env"), None, SECRETS_DIR, "deny"),
+    # (forward slashes: in a Bash command line an unquoted backslash is an escape)
+    ("B15-T3 absolute pattern", sh(f"cat {SECRETS_DIR.replace(chr(92), '/')}/.e*"), None, ELSEWHERE, "deny"),
+    ("B15-T3 Bash wildcards do not match dot files", sh("cat *env"), None, SECRETS_DIR, "allow"),
+    ("B15-T3 nothing secret matches", sh("cat *.py"), None, SECRETS_DIR, "allow"),
+    ("B15-T3 git add of a look-alike", sh("git add src/id_*"), None, SECRETS_DIR, "allow"),
+    ("B15-T3 cat of a look-alike", sh("cat src/credentials*"), None, SECRETS_DIR, "allow"),
+    ("B15-T3 no .env here", sh("cat .e*"), None, EMPTY_DIR, "allow"),
+    ("B15-T3 listing a secret's name", sh("ls .env*"), None, SECRETS_DIR, "allow"),
+    ("B15-T3 listing a secret's name, exactly", sh("ls -la .env"), None, SECRETS_DIR, "allow"),
+    ("B15-T3 listing look-alikes", sh("ls src/credentials*"), None, SECRETS_DIR, "allow"),
+    ("B15-T3 Test-Path on a secret", ps("Test-Path .env"), None, SECRETS_DIR, "allow"),
+    ("B15-T3 a search filter is not a path", sh("rg -g '/**/*.py' foo"), None, SECRETS_DIR, "allow"),
+    ("B15-T3 a search filter is not a path, = form", sh("rg --glob='**/*.env' foo src"), None, SECRETS_DIR, "allow"),
+    ("B15-T3 a search type is not a path", sh("grep -r --include='*.env' x src"), None, SECRETS_DIR, "allow"),
+    ("B15-T3 rg -f reads a file", sh("rg -f .env x"), None, SECRETS_DIR, "deny"),
+    ("B15-T3 the folder cannot be seen: name rule stays", sh("cat .en*"), None, ELSEWHERE, "deny"),
+    ("B15-T3 the folder cannot be seen: too short for the name rule", sh("cat .e*"), None, ELSEWHERE, "allow"),
+    ("B15-T3 reading the secret by name is still refused", sh("cat .env"), None, SECRETS_DIR, "deny"),
+    # a folder a pattern matches is not read (a bare `*` in a line of code, run in ~/.claude,
+    # matched the discipline folder: 7 corpus commands)
+    ("B15-T3 a pattern matching a protected folder's name in code", sh('python -I -c "import glob; print(glob.glob(\'*\'))"'), None, CLAUDE, "allow"),
+    ("B15-T3 a pattern over the drive root in code", sh('python -c "x = [p for p in \'/*\']"'), None, "C:/", "allow"),
 ]  # fmt: skip
 # the pure helpers of guard-b15, called in process
 import importlib.util

@@ -766,6 +766,16 @@ FILE_PROGRAMS = {
     "test-path", "resolve-path", "get-filehash", "import-csv", "compress-archive",
     "cd", "pushd", "chdir", "set-location", "sl",
 }  # fmt: skip
+# Programs that print a file's name or metadata, never its content (guard-b15 3: `ls .env*`
+# is not a read of .env).
+LISTING_PROGRAMS = {"ls", "dir", "gci", "get-childitem", "test-path", "stat"}
+# Search flags whose value is a filter over names, not a path the search reads (`rg -g`,
+# `grep --include`); `-f`/`--file` reads a pattern file and is not here on purpose.
+FILTER_FLAGS = {
+    "-g", "--glob", "--iglob", "-t", "--type", "-T", "--type-not", "--include",
+    "--exclude", "--exclude-dir", "-include", "-exclude",
+}  # fmt: skip
+GLOB_MATCH_LIMIT = 200
 
 
 def as_path(word: str, cwd: str, bare: bool = True) -> str | None:
@@ -871,6 +881,37 @@ GLOB_MIN_LITERALS = 3
 # rarer and counts sooner (`.git-c*`), but `.git*` is not an attempt on .git-credentials.
 GLOB_MIN_SHARE = 0.5
 GLOB_MIN_SHARE_DOT = 0.3
+
+
+def expand_glob(
+    word: str, cwd: str, dialect: Dialect, files_only: bool = True
+) -> list[str] | None:
+    """What a pattern word names where the command runs (absolute paths, at most
+    GLOB_MATCH_LIMIT; by default files only: a folder a pattern matches is not read, and a
+    bare `*` in a line of code matched the protected folders), judged by expanding it as
+    the shell would: Bash matches a dot file only with a segment that starts with a dot,
+    PowerShell always. None when the guard cannot see the folder the pattern starts in (a
+    variable, a folder that is not there) or the pattern walks any depth (`**`): the caller
+    falls back to the name rules."""
+    import glob
+
+    text = word.strip("'\"").rstrip(",")
+    cut = re.search(r"[*?\[]", text)
+    if not cut or "**" in text:
+        return None
+    split = max(text.rfind("/", 0, cut.start()), text.rfind("\\", 0, cut.start())) + 1
+    folder = as_path(text[:split] or ".", cwd)
+    if folder is None or not os.path.isdir(folder):
+        return None
+    pattern = text[split:]
+    try:
+        found = glob.glob(
+            pattern, root_dir=folder, include_hidden=dialect == "powershell"
+        )
+    except (OSError, ValueError, re.error):
+        return None
+    paths = [os.path.join(folder, f) for f in found[:GLOB_MATCH_LIMIT]]
+    return [p for p in paths if os.path.isfile(p)] if files_only else paths
 
 
 def glob_reaches_secret(word: str) -> str | None:
@@ -1138,7 +1179,15 @@ def check_isolation(
             pathlike = program in FILE_PROGRAMS or "/" in tok or "\\" in tok
             if tok and pathlike and glob_reaches_protected(tok, cwd, walks=False):
                 block(PROTECTED_REASON.format(path=tok))
-            hit = glob_reaches_secret(tok) if tok and pathlike else None
+            # guard-b15 3: what the pattern matches where the command runs decides, for
+            # any program; the name-share rule only where the folder cannot be seen
+            hit: str | None = None
+            if tok and re.search(r"[*?\[]", tok) and program not in LISTING_PROGRAMS:
+                matches = expand_glob(tok, cwd, dialect)
+                if matches is None:
+                    hit = glob_reaches_secret(tok) if pathlike else None
+                else:
+                    hit = next((m for m in matches if is_secret_path(m)), None)
             if hit:
                 block(
                     f"command touches a secret file (the pattern {tok} matches {hit})"
@@ -1259,11 +1308,16 @@ def check_parsed(
 
         data = message_value_indexes(program, args)
         data |= {k - 1 for k in search_patterns([program, *args]) if k >= 1}
+        if program in SEARCH_HEADS:  # `rg -g '*.py'`, `grep --include=*.env`: filters
+            flagged = {
+                k for k, a in enumerate(args) if a.lower().split("=")[0] in FILTER_FLAGS
+            }
+            data |= flagged | {k + 1 for k in flagged if "=" not in args[k]}
         if program == "git" and git_names_only(cmd, args):
             data = set(range(len(args)))  # names a file, cannot print it
         check_isolation(program, args, dialect, here, data)
         for k, arg in enumerate(args):
-            if k in data:
+            if k in data or program in LISTING_PROGRAMS:
                 continue
             for tok in (
                 t
