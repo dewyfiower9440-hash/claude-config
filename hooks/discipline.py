@@ -1156,13 +1156,28 @@ OUTPUT_ADVICE_NOTE = (
 )
 
 
+OUTPUT_EXPLORE_NOTE = (
+    "[discipline] 방금 셸 명령의 출력이 {n}자였습니다(기준 {limit}자){persisted}. 넓은 탐색·긴 파일 "
+    "읽기는 `Explore` subagent(코드 위치 찾기)나 `general-purpose` subagent에 맡기면 결론만 돌아와 "
+    "메인 컨텍스트가 줄어듭니다. 직접 볼 때는 범위를 좁히세요(head/tail, grep, sed -n). "
+    "(알림이며 차단이 아닙니다.)"
+)
+PERSISTED_MARK = "<persisted-output"
+PERSISTED_NOTE = "; 출력이 너무 커서 파일로 저장됨(persisted-output)"
+
+
 def response_chars(response: object) -> int:
     """How much text a shell tool result carries."""
+    return len(response_text(response))
+
+
+def response_text(response: object) -> str:
+    """The text of a shell tool result: the string itself, or the string values of a dict."""
     if isinstance(response, str):
-        return len(response)
+        return response
     if isinstance(response, dict):
-        return sum(len(v) for v in response.values() if isinstance(v, str))
-    return 0
+        return "".join(v for v in response.values() if isinstance(v, str))
+    return ""
 
 
 def advice_threshold(raw: object) -> int:
@@ -1206,7 +1221,10 @@ def note_output_size(
         size = response_chars(data.get("tool_response")) or response_chars(
             data.get("error") if failed else None
         )
-        if size < OUTPUT_OBSERVE_MIN:
+        # Claude Code saved an output too large for the conversation to a file: the
+        # result is short, the reading that follows is not
+        persisted = PERSISTED_MARK in response_text(data.get("tool_response"))
+        if size < OUTPUT_OBSERVE_MIN and not persisted:
             return
         from verification import find_policy
 
@@ -1219,15 +1237,21 @@ def note_output_size(
         )
         main = actor(data) == "main"
         limit = advice_threshold(os.environ.get("CLAUDE_OUTPUT_ADVICE_CHARS"))
-        if (
-            test
-            and main
-            and not failed
-            and size >= limit
-            and state.get("output_advice_turn") != state.get("turn")
-        ):
+        # one output hint per turn, whichever kind comes first
+        advise = (
+            main and not failed and state.get("output_advice_turn") != state.get("turn")
+        )
+        if advise and test and size >= limit:
             state["output_advice_turn"] = state.get("turn") or 0
             add_post_note(OUTPUT_ADVICE_NOTE.format(n=size, limit=limit))
+        elif advise and not test and (size >= limit or persisted):
+            # v1.1 step 3: a wide search or a long read in the main conversation
+            state["output_advice_turn"] = state.get("turn") or 0
+            add_post_note(
+                OUTPUT_EXPLORE_NOTE.format(
+                    n=size, limit=limit, persisted=PERSISTED_NOTE if persisted else ""
+                )
+            )
         row = {
             "at": time.time(),
             "chars": size,

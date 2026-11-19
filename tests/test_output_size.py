@@ -100,6 +100,11 @@ PROJ.mkdir(parents=True)
 subprocess.run(["git", "init", "-q"], cwd=PROJ, check=True)
 OBSERVED = HOME / "output-size-observe.jsonl"
 HINT = "test-runner"
+EXPLORE = "Explore"
+PERSISTED = (
+    "<persisted-output>Output too large (40000 chars). Saved to C:/tmp/x.txt"
+    "</persisted-output>"
+)
 SECRET_TEXT = "ZQXJ-output-marker"
 
 
@@ -128,6 +133,7 @@ def shell(
     mode: str = "post",
     env: dict = ENV,
     prompt_id: str = "p1",
+    persisted: bool = False,
     **who: object,
 ) -> tuple[int, str]:
     common = {
@@ -138,6 +144,8 @@ def shell(
     }
     hook("pre", s, env, prompt_id, **common)
     text = (SECRET_TEXT + "x" * size)[:size]
+    if persisted:
+        text = (PERSISTED + "x" * size)[:size]
     rc, out = hook(
         mode, s, env, prompt_id, tool_response={"stdout": text, "stderr": ""}, **common
     )
@@ -186,10 +194,42 @@ check(
 )
 rc, said = shell(s, "git log --stat", 9000)
 check(
-    "O-T8 a large output of something that is no test run: no hint, observed as such",
-    (HINT in said, rows()[-1].get("test"), rows()[-1].get("who")),
-    (False, False, "main"),
+    "O-T8 a large output of something that is no test run (v1.1): the Explore hint, observed as no test",
+    (
+        HINT in said,
+        EXPLORE in said,
+        "9000" in said,
+        rows()[-1].get("test"),
+        rows()[-1].get("who"),
+    ),
+    (False, True, True, False, "main"),
 )
+rc, said = shell(s, "cat docs/plans/big.md", 9000)
+check("O-T8b a second large output in the same turn: no second hint", said, "")
+hook("prompt", s, prompt_id="p3", prompt="next")
+rc, said = shell(s, TEST, 9000, prompt_id="p3")
+rc, said = shell(s, "cat docs/plans/big.md", 9000, prompt_id="p3")
+check(
+    "O-T8c one output hint per turn: after the test-runner hint, no Explore hint",
+    (EXPLORE in said, said),
+    (False, ""),
+)
+hook("prompt", s, prompt_id="p4", prompt="next")
+rc, said = shell(s, "find . -name '*.py'", 300, prompt_id="p4", persisted=True)
+check(
+    "O-T8d a small result that says the output was persisted to a file: the Explore hint, a row",
+    (
+        EXPLORE in said,
+        "persisted" in said.lower() or "파일" in said,
+        rows()[-1].get("chars"),
+    ),
+    (True, True, 300),
+)
+hook("prompt", s, prompt_id="p5", prompt="next")
+rc, said = shell(
+    s, "find . -name '*.py'", 9000, prompt_id="p5", agent_id="e1", agent_type="Explore"
+)
+check("O-T8e a large output inside a subagent: no hint", said, "")
 before = len(rows())
 rc, said = shell(s, TEST, 500)
 check(
