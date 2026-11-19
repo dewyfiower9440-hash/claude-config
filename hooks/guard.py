@@ -8,6 +8,7 @@ user is a PreToolUse permissionDecision of "ask" on stdout.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import re
@@ -700,6 +701,58 @@ def _env_value(m: re.Match[str]) -> str:
     return value if value else m.group(0)  # unset: left as it is (then not a path)
 
 
+# guard-b15 2: Bash expands `{a,b}` before anything else, so one word can name several
+# paths (`~/.claude/{discipline,x}/key`). The innermost brace with a comma first; a brace
+# without a comma is literal, as in Bash.
+BRACE_LIMIT = 64
+
+
+def _first_brace(word: str) -> tuple[int, list[int], int] | None:
+    """(start, top-level comma positions, end) of the leftmost `{a,b}` in `word` that has a
+    comma at its own level, braces inside it left as they are; None when there is none."""
+    start = word.find("{")
+    while start != -1:
+        depth, commas = 0, []
+        for i in range(start, len(word)):
+            c = word[i]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    if commas:
+                        return start, commas, i
+                    break
+            elif c == "," and depth == 1:
+                commas.append(i)
+        start = word.find("{", start + 1)
+    return None
+
+
+def brace_alternatives(word: str, limit: int = BRACE_LIMIT) -> list[str]:
+    """The words Bash makes of `word` by brace expansion (the word itself when it has no
+    `{a,b}`), at most `limit` of them: the leftmost brace first, each alternative then
+    expanded in turn (`{a,b{1,2}}` -> a, b1, b2)."""
+    found = _first_brace(word)
+    if found is None:
+        return [word]
+    start, commas, end = found
+    out: list[str] = []
+    bounds = [start, *commas, end]
+    for a, b in itertools.pairwise(bounds):
+        rest = word[:start] + word[a + 1 : b] + word[end + 1 :]
+        for expanded in brace_alternatives(rest, limit):
+            out.append(expanded)
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def _words(arg: str, dialect: Dialect) -> list[str]:
+    """What the shell makes of one argument before the program sees it."""
+    return brace_alternatives(arg) if dialect == "bash" and "{" in arg else [arg]
+
+
 # Programs whose plain-word arguments are files or folders. For any other program a word
 # without a path separator (`state` inside a line of Python, a branch name, a subcommand) is
 # not taken for a path: only words that look like one are.
@@ -997,7 +1050,11 @@ def check_recursive_delete(
 ) -> None:
     from verification import _inside, _resolve
 
-    for word in _delete_targets(program, args, dialect):
+    for word in (
+        w
+        for target in _delete_targets(program, args, dialect)
+        for w in _words(target, dialect)
+    ):
         text = re.sub(r"[\\/]\*+$", "", word.strip("'\"")) or word  # X/* empties X
         text = _HOME_FORM.sub(lambda _m: HOME_DIR, text)
         if re.search(r"[$%`*?\[]", text):
@@ -1063,7 +1120,9 @@ def check_isolation(
     for k, arg in enumerate(args):
         if k in data:
             continue
-        for tok in re.split(r"[\s'\"<>|;&()=,]+", arg):
+        for tok in (
+            t for w in _words(arg, dialect) for t in re.split(r"[\s'\"<>|;&()=,]+", w)
+        ):
             path = as_path(tok, cwd, program in FILE_PROGRAMS) if tok else None
             if path and in_protected(path):
                 block(PROTECTED_REASON.format(path=tok))
@@ -1206,7 +1265,11 @@ def check_parsed(
         for k, arg in enumerate(args):
             if k in data:
                 continue
-            for tok in re.split(r"[\s'\"<>|;&()=,]+", arg):
+            for tok in (
+                t
+                for w in _words(arg, dialect)
+                for t in re.split(r"[\s'\"<>|;&()=,]+", w)
+            ):
                 if tok and is_secret_path(tok):
                     block(f"command touches a secret file ({tok})")
                 # git's `<revision>:<path>` and `-L<range>:<path>` name a file too

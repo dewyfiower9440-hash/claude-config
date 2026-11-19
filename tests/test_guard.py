@@ -755,7 +755,50 @@ B15_CASES: list[tuple[str, tuple[str, dict], str | None, str, str]] = [
     ("B15-T1 the temp folder itself, listed", sh("ls $TEMP"), None, ELSEWHERE, "allow"),
     ("B15-T1 find -maxdepth 1 lists like ls", sh('find "$TEMP" -maxdepth 1 -name "lab-*" -mmin -60'), None, ELSEWHERE, "allow"),
     ("B15-T1 find without a depth limit walks", sh('find "$TEMP" -name "lab-*"'), None, ELSEWHERE, "deny"),
+    # B15-T2 Bash brace expansion names several paths in one word
+    ("B15-T2 protected folder in a brace", sh("cat ~/.claude/{discipline,x}/key"), None, ELSEWHERE, "deny"),
+    ("B15-T2 state folder in a brace", sh("cat /tmp/{claude-discipline,other}/x.json"), None, ELSEWHERE, "deny"),
+    ("B15-T2 secret file in a brace", sh("cat .{env,x}"), None, ELSEWHERE, "deny"),
+    ("B15-T2 secret file in a brace, prefix outside", sh("cat .en{v,vrc}"), None, ELSEWHERE, "deny"),
+    ("B15-T2 recursive delete in a brace", sh("rm -rf {~,/c/dev}"), None, ELSEWHERE, "deny"),
+    ("B15-T2 recursive delete, brace in the path", sh("rm -rf /c/{dev,tmp}"), None, ELSEWHERE, "deny"),
+    ("B15-T2 ordinary brace words", sh("echo {a,b}"), None, ELSEWHERE, "allow"),
+    ("B15-T2 ordinary brace paths", sh("cp src/{a,b}.py dst/"), None, ELSEWHERE, "allow"),
+    ("B15-T2 brace in a message", sh('git commit -m "fix {a,b}"'), None, ELSEWHERE, "allow"),
+    ("B15-T2 PowerShell has no brace expansion", ps("Get-Content .{env,x}"), None, ELSEWHERE, "allow"),
 ]  # fmt: skip
+# the pure helpers of guard-b15, called in process
+import importlib.util
+
+_spec = importlib.util.spec_from_file_location("guard_module", GUARD)
+assert _spec and _spec.loader
+guard_module = importlib.util.module_from_spec(_spec)
+sys.path.insert(0, str(Path(GUARD).parent))
+_spec.loader.exec_module(guard_module)
+for label, word, want_alts in (
+    ("B15-T2 brace_alternatives: no brace", "a/b", ["a/b"]),
+    ("B15-T2 brace_alternatives: one brace", "x/{a,b}/y", ["x/a/y", "x/b/y"]),
+    ("B15-T2 brace_alternatives: two braces", "{a,b}{1,2}", ["a1", "a2", "b1", "b2"]),
+    ("B15-T2 brace_alternatives: nested", "{a,b{1,2}}", ["a", "b1", "b2"]),
+    ("B15-T2 brace_alternatives: no comma is no brace", "f{x}", ["f{x}"]),
+):
+    got_alts = guard_module.brace_alternatives(word)
+    ok = got_alts == want_alts
+    fails += not ok
+    print(
+        ("OK  " if ok else "FAIL"),
+        label,
+        "->",
+        got_alts,
+        "" if ok else f"(want {want_alts})",
+    )
+big = "{" + ",".join(str(i) for i in range(100)) + "}"
+ok = len(guard_module.brace_alternatives(big)) == 64
+fails += not ok
+print(
+    ("OK  " if ok else "FAIL"),
+    "B15-T2 brace_alternatives: 100 alternatives are cut at 64",
+)
 for label, (tool, ti), agent, cwd, want in B15_CASES:
     got = answer(tool, ti, agent, cwd)
     ok = got == want
