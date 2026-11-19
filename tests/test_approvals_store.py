@@ -186,6 +186,84 @@ check(
     ap.check(r, root=ROOT, plan_text=PLAN.replace("1. a", "1. z"), now=NOW),
     ap.Verdict("plan_changed", revoke=True),
 )
+# ---- v1.1 step 6: a record that keeps the hash of each part says which part changed
+parts_of = getattr(ap, "part_hashes", lambda text: {})
+changed = getattr(ap, "changed_parts", lambda old, text: None)
+ph = parts_of(PLAN)
+check(
+    "P-T1 the parts: frontmatter, scope, steps, the rest",
+    sorted(ph),
+    sorted(["frontmatter", "변경 범위", "단계", "그 밖"]),
+)
+check(
+    "P-T2 what changes nothing in the core changes no part",
+    [
+        changed(ph, PLAN.replace("- [ ] 1. a", "- [x] 1. a")),
+        changed(ph, PLAN + "- step 1 done\n"),
+        changed(ph, PLAN.replace("in-progress", "done")),
+        changed(ph, PLAN.replace("\n", "\r\n")),
+    ],
+    [[], [], [], []],
+)
+check(
+    "P-T3 the changed part is named: scope / steps / frontmatter / the rest / several",
+    [
+        changed(ph, PLAN.replace("- src/**\n", "- src/**\n- C:/dev/qr-data/**\n")),
+        changed(ph, PLAN.replace("- [ ] 2. b\n", "- [ ] 2. b\n- [ ] 3. c\n")),
+        changed(ph, PLAN.replace("task: widget\n", "task: widget\ndata: allowed\n")),
+        changed(ph, PLAN.replace("- never touch qr-data\n", "")),
+        changed(ph, PLAN.replace("1. a", "1. z").replace("- src/**", "- lib/**")),
+        changed(ph, PLAN + "## 데이터 변경 범위\n- C:/data/**\n"),
+    ],
+    [
+        ["변경 범위"],
+        ["단계"],
+        ["frontmatter"],
+        ["그 밖"],
+        ["변경 범위", "단계"],
+        ["변경 범위"],
+    ],
+)
+check(
+    "P-T4 no part hashes (an older record) or junk: nothing named",
+    [changed(None, PLAN), changed("x", PLAN), changed({}, PLAN)],
+    [[], [], []],
+)
+rp = rec_for(part_hashes=ph)
+check(
+    "P-T5 check: a record with part hashes names the changed part in its reason",
+    [
+        ap.check(
+            rp,
+            root=ROOT,
+            plan_text=PLAN.replace("- src/**\n", "- src/**\n- C:/x/**\n"),
+            now=NOW,
+        ),
+        ap.check(rp, root=ROOT, plan_text=PLAN.replace("1. a", "1. z"), now=NOW),
+        ap.check(rp, root=ROOT, plan_text=PLAN, now=NOW),
+        ap.check(r, root=ROOT, plan_text=PLAN.replace("1. a", "1. z"), now=NOW),
+    ],
+    [
+        ap.Verdict("plan_changed(변경 범위)", revoke=True),
+        ap.Verdict("plan_changed(단계)", revoke=True),
+        ap.Verdict(None),
+        ap.Verdict("plan_changed", revoke=True),
+    ],
+)
+KEYP = b"k" * 32
+signed_p = ap.sign_record(rp, KEYP)
+signed_old = ap.sign_record(r, KEYP)
+check(
+    "P-T6 the part hashes are signed with the record; a record without them verifies as before",
+    (
+        signed_p.get("part_hashes") == ph,
+        ap.record_mac_ok(signed_p, KEYP),
+        ap.record_mac_ok({**signed_p, "part_hashes": {}}, KEYP),
+        "part_hashes" in signed_old,
+        ap.record_mac_ok(signed_old, KEYP),
+    ),
+    (True, True, False, False, True),
+)
 check(
     "check: plan file missing -> revoke",
     ap.check(r, root=ROOT, plan_text=None, now=NOW).revoke,

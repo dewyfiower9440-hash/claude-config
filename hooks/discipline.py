@@ -1995,6 +1995,21 @@ REASON_V2_INVALID = (
     "[discipline] 승인(task: {task})이 더 이상 유효하지 않아 쓰기를 차단합니다: {why}. "
     "계속하려면 계획을 다시 제시해 ExitPlanMode로 새 승인을 받으세요(과거 승인은 되살아나지 않습니다)."
 )
+# v1.1 step 6: what to do when the approved text itself was edited (plan_changed[(parts)])
+PLAN_CHANGED_HINT = (
+    " 괄호 안은 승인 뒤 바뀐 부분입니다. 승인은 frontmatter(status 줄 제외)·`## 변경 범위`·"
+    "`## 단계`·그 밖의 본문 전체를 덮으며, 체크박스와 `## 진행 기록`만 자유롭게 고칠 수 "
+    "있습니다. 범위·단계를 바꾸려면 바뀐 계획을 ExitPlanMode로 재승인받으세요. 표기만 고치고 싶을 때는 "
+    "본문을 고치지 말고 그 내용을 `## 진행 기록`에 적으세요."
+)
+
+
+def v2_invalid_reason(task: object, why: object) -> str:
+    reason = REASON_V2_INVALID.format(task=task, why=why)
+    # as the verdict, or as the reason of the revocation it was recorded with
+    if "plan_changed" in str(why):
+        reason += PLAN_CHANGED_HINT
+    return reason
 
 
 # == approvals.V2_FILES (test_approvals_v2 checks it): the marker, or any v2 file, means v2, so
@@ -2264,6 +2279,7 @@ def v2_record_approval(
         session_id=data.get("session_id"),
         prompt_id=data.get("prompt_id"),
         now=now,
+        part_hashes=ap.part_hashes(text),
     )
     state["approval"] = None
     try:
@@ -2460,7 +2476,7 @@ def v2_write_check(
             }
     state["approval_invalid"] = why
     state["v2_block"] = why
-    return REASON_V2_INVALID.format(task=ptr.get("task_id"), why=why)
+    return v2_invalid_reason(ptr.get("task_id"), why)
 
 
 MAX_DIRTY_FILES = 200

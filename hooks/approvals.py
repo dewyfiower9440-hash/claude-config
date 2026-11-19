@@ -83,6 +83,8 @@ RECORD_FIELDS = (
     "session_id",
     "prompt_id",
 )
+# signed when present (v1.1: part_hashes, see changed_parts)
+OPTIONAL_FIELDS = ("part_hashes",)
 
 
 # ---------------------------------------------------------------- errors
@@ -175,6 +177,56 @@ def core_hash(text: str) -> str:
     return hashlib.sha256(normalize_core(text).encode("utf-8")).hexdigest()
 
 
+# v1.1: the parts of the core, so a refusal can say which one changed. Only their hashes
+# are stored (the record keeps no plan text); the core hash alone still decides.
+PART_FRONTMATTER = "frontmatter"
+PART_SCOPE = "변경 범위"
+PART_STEPS = "단계"
+PART_REST = "그 밖"
+PARTS = (PART_FRONTMATTER, PART_SCOPE, PART_STEPS, PART_REST)
+STEPS_HEADINGS = r"(단계|Steps)"
+
+
+def _parts(text: str) -> dict[str, str]:
+    from planscope import DATA_SCOPE_HEADINGS, SCOPE_HEADINGS
+
+    core = normalize_core(text)
+    _, fm, body = core.split("---\n", 2)
+    out = {PART_FRONTMATTER: fm, PART_SCOPE: "", PART_STEPS: "", PART_REST: ""}
+    scope = re.compile(rf"^##\s*({SCOPE_HEADINGS}|{DATA_SCOPE_HEADINGS})\s*$")
+    steps = re.compile(rf"^##\s*{STEPS_HEADINGS}\s*$")
+    part = PART_REST
+    for line in body.split("\n"):
+        if line.startswith("##") and not line.startswith("###"):
+            part = (
+                PART_SCOPE
+                if scope.match(line)
+                else PART_STEPS
+                if steps.match(line)
+                else PART_REST
+            )
+        out[part] += line + "\n"
+    return out
+
+
+def part_hashes(text: str) -> dict[str, str]:
+    """The hash of each part of the plan's core (frontmatter, scope, steps, the rest)."""
+    return {
+        # blank lines around a part only separate it from the next one
+        name: hashlib.sha256(body.strip("\n").encode("utf-8")).hexdigest()
+        for name, body in _parts(text).items()
+    }
+
+
+def changed_parts(recorded: object, text: str) -> list[str]:
+    """The parts whose hash differs from the recorded ones, in PARTS order; none when there
+    is nothing recorded to compare with (a record from before v1.1)."""
+    if not isinstance(recorded, dict) or not recorded:
+        return []
+    now = part_hashes(text)
+    return [p for p in PARTS if recorded.get(p) != now[p]]
+
+
 # ---------------------------------------------------------------- pure core: records
 def _canon(obj: object) -> bytes:
     return json.dumps(
@@ -188,13 +240,23 @@ def mac(key: bytes, kind: str, body: object) -> str:
     ).hexdigest()
 
 
-def sign_record(rec: dict[str, Any], key: bytes) -> dict[str, Any]:
+def _signed_body(rec: dict[str, Any]) -> dict[str, Any]:
+    """What the MAC covers: RECORD_FIELDS, and the optional fields a record has (a record
+    from before them is signed and verified without them, as it was)."""
     body = {k: rec.get(k) for k in RECORD_FIELDS}
+    for k in OPTIONAL_FIELDS:
+        if rec.get(k) is not None:
+            body[k] = rec[k]
+    return body
+
+
+def sign_record(rec: dict[str, Any], key: bytes) -> dict[str, Any]:
+    body = _signed_body(rec)
     return {**body, "mac": mac(key, "approval", body)}
 
 
 def record_mac_ok(rec: dict[str, Any], key: bytes) -> bool:
-    body = {k: rec.get(k) for k in RECORD_FIELDS}
+    body = _signed_body(rec)
     return hmac.compare_digest(str(rec.get("mac") or ""), mac(key, "approval", body))
 
 
@@ -208,8 +270,9 @@ def new_record(
     session_id: str | None,
     prompt_id: str | None,
     now: float,
+    part_hashes: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    return {
+    rec: dict[str, Any] = {
         "approval_id": _token_hex(16),
         "task_id": task_id,
         "git_root": git_root,
@@ -226,6 +289,9 @@ def new_record(
         "session_id": session_id,
         "prompt_id": prompt_id,
     }
+    if part_hashes is not None:
+        rec["part_hashes"] = dict(part_hashes)
+    return rec
 
 
 def transition(
@@ -303,7 +369,10 @@ def check(
     if status != "in-progress":
         return Verdict(f"plan_status:{status}", revoke=True)
     if core_hash(plan_text) != rec.get("core_hash"):
-        return Verdict("plan_changed", revoke=True)
+        parts = changed_parts(rec.get("part_hashes"), plan_text)
+        return Verdict(
+            f"plan_changed({','.join(parts)})" if parts else "plan_changed", revoke=True
+        )
     return Verdict(None)
 
 

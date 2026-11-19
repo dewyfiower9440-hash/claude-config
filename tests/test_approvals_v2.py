@@ -336,6 +336,37 @@ for name, text in (
     v2_save(text)
     s, p = v2_prompt("task:widget")
     check(f"T12 {name}: approval kept and edit allowed", edit_decision(s, p), "allow")
+# v1.1 step 6: the refusal says which part of the plan changed and what to do about it.
+# A task of its own, so the widget approval the later checks use stays as it is.
+T12B_PLAN = V2PLAN.replace("task: widget", "task: t12b")
+T12B_FILE = V2REPO / "docs" / "plans" / "2026-11-12-t12b.md"
+T12B_FILE.write_text(T12B_PLAN, encoding="utf-8")
+s, p = uuid.uuid4().hex, pid()
+call("prompt", s, prompt_id=p, prompt="plan t12b", cwd=str(V2REPO))
+call(
+    "post",
+    s,
+    prompt_id=p,
+    tool_name="ExitPlanMode",
+    tool_input={},
+    tool_response={"plan": T12B_PLAN, "filePath": str(T12B_FILE)},
+    cwd=str(V2REPO),
+)
+T12B_FILE.write_text(
+    T12B_PLAN.replace("- src/**\n", "- src/**\n- C:/dev/other/**\n"), encoding="utf-8"
+)
+t12b = raw_pre(s, p) or {}  # the approving prompt itself: its approval is held
+t12b_why = str(t12b.get("hookSpecificOutput", {}).get("permissionDecisionReason"))
+check(
+    "T12b scope widened after approval: refused, the part named, re-approval and the log named",
+    (
+        t12b.get("hookSpecificOutput", {}).get("permissionDecision"),
+        "plan_changed(변경 범위)" in t12b_why,
+        "ExitPlanMode" in t12b_why and "진행 기록" in t12b_why,
+    ),
+    ("deny", True, True),
+)
+T12B_FILE.unlink()
 v2_save()
 
 # ---- T22 (5) command-args must follow the command header directly; (3) note on other named plan
