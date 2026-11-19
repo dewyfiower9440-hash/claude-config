@@ -960,7 +960,8 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
             "deny",
             f"[discipline] 이번 턴에 승인 범위 밖 파일을 이미 {len(counted)}개 수정했습니다(한도 {MAX_FILES_WITHOUT_PLAN}).{scope_note} "
             "더 진행하기 전에 /plan 으로 계획을 세우거나 갱신하고 ExitPlanMode 로 사용자 승인을 받으세요. "
-            "이미 승인된 진행 중 계획을 이어가는 것이라면, 사용자가 프롬프트 첫 줄에 task:<id>를 적어야 재무장됩니다.",
+            "이미 승인된 진행 중 계획을 이어가는 것이라면, 사용자가 프롬프트 첫 줄에 task:<id>를 적어야 재무장됩니다."
+            + PLAN_SAVE_NOTE,
         )
 
     # 2) Test weakening / suppressions.
@@ -4044,6 +4045,12 @@ REASON_BULK = (
     "[discipline] 승인된 계획 없이 이번 턴에 {n}개 파일이 바뀌었습니다(Bash 등 도구 밖 수정 포함, 한도 {limit}): "
     "{files}. /plan 으로 계획을 세워 승인받거나 변경을 줄이세요."
 )
+# v1.1 step 7: how an approved plan is saved (a shell redirect into docs/plans is refused
+# by the auto-mode classifier)
+PLAN_SAVE_NOTE = (
+    " 승인받은 계획은 Write 도구로 `docs/plans/`에 그대로 저장하세요(셸 리다이렉트 `>`로 쓰는 것은 "
+    "분류기가 막습니다)."
+)
 REASON_CONTENT_UNKNOWN = (
     "[discipline] {top}의 변경 상태를 확인할 수 없습니다(git 조회 실패 또는 파일 수 초과). "
     "변경이 검증됐다는 근거가 없으므로 '미확인'으로 보고하세요."
@@ -4202,7 +4209,9 @@ def _scope_decision(state: dict[str, Any]) -> tuple[str, str] | None:
     limit = 0 if AUTHZ_MODE == "enforce" else MAX_FILES_WITHOUT_PLAN
     if len(changes) > limit and _not_yet_notified(state, key):
         shown = ", ".join(Path(f).name for f in changes[:5])
-        return REASON_BULK.format(n=len(changes), limit=limit, files=shown), key
+        return REASON_BULK.format(
+            n=len(changes), limit=limit, files=shown
+        ) + PLAN_SAVE_NOTE, key
     return None
 
 

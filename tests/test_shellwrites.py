@@ -529,7 +529,14 @@ check(
     ),
     (
         ["Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell"],
-        ["Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell|Agent|Task|ExitPlanMode"],
+        # devenv-v1-1 step 1 (changed expectation): the post hook also sees Skill and MCP
+        # tools (discipline.USAGE_TOOLS_MATCHER)
+        [
+            (
+                "Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell|Agent|Task|ExitPlanMode"
+                "|Skill|mcp__.*"
+            )
+        ],
     ),
 )
 # devenv-final 25 (changed expectation: format_lint.py had its own PostToolUse entry,

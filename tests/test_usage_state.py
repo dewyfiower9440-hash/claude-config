@@ -336,6 +336,20 @@ check(
     True,
 )
 
+check(
+    "U-T26 settings.json (v1.1 step 7): the review gate and the commit check are on by default",
+    (
+        settings.get("env", {}).get("CLAUDE_REVIEW_GATE"),
+        settings.get("env", {}).get("CLAUDE_COMMIT_REVIEW"),
+    ),
+    ("1", "block"),
+)
+check(
+    "U-T27 the five-file refusals say how a plan is saved",
+    ("Write 도구" in disc.PLAN_SAVE_NOTE, "docs/plans/" in disc.PLAN_SAVE_NOTE),
+    (True, True),
+)
+
 print(f"\nFAILURES: {fails}")
 for p in (ROOT, PROJ):
     shutil.rmtree(p, ignore_errors=True)
