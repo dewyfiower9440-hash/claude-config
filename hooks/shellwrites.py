@@ -39,7 +39,6 @@ REDIRECT = re.compile(
 GLUED_REDIRECT = re.compile(r"^(?:\d|\*|&)?>{1,2}\|?(?P<target>[^>&|].*)$")
 NOT_A_FILE = {"nul", "$null", "-"}
 POSIX_DEVICES = ("/dev/", "/proc/", "/sys/")
-UNRESOLVABLE = re.compile(r"[$`*?%]")
 
 # program -> how its plain arguments name what it writes
 ALL_POSITIONAL = {"tee", "rm", "mv", "rmdir", "unlink"}
@@ -316,10 +315,13 @@ def write_targets(command: str, dialect: Dialect, cwd: str) -> tuple[list[str], 
             if special == "":
                 continue
             text = special if special is not None else target
-            if UNRESOLVABLE.search(text) or len(paths) >= MAX_TARGETS:
+            if len(paths) >= MAX_TARGETS or re.search(r"[$`%]", text):
                 unresolved += 1
                 continue
-            resolved = _resolve(here, text)
+            resolved = _resolve(here, text)  # follows a pattern that names one folder
+            if re.search(r"[*?\[]", resolved):
+                unresolved += 1  # a pattern the shell will expand to who knows what
+                continue
             if resolved not in seen:
                 seen.add(resolved)
                 paths.append(resolved)

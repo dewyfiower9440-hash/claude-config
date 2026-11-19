@@ -605,8 +605,10 @@ GIT_READS = {
     "blame", "cat-file", "check-attr", "check-ignore", "count-objects", "describe",
     "diff", "diff-index", "diff-tree", "for-each-ref", "grep", "help", "log", "ls-files",
     "ls-remote", "ls-tree", "merge-base", "name-rev", "rev-list", "rev-parse", "shortlog",
-    "show", "show-ref", "status", "var", "version", "whatchanged",
+    "show", "show-ref", "status", "var", "version", "whatchanged", "fsck", "range-diff",
+    "cherry",
 }  # fmt: skip
+GIT_SCOPE_FLAGS = {"--global", "--local", "--system", "--worktree"}  # `config` scopes
 GIT_READ_FORMS = {  # subcommands that write unless used in one of these read forms
     "branch": {"", "-a", "-r", "-v", "-vv", "-l", "--list", "--all", "--remotes",
                "--show-current", "--contains", "--merged", "--no-merged"},
@@ -614,7 +616,8 @@ GIT_READ_FORMS = {  # subcommands that write unless used in one of these read fo
     "tag": {"", "-l", "--list", "-n", "--contains"},
     "worktree": {"list"},
     "remote": {"", "-v", "show", "get-url"},
-    "config": {"--get", "--get-all", "--list", "-l", "--show-origin"},
+    "config": {"--get", "--get-all", "--get-regexp", "--list", "-l", "--show-origin"},
+    "submodule": {"status", "summary"},
     "notes": {"", "list", "show"},
     "reflog": {"", "show"},
 }  # fmt: skip
@@ -641,9 +644,13 @@ def git_writes(sub: list[str]) -> bool:
     if not sub:
         return False
     head, rest = sub[0], sub[1:]
+    if any(a == "--output" or a.startswith("--output=") for a in rest):
+        return True  # `git diff --output=x.patch`: a reading subcommand writing a file
     forms = GIT_READ_FORMS.get(head)
     if forms is None:
         return head not in GIT_READS
+    if head == "config":
+        rest = [a for a in rest if a not in GIT_SCOPE_FLAGS]  # `config --global --list`
     first = rest[0] if rest else ""
     if first.startswith("-") and head == "reflog":
         first = ""  # `git reflog -5` shows
@@ -659,15 +666,55 @@ def git_writes(sub: list[str]) -> bool:
 # Programs that write files without a target on the command line (a formatter, an
 # installer, a downloader, a folder maker): what a read-only subagent may not run. The
 # check forms (`--check`, `--diff`) read only.
-RUNNERS_OF_OTHERS = {
-    "uv": "run",
-    "pnpm": "exec",
-    "npx": None,
-    "pipx": "run",
-    "poetry": "run",
-}
+# Options of a runner (`uv run --with ruff ruff format`) that take a value: skipped on the
+# way to the program the runner runs.
+RUNNER_VALUED = {
+    "--with", "--with-requirements", "--with-editable", "--python", "-p", "--extra",
+    "--group", "--only-group", "--package", "--project", "--directory", "--env-file",
+    "--index", "--find-links", "-w", "--filter", "-C", "--prefix", "--workspace",
+    "--spec", "--from",
+}  # fmt: skip
+PACKAGE_COMMANDS = {  # the runners' own verbs that are not a program they run
+    "run", "test", "start", "build", "lint", "dev", "list", "ls", "why", "outdated",
+    "audit", "licenses", "view", "info", "config", "env", "store", "exec", "dlx",
+    "create", "init", "publish", "pack", "login", "logout", "whoami", "version",
+}  # fmt: skip
+
+
+def _inner_command(args: list[str], start: int) -> tuple[str, list[str]] | None:
+    """The program a runner runs, found after the runner's own options from args[start:]."""
+    k = start
+    while k < len(args):
+        if args[k].startswith("-"):
+            k += 2 if args[k] in RUNNER_VALUED else 1
+            continue
+        return _basename(args[k]), args[k + 1 :]
+    return None
+
+
+def _run_by(
+    program: str, args: list[str], plain: list[str]
+) -> tuple[str, list[str]] | None:
+    """What a runner (`uv run`, `uvx`, `npx`, `pnpm exec`, `pnpm <bin>`, `python -m`) runs,
+    or None when the command is not a runner's."""
+    if program in ("uvx", "npx"):
+        return _inner_command(args, 0)
+    if program in ("uv", "pipx", "poetry") and plain[:1] == ["run"]:
+        return _inner_command(args, args.index("run") + 1)
+    if program == "uv" and plain[:2] == ["tool", "run"]:
+        return _inner_command(args, args.index("run") + 1)
+    if program in ("pnpm", "npm", "yarn") and plain:
+        if plain[0] == "exec":
+            return _inner_command(args, args.index("exec") + 1)
+        if plain[0].lower() not in PACKAGE_WRITES[program] | PACKAGE_COMMANDS:
+            return _inner_command(args, args.index(plain[0]))  # `pnpm prettier --write`
+    if program in ("python", "python3", "py") and "-m" in args:
+        return _inner_command(args, args.index("-m") + 1)  # `python -m pip install`
+    return None
+
+
 PACKAGE_WRITES = {
-    "uv": {"sync", "add", "remove", "lock", "pip", "tool", "python", "venv", "init", "build", "publish", "cache"},
+    "uv": {"sync", "add", "remove", "lock", "pip", "python", "venv", "init", "build", "publish", "cache"},
     "pnpm": {"install", "i", "add", "remove", "rm", "uninstall", "update", "up", "ci", "dlx", "link", "prune", "rebuild", "store"},
     "npm": {"install", "i", "add", "remove", "rm", "uninstall", "update", "up", "ci", "link", "prune", "rebuild", "cache"},
     "yarn": {"install", "add", "remove", "up", "upgrade", "link", "cache"},
@@ -685,17 +732,16 @@ def hidden_writer(program: str, args: list[str]) -> str | None:
     """Why this command writes files it does not name as a target (None when it does not)."""
     low = [a.lower() for a in args]
     plain = [a for a in args if not a.startswith("-")]
-    if program in RUNNERS_OF_OTHERS and plain:
-        verb = RUNNERS_OF_OTHERS[program]
-        if verb is None or plain[0].lower() == verb:
-            # `uv run ruff format`, `npx prettier --write`: the program it runs decides
-            rest = args[args.index(plain[0]) + (0 if verb is None else 1) :]
-            if rest and not rest[0].startswith("-"):
-                inner = hidden_writer(_basename(rest[0]), rest[1:])
-                if inner:
-                    return inner
-            if verb is not None:
-                return None  # `uv run pytest`: what runs is judged above, not `uv`
+    inner = _run_by(program, args, plain)
+    if inner is not None:
+        return hidden_writer(*inner)  # the program the runner runs decides
+    if program == "uv" and plain[:1] == ["tool"]:
+        verb = plain[1].lower() if len(plain) > 1 else ""
+        return (
+            f"uv tool {verb}"
+            if verb in ("install", "uninstall", "upgrade", "update-shell")
+            else None
+        )
     checks = {"--check", "--diff", "--check-only", "--dry-run"}
     if program == "ruff" and plain[:1] == ["format"] and not checks & set(low):
         return "ruff format"
@@ -1644,10 +1690,13 @@ def changes_policy(tool: str, ti: dict[str, object], full: str) -> bool:
 # in every session. They are changed in the work tree and reach ~/.claude by a merge of a
 # commit that passed the gate (CLAUDE.md, Release); a change made in place is the user's
 # to confirm.
-LIVE_FOLDERS = ("hooks", "agents", "skills", "rules")
+LIVE_FOLDERS = ("hooks", "agents", "skills", "rules", "commands")
 LIVE_FILES = ("settings.json", "settings.local.json")
 # git subcommands that rewrite the working files of the repository they run in
-LIVE_GIT_VERBS = {"checkout", "switch", "restore", "clean", "cherry-pick", "revert", "am", "apply"}  # fmt: skip
+LIVE_GIT_VERBS = {
+    "checkout", "switch", "restore", "clean", "cherry-pick", "revert", "am", "apply",
+    "rm", "mv", "sparse-checkout", "checkout-index", "read-tree",
+}  # fmt: skip
 LIVE_REASON = (
     "this changes {path} in place: the live hooks, settings and agents of ~/.claude are "
     "changed in the work tree and merged after the gate (CLAUDE.md, Release)"
@@ -1686,12 +1735,12 @@ def _git_live_writes(command: str, dialect: Dialect, cwd: str) -> list[str]:
         sub = git_subcommand(args)
         verb, rest = (sub[0] if sub else ""), sub[1:]
         writes = (
-            verb in LIVE_GIT_VERBS
+            (verb in LIVE_GIT_VERBS and not (verb == "apply" and "--check" in rest))
             or (
                 verb == "reset"
                 and any(a in ("--hard", "--merge", "--keep") for a in rest)
             )
-            or (verb == "stash" and rest[:1] in (["pop"], ["apply"]))
+            or (verb == "stash" and rest[:1] not in (["list"], ["show"]))
         )
         if writes and _inside(_git_folder(args, cwd_at(cmds, i, cwd)), CLAUDE_HOME):
             out.append(
@@ -1707,7 +1756,12 @@ def shell_guarded_writes(command: str, dialect: Dialect, cwd: str) -> list[str]:
 
     low = command.lower()
     # `.cl` also catches `~/.cl*`; a relative path from inside ~/.claude names nothing
-    if POLICY_FILE not in low and ".cl" not in low and not _inside(cwd, CLAUDE_HOME):
+    # (closing review: `~/.c?aude`, `~/.[c]laude`, `~/.c""laude` slipped past a `.cl` test)
+    names_home = any(
+        s in low
+        for s in (POLICY_FILE, ".cl", "~", "$home", "userprofile", "homepath", "users")
+    )
+    if not names_home and not _inside(cwd, CLAUDE_HOME):
         return []
     from shellwrites import write_targets
 
