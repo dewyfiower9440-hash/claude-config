@@ -22,6 +22,12 @@ jobs:
           uv tool install ruff==0.17.3
           uv tool dir --bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
           powershell -NoProfile -Command "Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Force -Scope CurrentUser"
+      # The guard reads a pattern such as ~/.c?aude by expanding it on disk, as the shell
+      # does; every real machine has ~/.claude (the live configuration), the runner has not,
+      # so the guard tests of those patterns need the folder to exist here.
+      - name: Create the live configuration folder the guard tests expect
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force (Join-Path $HOME ".claude/hooks") | Out-Null
       - name: Quality gate (same command as the local gate in CLAUDE.md)
         shell: pwsh
         env:
