@@ -11,6 +11,7 @@ task: devenv-backlog
 남은 일을 한 곳에서 보고 우선순위를 사용자가 정하게 한다. 비목표: 여기서 구현하지 않는다.
 
 ## A. 사용자 조치가 먼저 필요한 것
+- **v1.0 기준선(2026-11-19)**: claude-config `6a423d2`·dev-tools `7afd668`에 태그 `v1.0`(origin에 push). 통합 최종 테스트 결과는 `docs/plans/2026-11-19-v1-release.md`.
 - **GitHub Actions가 시작되지 않는다(2026-11-18)**: run 44274768513, 44281868140이 "recent account payments have failed or your spending limit needs to be increased"로 2초 만에 실패했다. Billing & plans에서 풀어야 한다. 풀린 뒤: `gh run rerun <마지막 run id>`로 main의 마지막 커밋을 끝까지 확인(구간 4 이후는 모두 Locally Verified까지만이다). `C:\dev\tools`, memo-board도 같은 계정이다(미확인).
 - enforce 전환 시점(`CLAUDE_AUTHZ_MODE=enforce`; 원래 2026-11-22 이후로 잡혀 있었다, P4-11·P5-03). 전환 때 `CLAUDE.md` §2의 warn 문장 2개를 고친다.
 - 평가 환경(P3-01: 평가자 계정 또는 VM, 과제 저장소, 홀드아웃 30%)과 예비 측정 35회(P5-06). `docs/plans/2026-11-15-devenv-p3.md`가 `blocked`로 남아 있다.
