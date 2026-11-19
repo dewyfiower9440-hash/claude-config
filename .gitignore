@@ -29,4 +29,8 @@ __pycache__/
 !/docs/plans/archive/
 /docs/plans/archive/*
 !/docs/plans/archive/*.md
+# Guides for working with this environment (Korean prose, English file names).
+!/docs/guides/
+/docs/guides/*
+!/docs/guides/*.md
 /tests/_tmp*/
