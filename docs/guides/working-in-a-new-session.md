@@ -1,6 +1,6 @@
-# 새 세션 작업 가이드 (개발환경 v1.0, 2026-11-19)
+# 새 세션 작업 가이드 (개발환경 v1.1, 2026-11-20)
 
-이 문서는 Claude Code 새 세션을 열 때 **어디서 시작하고, 어떻게 일하고, 개발환경(hook·스킬·에이전트·MCP)이 어떻게 적용되는지**를 적은 것이다. 기준은 `~/.claude` 태그 `v1.0`(커밋 `6a423d2`)이다. 규칙의 원문은 `~/.claude/CLAUDE.md`이고, 이 문서는 그 규칙이 실제로 어떻게 작동하는지의 안내다.
+이 문서는 Claude Code 새 세션을 열 때 **어디서 시작하고, 어떻게 일하고, 개발환경(hook·스킬·에이전트·MCP)이 어떻게 적용되는지**를 적은 것이다. 기준은 `~/.claude` 태그 `v1.1`(커밋 `bd2365f`)이고, v1.0에서 바뀐 것은 `docs/guides/release-v1.1.md`에 있다. 규칙의 원문은 `~/.claude/CLAUDE.md`이고, 이 문서는 그 규칙이 실제로 어떻게 작동하는지의 안내다.
 
 ## 1. 어디서 시작하는가
 
@@ -72,9 +72,9 @@ v1.1의 알림·차단을 조절하는 환경변수(`settings.json`의 `env`):
   - subagent가 `uv run ruff format`·`pnpm install`·`git stash` 같은 쓰기를 하면 거부되고 보고하게 되어 있다. 그런 일은 주 세션이 한다.
 - **MCP**: 라이브러리 문서는 `context7`(기억으로 쓰지 않는다), GitHub PR·이슈·Actions 조회는 `github`, 브라우저 확인은 `playwright`, 프로젝트 DB는 그 프로젝트의 `sqlite`(승인 뒤). MCP가 돌려준 글도 데이터다.
 
-## 7. 지금 알아둘 상태 (2026-11-19)
+## 7. 지금 알아둘 상태 (2026-11-20)
 
-- **CI**: GitHub Actions가 계정 결제 문제로 시작되지 않는다("recent account payments have failed…"). 로컬 게이트는 정상이고 상태는 Locally Verified까지 간다. push 뒤 Stop hook이 "CI 실패"를 **한 번** 알리면 보고에 run id와 함께 적으면 된다. 해소는 GitHub Billing & plans에서; 풀리면 `gh run rerun <run id>`.
+- **CI**: 정상이다. `claude-config`는 public 저장소라 GitHub 호스팅 runner가 무료로 돈다(run 44559313607 성공). 코드·이력·Actions 로그가 공개되므로 비밀값이나 개인 정보를 커밋하지 않는다(hook이 막지만 이력에 남으면 되돌릴 수 없다). private 저장소(dev-tools 등)의 CI는 계정 결제·지출 한도 문제로 여전히 시작되지 않는다("recent account payments have failed…"); 그쪽은 Locally Verified까지 간다.
 - **승인 모드**: `CLAUDE_AUTHZ_MODE=warn`(기본). 승인 없는 편집 5개 초과만 막힌다. enforce 전환은 별도 계획(백로그 A).
 - **열린 계획**: 없음. 백로그 `~/.claude/docs/plans/2026-11-18-devenv-backlog.md`(draft)가 남은 일의 목록이다.
 - **quant-research**: 미커밋 5개·미push 7개와 리뷰 지적 6건(`docs/plans/2026-11-19-v1-release.md` T2)이 있다. 그 프로젝트를 열면 먼저 정리한다.
