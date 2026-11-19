@@ -6,6 +6,7 @@ import importlib.util
 import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 HOOKS = Path(__file__).resolve().parent.parent / "hooks"
@@ -414,6 +415,23 @@ check(
     "PS native runner then native command -> unknown",
     outcome("uv run pytest -q; cmd /c exit 0", dialect="powershell"),
     "unknown",
+)
+
+# guard-b15 1: Git Bash's /tmp is the Windows temp folder, for cwd tracking too
+check(
+    "_resolve: /tmp/x is under the temp folder",
+    v._resolve("C:/x", "/tmp/a/b"),
+    os.path.normpath(os.path.join(tempfile.gettempdir(), "a", "b")),
+)
+check(
+    "_resolve: /tmp alone is the temp folder",
+    v._resolve("C:/x", "/tmp"),
+    os.path.normpath(tempfile.gettempdir()),
+)
+check(
+    "_resolve: /tmpx is not the temp folder",
+    v._resolve("C:/x", "/tmpx"),
+    os.path.normpath("C:/tmpx"),
 )
 
 print("FAILURES:", fails)

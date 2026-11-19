@@ -729,6 +729,39 @@ for label, (tool, ti), want in S_CASES:
     fails += not ok
     print(("OK  " if ok else "FAIL"), label, "->", got, "" if ok else f"(want {want})")
 
+# ---- guard-b15: the closing review's inputs that devenv-final left to the backlog, replayed
+# against the live guard on 2026-11-19 (all came back "allow" or, for the over-blocks,
+# "deny"). Each case names who runs it, where, and what the guard must answer.
+APPDATA = os.environ.get("APPDATA", f"{HOME}/AppData/Roaming").replace("/", "\\")
+B15_CASES: list[tuple[str, tuple[str, dict], str | None, str, str]] = [
+    # B15-T1 a walk over the temp folder reaches the session state under it; `cd /tmp`
+    # is the temp folder too; APPDATA forms resolve like the home forms
+    ("B15-T1 grep -r /tmp", sh("grep -r secret /tmp"), None, ELSEWHERE, "deny"),
+    ("B15-T1 rg $TEMP", sh("rg x $TEMP"), None, ELSEWHERE, "deny"),
+    ("B15-T1 gci -Recurse $env:TEMP", ps("Get-ChildItem -Recurse $env:TEMP"), None, ELSEWHERE, "deny"),
+    ("B15-T1 tar -C $TEMP", sh("tar -C $TEMP -cf out.tar ."), None, ELSEWHERE, "deny"),
+    ("B15-T1 cd /tmp", sh("cd /tmp && cat claude-discipline/a.json"), None, ELSEWHERE, "deny"),
+    ("B15-T1 Grep tool at the temp folder", ("Grep", {"pattern": "approval", "path": TMP}), None, ELSEWHERE, "deny"),
+    ("B15-T1 $env:APPDATA\\..\\..", ps("cat $env:APPDATA\\..\\..\\.claude\\state\\x.json"), None, ELSEWHERE, "deny"),
+    ("B15-T1 %APPDATA%/../..", sh("cat %APPDATA%/../../.claude/state/x.json"), None, ELSEWHERE, "deny"),
+    ("B15-T1 $env:LOCALAPPDATA\\Temp", ps("cat $env:LOCALAPPDATA\\Temp\\claude-discipline\\x.json"), None, ELSEWHERE, "deny"),
+    ("B15-T1 a file under $TEMP", sh("cat $TEMP/notes.txt"), None, ELSEWHERE, "allow"),
+    ("B15-T1 rg over the projects folder", sh("rg x C:/dev"), None, ELSEWHERE, "allow"),
+    ("B15-T1 grep -r below the temp folder", sh("grep -r x /tmp/claude/scratch"), None, ELSEWHERE, "allow"),
+    ("B15-T1 Grep tool below the temp folder", ("Grep", {"pattern": "x", "path": f"{TMP}/claude/scratch"}), None, ELSEWHERE, "allow"),
+    ("B15-T1 gci -Recurse below $env:TEMP", ps("Get-ChildItem -Recurse $env:TEMP\\claude\\scratch"), None, ELSEWHERE, "allow"),
+    ("B15-T1 cd below /tmp", sh("cd /tmp/claude && cat scratch/out.txt"), None, ELSEWHERE, "allow"),
+    ("B15-T1 another file under APPDATA", ps("cat $env:APPDATA\\Code\\User\\settings.json"), None, ELSEWHERE, "allow"),
+    ("B15-T1 the temp folder itself, listed", sh("ls $TEMP"), None, ELSEWHERE, "allow"),
+    ("B15-T1 find -maxdepth 1 lists like ls", sh('find "$TEMP" -maxdepth 1 -name "lab-*" -mmin -60'), None, ELSEWHERE, "allow"),
+    ("B15-T1 find without a depth limit walks", sh('find "$TEMP" -name "lab-*"'), None, ELSEWHERE, "deny"),
+]  # fmt: skip
+for label, (tool, ti), agent, cwd, want in B15_CASES:
+    got = answer(tool, ti, agent, cwd)
+    ok = got == want
+    fails += not ok
+    print(("OK  " if ok else "FAIL"), label, "->", got, "" if ok else f"(want {want})")
+
 # ---- devenv-final 16: the review's reproduction inputs (2026-11-18). Each ran through the
 # guard as it was and came back "allow"; `want` is what the guard must answer. With them,
 # as many ordinary commands that must stay allowed.

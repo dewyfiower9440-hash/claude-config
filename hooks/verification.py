@@ -252,6 +252,10 @@ def _resolve(cwd: str, target: str) -> str:
     msys = re.match(r"^/([a-zA-Z])(/.*)?$", target)  # Git Bash /c/dev -> C:/dev
     if msys:
         target = f"{msys.group(1).upper()}:{msys.group(2) or '/'}"
+    elif re.match(r"^/tmp(?=$|/)", target):  # Git Bash /tmp is the Windows temp folder
+        import tempfile
+
+        target = tempfile.gettempdir() + target[4:]
     return os.path.normpath(os.path.join(cwd, target))
 
 

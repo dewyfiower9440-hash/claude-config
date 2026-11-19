@@ -670,8 +670,8 @@ PROTECTED_REASON = (
 )
 SWEEP_REASON = (
     "a recursive command starting at {root} walks through the protected folders of "
-    "~/.claude (discipline, state): start from a subfolder (hooks, tests, docs, ...) or "
-    "use `git grep`"
+    "~/.claude (discipline, state) or the hooks' session state under the temp folder: "
+    "start from a subfolder (hooks, tests, docs, ...) or use `git grep`"
 )
 _HOME_FORM = re.compile(
     r"^(~|\$HOME|\$\{HOME\}|%USERPROFILE%|\$env:USERPROFILE|\$\{env:USERPROFILE\}|\$env:HOME)"
@@ -687,6 +687,17 @@ _TEMP_FORM = re.compile(
 )
 # The state folder by name, in a word whose start cannot be told (another variable).
 _STATE_NAME = re.compile(r"(^|[\\/])claude-discipline($|[\\/])", re.IGNORECASE)
+# guard-b15: the profile folders a shell names by variable (`$env:APPDATA\..\..\.claude`),
+# resolved from the environment like the home forms above.
+_ENV_FORM = re.compile(
+    r"^(?:\$env:|\$\{env:|\$\{|\$|%)(APPDATA|LOCALAPPDATA)[}%]?(?=$|[\\/])",
+    re.IGNORECASE,
+)
+
+
+def _env_value(m: re.Match[str]) -> str:
+    value = os.environ.get(m.group(1).upper())
+    return value if value else m.group(0)  # unset: left as it is (then not a path)
 
 
 # Programs whose plain-word arguments are files or folders. For any other program a word
@@ -719,6 +730,7 @@ def as_path(word: str, cwd: str, bare: bool = True) -> str | None:
         return None
     text = _HOME_FORM.sub(lambda _m: HOME_DIR, text)
     text = _TEMP_FORM.sub(lambda _m: _temp_root(), text)
+    text = _ENV_FORM.sub(_env_value, text)
     cut = re.search(r"[*?\[]", text)
     if cut:
         text = text[: cut.start()]
@@ -738,10 +750,12 @@ def in_protected(path: str) -> bool:
 
 
 def above_protected(path: str) -> bool:
-    """True for ~/.claude itself and every folder above it."""
+    """True for a folder that holds a protected folder somewhere below it: ~/.claude and
+    every folder above it, the temp folder (guard-b15: the session state is under it) and
+    every folder above that."""
     from verification import _inside
 
-    return _inside(CLAUDE_HOME, path)
+    return any(_inside(root, path) for root in PROTECTED)
 
 
 def glob_reaches_protected(word: str, cwd: str, walks: bool = True) -> bool | None:
@@ -881,12 +895,15 @@ def sweep_starts(program: str, args: list[str], dialect: Dialect) -> list[str] |
         if low in VALUE_FLAGS or low in PATTERN_FLAGS or (ps and low in PS_VALUED):
             skip.add(k + 1)
     skip |= {k - 1 for k in search_patterns([program, *args]) if k >= 1}
+    # `/s` is a switch for the Windows programs (and for everything in PowerShell); in a
+    # Bash line `/tmp` or `/etc` is a path (guard-b15: `grep -r x /tmp` named no start).
+    switches = ps or program in ("findstr", "xcopy", "robocopy", "dir", "rd", "rmdir")
     words = [
         a
         for k, a in enumerate(args)
         if k not in skip
         and not a.startswith("-")
-        and not re.fullmatch(r"/[A-Za-z?]+", a)
+        and not (switches and re.fullmatch(r"/[A-Za-z?]+", a))
     ]
     default_here = True
     if program in ("grep", "egrep", "fgrep"):
@@ -903,6 +920,12 @@ def sweep_starts(program: str, args: list[str], dialect: Dialect) -> list[str] |
                 len(args),
             )
             words = [a for a in args[:cut]]
+            # `find X -maxdepth 1` lists X's entries like `ls X`: it walks nothing below
+            if any(
+                a == "-maxdepth" and args[k + 1 : k + 2] in (["0"], ["1"])
+                for k, a in enumerate(args)
+            ):
+                return None
         elif program in ("fd", "fdfind"):
             words = words[1:]  # the first word is the pattern
     elif program in ("ls", "dir", "gci", "get-childitem"):
