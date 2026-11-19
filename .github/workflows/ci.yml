@@ -21,7 +21,7 @@ jobs:
           uv python install 3.13
           uv tool install ruff==0.17.3
           uv tool dir --bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
-          powershell -NoProfile -Command "Install-Module PSScriptAnalyzer -Force -Scope CurrentUser"
+          powershell -NoProfile -Command "Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Force -Scope CurrentUser"
       - name: Quality gate (same command as the local gate in CLAUDE.md)
         shell: pwsh
         env:

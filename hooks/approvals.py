@@ -354,7 +354,7 @@ def is_active(home: Path, witness: Path | None = None) -> bool:
 
 
 READ_ATTEMPTS = 4  # Windows: the file is being replaced by another process right now
-MIN_KEY_BYTES = 16  # the store writes 32; a shorter "key" would sign anything
+MIN_KEY_BYTES = 32  # what the store writes; a shorter "key" was not made by it
 
 
 def _read_text(path: Path) -> str:

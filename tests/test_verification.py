@@ -417,6 +417,43 @@ check(
     "unknown",
 )
 
+# guard-b15 7: a separator with nothing after it does not hide the gate's status
+check(
+    "gate followed by ; alone -> passed",
+    outcome(f"{DECLARED['gate']};", DECLARED),
+    "passed",
+)
+check(
+    "gate followed by a newline alone -> passed",
+    outcome(f"{DECLARED['gate']}\n", DECLARED),
+    "passed",
+)
+check(
+    "gate followed by ;<newline> -> passed",
+    outcome(f"{DECLARED['gate']};\n", DECLARED),
+    "passed",
+)
+check(
+    "gate followed by ; and a command -> unknown",
+    outcome(f"{DECLARED['gate']}; echo done", DECLARED),
+    "unknown",
+)
+check(
+    "gate followed by a newline and a command -> unknown",
+    outcome(f"{DECLARED['gate']}\necho done", DECLARED),
+    "unknown",
+)
+check(
+    "gate followed by && alone -> unknown",
+    outcome(f"{DECLARED['gate']} &&", DECLARED),
+    "unknown",
+)
+check(
+    "PowerShell gate followed by ; alone -> passed",
+    outcome(f"{DECLARED['gate']};", DECLARED, dialect="powershell"),
+    "passed",
+)
+
 # guard-b15 1: Git Bash's /tmp is the Windows temp folder, for cwd tracking too
 check(
     "_resolve: /tmp/x is under the temp folder",

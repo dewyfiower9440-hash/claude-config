@@ -323,7 +323,9 @@ def gate_form(
         place = _resolve(cwd, args[0])
     if after:
         return f"something runs after the gate ({how})"
-    if cmds[-1].op_after:
+    # guard-b15 7: a `;` or a newline with nothing after it ends the line as surely as
+    # nothing does; `&&`, `||`, `|`, `&` with nothing after would still hand the status on
+    if cmds[-1].op_after and cmds[-1].op_after not in (";", "\n"):
         return f"the gate does not end the command line ({how})"
     if any(c.op_after != "&&" for c in cmds[start:-1]):
         return "the declared gate joins its stages with something other than &&: a failing stage does not fail it"

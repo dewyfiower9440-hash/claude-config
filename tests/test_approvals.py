@@ -178,6 +178,34 @@ check(
     None,
 )
 
+# ---- guard-b15 7: a key that is there but unreadable is not replaced; a missing one is
+# created whole, and no temp file is left behind
+approve()
+good = (HOME / "key").read_text(encoding="utf-8")
+(HOME / "key").write_text("not hex at all", encoding="utf-8")
+check(
+    "garbage in the key file, create=True -> None, file left as it is",
+    (d.load_key(create=True), (HOME / "key").read_text(encoding="utf-8")),
+    (None, "not hex at all"),
+)
+(HOME / "key").unlink()
+made = d.load_key(create=True)
+check(
+    "no key file, create=True -> a 32-byte key is written as hex, nothing else left",
+    (
+        made is not None and len(made) == 32,
+        bytes.fromhex((HOME / "key").read_text(encoding="utf-8").strip()) == made,
+        sorted(p.name for p in HOME.glob("key*")),
+    ),
+    (True, True, ["key"]),
+)
+check(
+    "the key is read back",
+    d.load_key(create=False),
+    made,
+)
+(HOME / "key").write_text(good, encoding="utf-8")
+
 # ---- expiry (a correctly signed but old record)
 approve()
 records = json.loads(approvals_file().read_text(encoding="utf-8"))

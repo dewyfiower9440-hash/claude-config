@@ -101,15 +101,30 @@ def load_key(*, create: bool) -> bytes | None:
     """HMAC key for approval records; created on first approval, never shown to tools (guard/deny)."""
     try:
         return bytes.fromhex(KEY_FILE.read_text(encoding="utf-8").strip())
-    except (
-        OSError,
-        ValueError,
-    ):  # missing or unreadable key: records cannot be verified
+    except FileNotFoundError:
         if not create:
             return None
+    except (OSError, ValueError):
+        # guard-b15 7: a key that is there but cannot be read (locked, garbage) is not
+        # replaced: a new key would make every record signed so far unverifiable
+        return None
     APPROVALS_HOME.mkdir(parents=True, exist_ok=True)
     key = os.urandom(32)
-    KEY_FILE.write_text(key.hex(), encoding="utf-8")
+    # written whole or not at all, and only if no key appeared meanwhile: the full text
+    # goes to a temp file, which becomes the key by a hard link (atomic, and refused when
+    # the name is taken). approvals._atomic_write is not imported here so that a hook run
+    # that needs only this module stays light.
+    tmp = KEY_FILE.with_name(f"{KEY_FILE.name}.{os.getpid()}.tmp")
+    tmp.write_text(key.hex(), encoding="utf-8")
+    try:
+        os.link(tmp, KEY_FILE)
+    except FileExistsError:
+        tmp.unlink(missing_ok=True)
+        return load_key(create=False)  # another run made the key first: use that one
+    except OSError:
+        os.replace(tmp, KEY_FILE)  # a file system without hard links
+        return key
+    tmp.unlink(missing_ok=True)
     return key
 
 
