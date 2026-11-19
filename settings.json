@@ -278,7 +278,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell|Agent|Task|ExitPlanMode",
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell|Agent|Task|ExitPlanMode|Skill|mcp__.*",
         "hooks": [
           {
             "type": "command",

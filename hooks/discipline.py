@@ -338,6 +338,11 @@ def default_state() -> dict[str, Any]:
         "pre_valid": None,
         # the last prompts as the hook was handed them (note_prompt_seen): diagnosis only
         "prompt_seen": [],
+        # v1.1: the skills this session invoked, oldest first ({skill, turn, at}, at most
+        # MAX_SKILLS), and the MCP servers it called (server -> {count, last turn}); what
+        # the later checks read to tell "not used" from "not seen"
+        "skills": [],
+        "mcp": {},
     }
 
 
@@ -1357,10 +1362,72 @@ def keep_covered_changes(
     return changed
 
 
+# v1.1: which skills and MCP servers the session used. The settings.json PostToolUse
+# matcher of the discipline hook must name these tools (test_usage_state checks it).
+USAGE_TOOLS_MATCHER = "Skill|mcp__.*"
+MAX_SKILLS = 50
+MAX_SKILL_NAME = 64
+MAX_MCP_SERVERS = 50
+MAX_MCP_SERVER_NAME = 64
+_PLAIN_NAME_NOISE = re.compile(r"[^A-Za-z0-9_.:-]")
+
+
+def skill_name(tool_input: Mapping[str, Any]) -> str:
+    """The skill a Skill call names, as plain name characters, or "" (no name: nothing to
+    record). Shown in notes, so prose and markup never pass through."""
+    raw = tool_input.get("skill")
+    if not isinstance(raw, str):
+        return ""
+    return _PLAIN_NAME_NOISE.sub("", raw)[:MAX_SKILL_NAME]
+
+
+def mcp_server(tool_name: str) -> str:
+    """The server of an `mcp__<server>__<tool>` tool name, as plain characters, or ""."""
+    if not tool_name.startswith("mcp__"):
+        return ""
+    server = tool_name[len("mcp__") :].split("__", 1)[0]
+    return _PLAIN_NAME_NOISE.sub("", server)[:MAX_MCP_SERVER_NAME]
+
+
+def note_skill_use(data: dict[str, Any], state: dict[str, Any], now: float) -> None:
+    name = skill_name(data.get("tool_input") or {})
+    if not name:
+        return
+    rows = state.setdefault("skills", [])
+    rows.append({"skill": name, "turn": state.get("turn") or 0, "at": now})
+    del rows[:-MAX_SKILLS]
+
+
+def note_mcp_use(data: dict[str, Any], state: dict[str, Any]) -> None:
+    server = mcp_server(str(data.get("tool_name") or ""))
+    if not server:
+        return
+    seen = state.setdefault("mcp", {})
+    row = seen.get(server)
+    if not isinstance(row, dict):
+        if len(seen) >= MAX_MCP_SERVERS:
+            return  # the first MAX_MCP_SERVERS servers stay; a later one is not counted
+        row = seen[server] = {"count": 0, "last": 0}
+    row["count"] = int(row.get("count") or 0) + 1
+    row["last"] = state.get("turn") or 0
+
+
+def skill_used_this_turn(state: dict[str, Any], *names: str) -> bool:
+    turn = state.get("turn") or 0
+    return any(
+        isinstance(r, dict) and r.get("turn") == turn and r.get("skill") in names
+        for r in state.get("skills") or []
+    )
+
+
 def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
     tool = data.get("tool_name", "")
     ti = data.get("tool_input", {}) or {}
     now = time.time()
+    if tool == "Skill":
+        note_skill_use(data, state, now)
+    elif tool.startswith("mcp__"):
+        note_mcp_use(data, state)
     if tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
         path = edit_target(ti)
         cwd = str(data.get("cwd") or os.getcwd())
