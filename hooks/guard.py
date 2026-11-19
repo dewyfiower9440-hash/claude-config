@@ -527,7 +527,10 @@ def nested_scripts(program: str, args: list[str]) -> list[tuple[str, Dialect]]:
     if program == "cmd":
         for j, a in enumerate(args):
             if a.lower() in ("/c", "/k"):
-                return [(" ".join(args[j + 1 :]), "bash")]
+                # guard-b15 4: read as PowerShell, which is nearer to cmd (a backslash is
+                # not an escape, `/s` stays a switch); as Bash, `rd /s /q C:\dev` lost the
+                # backslash and named no folder the guard knew
+                return [(" ".join(args[j + 1 :]), "powershell")]
         return []
     if program == "eval":
         return [(" ".join(args), "bash")]
@@ -965,11 +968,17 @@ def _flag_letters(args: list[str]) -> str:
 
 
 def _ps_switch(args: list[str], name: str) -> bool:
-    """A PowerShell switch given in full or by an unambiguous-looking prefix (-Recurse, -r)."""
-    return any(
-        len(a) >= 2 and a.startswith("-") and name.startswith(a[1:].lower())
-        for a in args
-    )
+    """A PowerShell switch given in full or by an unambiguous-looking prefix (-Recurse, -r),
+    or with a value (`-Recurse:$true`; `:$false` turns it off)."""
+    for a in args:
+        head, colon, value = a.partition(":")
+        if (
+            len(head) >= 2
+            and head.startswith("-")
+            and name.startswith(head[1:].lower())
+        ):
+            return value.lower() not in ("$false", "0") if colon else True
+    return False
 
 
 PS_VALUED = {"-filter", "-include", "-exclude", "-depth", "-pattern", "-destination",
@@ -1061,8 +1070,20 @@ DELETE_REASON = (
 )
 
 
-def _delete_targets(program: str, args: list[str], dialect: Dialect) -> list[str]:
-    """The words a recursive delete names ([] when the command is not one)."""
+PS_LISTERS = {"get-childitem", "gci", "ls", "dir", "get-item", "gi"}
+_CWD_FORM = re.compile(
+    r"^(\$PWD|\$\{PWD\}|\$env:PWD|\$\{env:PWD\}|%CD%)(?=$|[\\/])", re.IGNORECASE
+)
+
+
+def _delete_targets(
+    program: str,
+    args: list[str],
+    dialect: Dialect,
+    fed_by: tuple[str, list[str]] | None = None,
+) -> list[str]:
+    """The words a recursive delete names ([] when the command is not one). `fed_by` is the
+    command piped into this one: `Get-ChildItem X | Remove-Item -Recurse` empties X."""
     low = [a.lower() for a in args]
     if program == "cmd" and "/c" in low:  # cmd /c rd /s /q X
         rest = args[low.index("/c") + 1 :]
@@ -1076,7 +1097,11 @@ def _delete_targets(program: str, args: list[str], dialect: Dialect) -> list[str
             return []
         from shellwrites import _powershell_targets
 
-        return _powershell_targets("remove-item", args)
+        targets = _powershell_targets("remove-item", args)
+        if not targets and fed_by and fed_by[0] in PS_LISTERS:
+            # what the lister names (or the current folder) is what gets emptied
+            return _powershell_targets("remove-item", fed_by[1]) or ["."]
+        return targets
     if program == "rm":
         letters = _flag_letters(args)
         if "r" in letters or "R" in letters or "--recursive" in args:
@@ -1087,16 +1112,23 @@ def _delete_targets(program: str, args: list[str], dialect: Dialect) -> list[str
 
 
 def check_recursive_delete(
-    program: str, args: list[str], dialect: Dialect, cwd: str
+    program: str,
+    args: list[str],
+    dialect: Dialect,
+    cwd: str,
+    fed_by: tuple[str, list[str]] | None = None,
 ) -> None:
     from verification import _inside, _resolve
 
     for word in (
         w
-        for target in _delete_targets(program, args, dialect)
+        for target in _delete_targets(program, args, dialect, fed_by)
         for w in _words(target, dialect)
     ):
         text = re.sub(r"[\\/]\*+$", "", word.strip("'\"")) or word  # X/* empties X
+        if re.fullmatch(r"\.?[\\/]?\*+[\\/]?", text):
+            text = "."  # `*`, `./*`: everything in the current folder
+        text = _CWD_FORM.sub(lambda _m: cwd, text)
         text = _HOME_FORM.sub(lambda _m: HOME_DIR, text)
         if re.search(r"[$%`*?\[]", text):
             continue  # cannot be told (the text rules above still judge `$HOME`, `~`)
@@ -1146,10 +1178,16 @@ def check_confirmations(program: str, args: list[str]) -> None:
 
 
 def check_isolation(
-    program: str, args: list[str], dialect: Dialect, cwd: str, data: set[int]
+    program: str,
+    args: list[str],
+    dialect: Dialect,
+    cwd: str,
+    data: set[int],
+    fed_by: tuple[str, list[str]] | None = None,
 ) -> None:
     """The rules of devenv-fix-m for one simple command at `cwd`; `data` are the indexes of
-    arguments that are message text or search patterns, not paths."""
+    arguments that are message text or search patterns, not paths; `fed_by` is the command
+    whose output is piped into this one."""
     agent = read_only_agent()
     if ends_processes(program, args):
         if agent:
@@ -1192,7 +1230,7 @@ def check_isolation(
                 block(
                     f"command touches a secret file (the pattern {tok} matches {hit})"
                 )
-    check_recursive_delete(program, args, dialect, cwd)
+    check_recursive_delete(program, args, dialect, cwd, fed_by)
     check_confirmations(program, args)
     starts = sweep_starts(program, args, dialect)
     if starts is None:
@@ -1315,7 +1353,12 @@ def check_parsed(
             data |= flagged | {k + 1 for k in flagged if "=" not in args[k]}
         if program == "git" and git_names_only(cmd, args):
             data = set(range(len(args)))  # names a file, cannot print it
-        check_isolation(program, args, dialect, here, data)
+        fed_by = (
+            program_and_args(commands[index - 1])
+            if index and commands[index - 1].op_after == "|"
+            else None
+        )
+        check_isolation(program, args, dialect, here, data, fed_by)
         for k, arg in enumerate(args):
             if k in data or program in LISTING_PROGRAMS:
                 continue

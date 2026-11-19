@@ -806,6 +806,28 @@ B15_CASES: list[tuple[str, tuple[str, dict], str | None, str, str]] = [
     # matched the discipline folder: 7 corpus commands)
     ("B15-T3 a pattern matching a protected folder's name in code", sh('python -I -c "import glob; print(glob.glob(\'*\'))"'), None, CLAUDE, "allow"),
     ("B15-T3 a pattern over the drive root in code", sh('python -c "x = [p for p in \'/*\']"'), None, "C:/", "allow"),
+    # B15-T4 recursive deletes: the current folder by other names, a cmd script in one
+    # word, a PowerShell pipeline, a switch with a value
+    ("B15-T4 rm -rf * in the projects folder", sh("rm -rf *"), None, "C:/dev", "deny"),
+    ("B15-T4 rm -rf * in the home", sh("rm -rf *"), None, HOME, "deny"),
+    ("B15-T4 rm -rf $PWD", sh("rm -rf $PWD"), None, "C:/dev", "deny"),
+    ("B15-T4 rm -rf ${PWD}/", sh('rm -rf "${PWD}/"'), None, "C:/dev", "deny"),
+    ("B15-T4 Remove-Item $env:PWD", ps("Remove-Item -Recurse -Force $env:PWD"), None, "C:/dev", "deny"),
+    ("B15-T4 rd %CD%", ps("cmd /c rd /s /q %CD%"), None, "C:/dev", "deny"),
+    ("B15-T4 cmd /c in one word, from Bash", sh('cmd /c "rd /s /q C:\\dev"'), None, ELSEWHERE, "deny"),
+    ("B15-T4 cmd /c in one word, from PowerShell", ps('cmd /c "rd /s /q C:\\dev"'), None, ELSEWHERE, "deny"),
+    ("B15-T4 cmd /c with a backslash path", ps("cmd /c rd /s /q C:\\dev"), None, ELSEWHERE, "deny"),
+    ("B15-T4 pipeline into Remove-Item", ps("Get-ChildItem C:\\dev | Remove-Item -Recurse -Force"), None, ELSEWHERE, "deny"),
+    ("B15-T4 pipeline into Remove-Item, by alias", ps("gci C:\\dev -Force | ri -Recurse -Force"), None, ELSEWHERE, "deny"),
+    ("B15-T4 pipeline from the current folder", ps("Get-ChildItem | Remove-Item -Recurse -Force"), None, "C:/dev", "deny"),
+    ("B15-T4 -Recurse:$true", ps("Remove-Item C:\\dev -Recurse:$true -Force"), None, ELSEWHERE, "deny"),
+    ("B15-T4 rm -rf * in a project", sh("rm -rf *"), None, ELSEWHERE, "allow"),
+    ("B15-T4 rm -rf build/*", sh("rm -rf build/*"), None, "C:/dev", "allow"),
+    ("B15-T4 rm -rf $PWD/build", sh("rm -rf $PWD/build"), None, "C:/dev", "allow"),
+    ("B15-T4 pipeline below a project", ps("Get-ChildItem .\\dist | Remove-Item -Recurse -Force"), None, ELSEWHERE, "allow"),
+    ("B15-T4 -Recurse:$false", ps("Remove-Item C:\\dev -Recurse:$false"), None, ELSEWHERE, "allow"),
+    ("B15-T4 cmd /c dir", ps("cmd /c dir C:\\dev"), None, ELSEWHERE, "allow"),
+    ("B15-T4 cmd /c rd of a build folder", sh('cmd /c "rd /s /q C:\\dev\\app\\build"'), None, ELSEWHERE, "allow"),
 ]  # fmt: skip
 # the pure helpers of guard-b15, called in process
 import importlib.util
