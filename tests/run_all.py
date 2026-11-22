@@ -92,6 +92,7 @@ TESTS = [
     "test_output_size",
     "test_usage_state",
     "test_commit_review",
+    "test_inline_patch",
     "test_risk",
     "test_recurrence",
     "test_memory_search",
