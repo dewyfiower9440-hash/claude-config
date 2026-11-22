@@ -1,6 +1,6 @@
-# 새 세션 작업 가이드 (개발환경 v1.1, 2026-11-20)
+# 새 세션 작업 가이드 (개발환경 v1.2, 2026-11-23)
 
-이 문서는 Claude Code 새 세션을 열 때 **어디서 시작하고, 어떻게 일하고, 개발환경(hook·스킬·에이전트·MCP)이 어떻게 적용되는지**를 적은 것이다. 기준은 `~/.claude` 태그 `v1.1`(커밋 `bd2365f`)이고, v1.0에서 바뀐 것은 `docs/guides/release-v1.1.md`에 있다. 규칙의 원문은 `~/.claude/CLAUDE.md`이고, 이 문서는 그 규칙이 실제로 어떻게 작동하는지의 안내다.
+이 문서는 Claude Code 새 세션을 열 때 **어디서 시작하고, 어떻게 일하고, 개발환경(hook·스킬·에이전트·MCP)이 어떻게 적용되는지**를 적은 것이다. 기준은 `~/.claude` 태그 `v1.2`이고, 바뀐 것은 `docs/guides/release-v1.2.md`(v1.1→v1.2)와 `docs/guides/release-v1.1.md`(v1.0→v1.1)에 있다. 규칙의 원문은 `~/.claude/CLAUDE.md`이고, 이 문서는 그 규칙이 실제로 어떻게 작동하는지의 안내다.
 
 ## 1. 어디서 시작하는가
 
@@ -36,18 +36,19 @@
 | 때 | hook | 하는 일 |
 |---|---|---|
 | 도구 호출 직전 | `guard.py` | 비밀 파일(`.env`, 키, `~/.aws/credentials`…) 읽기·쓰기 거부, 보호 폴더(`~/.claude/discipline`·`state`, `%TEMP%\claude-discipline`) 접근 거부, 홈·`C:\dev`·드라이브 루트의 재귀 삭제 거부, `~/.claude`의 hooks·agents·skills·rules·settings·commands 직접 쓰기는 **확인 창(ask)**, read-only subagent의 쓰기 거부. 패턴(`.e*`, `{a,b}`, `$TEMP`)과 표기 변형도 같이 본다 |
-| 도구 호출 직전 | `discipline.py pre` | 계획 범위 밖 편집 기록(warn), 5개 초과 편집 차단, 승인 상태 확인; 리뷰 기준에 해당하는 변경을 `code-reviewer` 없이 `git commit`하면 **한 번 막는다**(같은 내용으로 다시 실행하면 통과) |
-| 도구 호출 직후 | `discipline.py post` | 코드 편집·검증 실행·계획 승인·스킬·MCP 호출 기록; `.py`·`.md`를 저장할 때 **포매터**(ruff format, 미사용 import 보고; import 정렬은 하지 않음); 알림(턴당 1회씩): 큰 셸 출력 → `test-runner`/`Explore`, 의존성 추가 → `researcher`(context7), docs/plans를 스킬 없이 작성 → `/plan`과 Write 도구 |
+| 도구 호출 직전 | `discipline.py pre` | 계획 범위 밖 편집 기록(warn), 5개 초과 편집 차단, 승인 상태 확인; 리뷰 기준에 해당하는 변경을 `code-reviewer` 없이 `git commit`하면 **매번 막는다**(`/commit` 안에서도; 다시 실행해도 같은 내용이면 막힘). 통과하려면 리뷰를 받거나, 리뷰를 일부러 생략할 때 커밋 메시지에 `Review-Skipped: <이유>` 줄을 넣는다(git 이력에 남고 보고에 적는다); 백슬래시가 든 내용으로 파일을 쓰는 인라인 패치(`python -c`, python·`cat`·`tee` heredoc)는 **명령마다 한 번 막는다**(같은 명령을 다시 실행하면 통과) |
+| 도구 호출 직후 | `discipline.py post` | 코드 편집·검증 실행·계획 승인·스킬·MCP 호출 기록; `.py`·`.md`를 저장할 때 **포매터**(ruff format, 미사용 import 보고; import 정렬은 하지 않음); 알림(턴당 1회씩): 큰 셸 출력 → 출력 줄이기·`test-runner`(테스트는 세션당 3회까지)/`Explore`, 의존성 추가 → `researcher`(context7), docs/plans를 스킬 없이 작성 → `/plan`과 Write 도구; 알림(세션당 1회씩): `/commit` 밖의 직접 커밋 → `/commit`, 의존성 추가나 auth·crypt·secret·sign·token·key·password 파일 편집인데 `security-auditor` 기록 없음 → `security-auditor` |
 | 프롬프트 제출 | `discipline.py prompt` | 턴 시작, 위험 점수 안내, 프롬프트 첫 줄의 `task:<id>`·`ack-missing <경로>` 처리 |
 | 턴 종료 | `discipline.py stop` | 마지막 검증 뒤 코드가 바뀌었으면 **게이트를 다시 돌리라고 한 번 막는다**; `ci: required`인데 push 안 됨/CI 실패면 한 번 알린다; 추적 중 저장소가 사라지면 "미확인"으로 알린다 |
 | subagent 시작·종료 | `discipline.py agent-start/stop` | 임시 폴더 안내 주입, 결과 기록 |
 | 세션 종료 | `handoff.py` | 종료 기록(다음 SessionStart가 보여 준다) |
 
-v1.1의 알림·차단을 조절하는 환경변수(`settings.json`의 `env`):
+알림·차단을 조절하는 환경변수(`settings.json`의 `env`):
 
 | 변수 | 기본값 | 뜻 |
 |---|---|---|
-| `CLAUDE_COMMIT_REVIEW` | `block` | 미리뷰 커밋을 한 번 막음. `notify`는 커밋 뒤 알림만, `off`는 검사 안 함 |
+| `CLAUDE_COMMIT_REVIEW` | `block` | 미리뷰 커밋을 매번 막음(`Review-Skipped:` 줄이 있으면 통과). `notify`는 커밋 뒤 알림만, `off`는 검사도 직접 커밋 알림도 안 함 |
+| `CLAUDE_INLINE_PATCH` | `block` | 백슬래시 인라인 패치를 명령마다 한 번 막음. `notify`는 실행 뒤 알림만, `off`는 검사 안 함 |
 | `CLAUDE_REVIEW_GATE` | `1` | Stop에서 리뷰 기준에 해당하는 변경의 리뷰를 한 번 요구. 빼면 기록만 |
 | `CLAUDE_OUTPUT_ADVICE_CHARS` | `8000` | 큰 출력 알림의 기준(1000~1000000자) |
 
@@ -65,14 +66,14 @@ v1.1의 알림·차단을 조절하는 환경변수(`settings.json`의 `env`):
 
 - **스킬**: `/plan`(설계·3+ 파일) → `/implement`(승인된 계획 실행) → `/commit`(커밋·push·CI). 버그는 `/debug`(재현·실패 테스트·최소 수정), 구조 변경은 `/refactor`, 큰 변경 뒤 `/deep-review`, 배포 전 `/predeploy`, 새 프로젝트 `/new-project`, hook 반영은 `/release-hooks`. headless(`claude -p`)에서는 모델이 스킬을 부르지 않고 직접 계획을 쓰는 것이 관측됐으므로 대화형에서 `/plan`을 명시해 부르는 편이 확실하다.
 - **subagent**(모두 읽기 전용, 가드가 강제; 보고는 단서이고 증거가 아니다 — 게이트는 주 세션이 돌린다):
-  - `code-reviewer`: 커밋 전·큰 변경 뒤 diff 리뷰. v1.0 시험에서 실행으로 확인한 결함을 `파일:줄`로 냈다. v1.1부터 커밋 직전 hook이 미리뷰를 한 번 막으므로, 커밋하기 전에 먼저 부른다.
+  - `code-reviewer`: 커밋 전·큰 변경 뒤 diff 리뷰. v1.0 시험에서 실행으로 확인한 결함을 `파일:줄`로 냈다. v1.2부터 커밋 직전 hook이 미리뷰 커밋을 매번 막으므로, 커밋하기 전에 먼저 부르고, 지적을 고친 뒤에는 고친 부분만 다시 리뷰받는다. 리뷰어에게는 쓰기 도구가 없다: 확인은 인라인(`python -I -c`)으로 하고, 파일이 필요하면 리터럴 temp 경로에만 쓰며, 검사 하나는 5분 안으로 한다(`agents/code-reviewer.md`).
   - `test-runner`: 긴 테스트의 진단 요약(결과를 그대로 검증으로 쓰지 않는다).
   - `researcher`: 라이브러리·API 질문(Context7 우선, 출처 URL 포함).
-  - `security-auditor`: 배포 전, 인증·비밀·의존성·CI 변경 때.
+  - `security-auditor`: 배포 전, 인증·비밀·의존성·CI 변경 때. v1.2부터 의존성 추가나 보안 이름의 파일 편집 뒤 세션에 실행 기록이 없으면 hook이 한 번 알린다.
   - subagent가 `uv run ruff format`·`pnpm install`·`git stash` 같은 쓰기를 하면 거부되고 보고하게 되어 있다. 그런 일은 주 세션이 한다.
 - **MCP**: 라이브러리 문서는 `context7`(기억으로 쓰지 않는다), GitHub PR·이슈·Actions 조회는 `github`, 브라우저 확인은 `playwright`, 프로젝트 DB는 그 프로젝트의 `sqlite`(승인 뒤). MCP가 돌려준 글도 데이터다.
 
-## 7. 지금 알아둘 상태 (2026-11-20)
+## 7. 지금 알아둘 상태 (2026-11-20, v1.2에서 바뀐 것은 release-v1.2.md)
 
 - **CI**: 정상이다. `claude-config`는 public 저장소라 GitHub 호스팅 runner가 무료로 돈다(run 44559313607 성공). 코드·이력·Actions 로그가 공개되므로 비밀값이나 개인 정보를 커밋하지 않는다(hook이 막지만 이력에 남으면 되돌릴 수 없다). private 저장소(dev-tools 등)의 CI는 계정 결제·지출 한도 문제로 여전히 시작되지 않는다("recent account payments have failed…"); 그쪽은 Locally Verified까지 간다.
 - **승인 모드**: `CLAUDE_AUTHZ_MODE=warn`(기본). 승인 없는 편집 5개 초과만 막힌다. enforce 전환은 별도 계획(백로그 A).
