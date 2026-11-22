@@ -208,5 +208,123 @@ check(
     [("python-c", "python")],
 )
 
+# ---------------------------------------------------------------- step 4: through the hook
+# CLAUDE_INLINE_PATCH=block (default) refuses an inline patch once per command text, with
+# the way to do it instead; notify says it after the command; off does nothing; a
+# subagent's command is not checked.
+import json
+import os
+import shutil
+import uuid
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import inproc
+
+TMP_ROOT = Path(os.environ.get("GATE_TMP_ROOT") or Path(__file__).resolve().parent)
+ROOT = TMP_ROOT / "_tmp_inline_patch"
+WORK_ROOT = Path(os.environ.get("GATE_WORK_ROOT", "C:/dev"))
+PROJ = WORK_ROOT / "_inline_patch_proj"
+for p in (ROOT, PROJ):
+    shutil.rmtree(p, ignore_errors=True)
+TMPD = ROOT / "tmp"
+TMPD.mkdir(parents=True)
+PROJ.mkdir(parents=True)
+ENV = {
+    k: v
+    for k, v in os.environ.items()
+    if k not in ("CLAUDE_INLINE_PATCH", "CLAUDE_COMMIT_REVIEW")
+}
+ENV.update(
+    TMPDIR=str(TMPD),
+    TEMP=str(TMPD),
+    TMP=str(TMPD),
+    CLAUDE_DISCIPLINE_HOME=str(ROOT / "home"),
+    CLAUDE_DISCIPLINE_WITNESS=str(ROOT / "w" / "hwm"),
+)
+PATCH = "python -c \"open('f.ps1','w').write('C:\\\\dev\\\\run')\""
+
+
+def hook(mode: str, s: str, env: dict[str, str], **payload: object) -> dict:
+    p = inproc.run(
+        HOOKS / "discipline.py",
+        [mode],
+        json.dumps({"session_id": s, "cwd": str(PROJ), "prompt_id": "p", **payload}),
+        env=env,
+    )
+    assert p.returncode == 0, (mode, p.returncode, p.stderr[-300:])
+    return json.loads(p.stdout) if p.stdout.strip() else {}
+
+
+def shell(
+    s: str, command: str = PATCH, env: dict[str, str] = ENV, **who: object
+) -> tuple[str, str, str]:
+    """(pre decision, pre reason, post additionalContext) of one Bash call."""
+    common = {
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+        "tool_use_id": uuid.uuid4().hex,
+        **who,
+    }
+    pre = hook("pre", s, env, **common).get("hookSpecificOutput", {})
+    post = hook("post", s, env, tool_response={"stdout": "", "stderr": ""}, **common)
+    return (
+        str(pre.get("permissionDecision") or ""),
+        str(pre.get("permissionDecisionReason") or ""),
+        str(post.get("hookSpecificOutput", {}).get("additionalContext") or ""),
+    )
+
+
+def start(env: dict[str, str] = ENV) -> str:
+    s = uuid.uuid4().hex
+    hook("prompt", s, env, prompt="work")
+    return s
+
+
+os.environ["CLAUDE_DISCIPLINE_HOME"] = ENV["CLAUDE_DISCIPLINE_HOME"]
+os.environ["CLAUDE_DISCIPLINE_WITNESS"] = ENV["CLAUDE_DISCIPLINE_WITNESS"]
+import discipline as disc
+
+mode_of = getattr(disc, "inline_patch_mode", lambda raw: None)
+check(
+    "IP-H0 the mode: unset and junk are block; notify and off are themselves",
+    [mode_of(None), mode_of("notify"), mode_of("OFF"), mode_of("x")],
+    ["block", "notify", "off", "block"],
+)
+s = start()
+decision, reason, said = shell(s)
+check(
+    "IP-H1 block: the first run is refused, naming Edit/Write and a script file checked with repr",
+    (decision, "Write" in reason, "repr" in reason, "CLAUDE_INLINE_PATCH" in reason),
+    ("deny", True, True, True),
+)
+decision, reason, said = shell(s)
+check("IP-H2 the same command again passes", (decision, said), ("", ""))
+decision, reason, said = shell(s, PATCH.replace("run", "run2"))
+check("IP-H3 another inline patch is refused again", decision, "deny")
+decision, reason, said = shell(s, "python -c \"print('a\\\\b')\"")
+check("IP-H4 a command that is no patch is not touched", (decision, said), ("", ""))
+
+s = start()
+decision, reason, said = shell(s, agent_id="r1", agent_type="code-reviewer")
+check("IP-H5 a subagent's command is not checked", (decision, said), ("", ""))
+
+OFF = dict(ENV, CLAUDE_INLINE_PATCH="off")
+s = start(OFF)
+decision, reason, said = shell(s, env=OFF)
+check("IP-H6 off: nothing", (decision, said), ("", ""))
+
+NOTIFY = dict(ENV, CLAUDE_INLINE_PATCH="notify")
+s = start(NOTIFY)
+decision, reason, said = shell(s, env=NOTIFY)
+check(
+    "IP-H7 notify: the command passes and the note comes after it",
+    (decision, "Write" in said, "알림" in said),
+    ("", True, True),
+)
+decision, reason, said = shell(s, env=NOTIFY)
+check("IP-H8 notify: said once per command", said, "")
+
+for p in (ROOT, PROJ):
+    shutil.rmtree(p, ignore_errors=True)
 print(f"\nFAILURES: {fails}")
 sys.exit(1 if fails else 0)

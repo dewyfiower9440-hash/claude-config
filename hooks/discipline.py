@@ -893,6 +893,9 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
         refusal = commit_review_denial(data, state, str(ti.get("command", "")), cwd)
         if refusal:
             emit_pre("deny", refusal)
+        refusal = inline_patch_denial(data, state, str(ti.get("command", "")))
+        if refusal:
+            emit_pre("deny", refusal)
         tests = deleted_test_files(ti.get("command", ""))
         if tests:
             emit_pre(
@@ -1337,6 +1340,78 @@ def commit_review_denial(
     except (OSError, ValueError, TypeError, AttributeError, RecursionError):
         log.exception("discipline.commit_review_failed")
     return None
+
+
+# ---------------------------------------------------------------- devenv-v1-2: inline patches
+INLINE_PATCH_MODES = ("block", "notify", "off")
+INLINE_PATCH_KINDS = {
+    "python-c": "`python -c` 코드",
+    "python-heredoc": "python heredoc",
+    "shell-heredoc": "`cat`/`tee` heredoc",
+}
+REASON_INLINE_PATCH = (
+    "[discipline] 인라인 패치 감지: {what}가 백슬래시가 든 내용으로 파일을 씁니다. 셸과 Python "
+    "문자열은 `\\r`·`\\n`·`\\t` 같은 백슬래시를 다른 바이트로 바꿉니다(2026-11-20에 Windows "
+    "경로의 `\\r`이 CR이 되어 파일이 깨졌습니다; 글로벌 규칙 §9). 파일 수정은 Edit/Write 도구로 "
+    "하세요. 스크립트가 꼭 필요하면 Write로 스크립트 파일을 만들어 실행하고, 쓴 결과를 repr로 "
+    "읽어 확인하세요(Python 모듈이면 ast.parse도). 이 명령은 한 번만 막습니다: 백슬래시가 의도한 "
+    "그대로임을 확인했다면 같은 명령을 다시 실행하면 됩니다. (CLAUDE_INLINE_PATCH=notify|off 로 완화)"
+)
+INLINE_PATCH_NOTE = (
+    "[discipline] 방금 명령은 {what}로 백슬래시가 든 내용을 파일에 썼습니다. 쓴 파일을 repr로 "
+    "읽어 백슬래시가 그대로인지 확인하세요. 다음부터는 Edit/Write 도구나, Write로 만든 스크립트 "
+    "파일을 쓰세요. (알림이며 차단이 아닙니다.)"
+)
+
+
+def inline_patch_mode(raw: object) -> str:
+    """CLAUDE_INLINE_PATCH: block (default), notify or off; anything else is block."""
+    if isinstance(raw, str) and raw.strip().lower() in INLINE_PATCH_MODES:
+        return raw.strip().lower()
+    return "block"
+
+
+def inline_patch_denial(
+    data: dict[str, Any], state: dict[str, Any], command: str
+) -> str | None:
+    """devenv-v1-2 step 4: the main conversation's inline patch (inline_patch.py) is
+    refused once per command text (block), or noted after the command (notify). A problem
+    in the check itself refuses nothing."""
+    mode = inline_patch_mode(os.environ.get("CLAUDE_INLINE_PATCH"))
+    if mode == "off" or actor(data) != "main":
+        return None
+    try:
+        from inline_patch import inline_patches
+
+        dialect = "powershell" if data.get("tool_name") == "PowerShell" else "bash"
+        found = inline_patches(command, dialect)
+        if not found:
+            return None
+        import hashlib
+
+        digest = hashlib.sha256(command.encode("utf-8", "replace")).hexdigest()[:16]
+        key = f"inline-patch|{digest}"
+        told = state.setdefault("notified", {})
+        if key in told:
+            return None  # once per command text
+        told[key] = state.get("turn")
+        what = INLINE_PATCH_KINDS.get(found[0].kind, found[0].kind)
+        if mode == "block":
+            return REASON_INLINE_PATCH.format(what=what)
+        state["inline_patch_note"] = {
+            "id": str(data.get("tool_use_id") or ""),
+            "text": INLINE_PATCH_NOTE.format(what=what),
+        }
+    except Exception:  # hook boundary: the check never blocks by failing
+        log.exception("discipline.inline_patch_failed")
+    return None
+
+
+def take_inline_patch_note(data: dict[str, Any], state: dict[str, Any]) -> None:
+    """The note the command's PreToolUse prepared, said after that very tool call only."""
+    note = state.pop("inline_patch_note", None)
+    if isinstance(note, dict) and note.get("id") == str(data.get("tool_use_id") or ""):
+        add_post_note(str(note.get("text") or ""))
 
 
 def take_commit_review_note(data: dict[str, Any], state: dict[str, Any]) -> None:
@@ -1999,6 +2074,7 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
                 state["approval_warning"] = v2_failure(e)
         note_output_size(data, state, failed=False)
         take_commit_review_note(data, state)
+        take_inline_patch_note(data, state)
         note_dependency_add(data, state)
     elif tool in ("Agent", "Task"):
         if ti.get("subagent_type") in REVIEW_AGENTS:
