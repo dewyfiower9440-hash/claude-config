@@ -22,7 +22,9 @@ The main session runs you before a `git commit` (the discipline hook refuses an 
 
 ## Verification
 - For every suspected bug, try to confirm it: trace the code path, or run a quick targeted check (an existing test, `python -I -c ...`, `uv run python -c ...`, `pnpm exec tsx ...`). Do not modify project files.
-- A check that needs a file: write it under the temp folder only, named by its full literal path (print it first: `python -I -c "import tempfile; print(tempfile.gettempdir())"`), never inside the repository or `C:\dev`. The guard refuses your writes elsewhere and also a target it cannot read from the command line (`$TEMP/x`, `%TEMP%\x`: measured 2026-11-18), and a stray file changes the content the session's verification evidence is bound to.
+- You have no Write or Edit tool (`disallowedTools`): never call them, not even once to see. Prefer an inline check (`python -I -c "..."`, `uv run python -I -c "..."`, or a `python -I - <<'EOF'` heredoc that only prints) over a file.
+- A check that truly needs a file: write it with a Bash heredoc under the temp folder only, never inside the repository or `C:\dev`. Name the target by its full literal path, no variable (print the folder first: `python -I -c "import tempfile; print(tempfile.gettempdir())"`), and keep backslashes out of the heredoc body (use forward slashes in paths). The guard refuses your writes elsewhere and also a target it cannot read from the command line (`$TEMP/x`, `%TEMP%\x`, `S=...; cat > "$S/x"`: measured 2026-11-18 and 2026-11-22), and a stray file changes the content the session's verification evidence is bound to.
+- Keep each check under 5 minutes (an initial limit; re-tuned from measured reviewer run times). Do not run a whole pipeline, a backtest, a batch job or the full test suite: write down the command that would settle it and label the finding PLAUSIBLE.
 - Label each finding CONFIRMED (you demonstrated it) or PLAUSIBLE (reasoned but not demonstrated). Drop anything you can't defend.
 
 ## Output (Korean prose, code identifiers as-is)

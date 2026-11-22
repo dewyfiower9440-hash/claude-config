@@ -1350,7 +1350,7 @@ INLINE_PATCH_KINDS = {
     "shell-heredoc": "`cat`/`tee` heredoc",
 }
 REASON_INLINE_PATCH = (
-    "[discipline] 인라인 패치 감지: {what}가 백슬래시가 든 내용으로 파일을 씁니다. 셸과 Python "
+    "[discipline] 인라인 패치 감지({what}): 백슬래시가 든 내용으로 파일을 씁니다. 셸과 Python "
     "문자열은 `\\r`·`\\n`·`\\t` 같은 백슬래시를 다른 바이트로 바꿉니다(2026-11-20에 Windows "
     "경로의 `\\r`이 CR이 되어 파일이 깨졌습니다; 글로벌 규칙 §9). 파일 수정은 Edit/Write 도구로 "
     "하세요. 스크립트가 꼭 필요하면 Write로 스크립트 파일을 만들어 실행하고, 쓴 결과를 repr로 "
@@ -1358,7 +1358,7 @@ REASON_INLINE_PATCH = (
     "그대로임을 확인했다면 같은 명령을 다시 실행하면 됩니다. (CLAUDE_INLINE_PATCH=notify|off 로 완화)"
 )
 INLINE_PATCH_NOTE = (
-    "[discipline] 방금 명령은 {what}로 백슬래시가 든 내용을 파일에 썼습니다. 쓴 파일을 repr로 "
+    "[discipline] 방금 명령({what})은 백슬래시가 든 내용을 파일에 썼습니다. 쓴 파일을 repr로 "
     "읽어 백슬래시가 그대로인지 확인하세요. 다음부터는 Edit/Write 도구나, Write로 만든 스크립트 "
     "파일을 쓰세요. (알림이며 차단이 아닙니다.)"
 )

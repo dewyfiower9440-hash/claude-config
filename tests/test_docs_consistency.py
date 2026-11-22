@@ -13,6 +13,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.stdout.reconfigure(errors="backslashreplace")
@@ -374,6 +375,61 @@ check(
         },
         ["researcher"],
     ),
+)
+
+# ---- devenv-v1-2 step 6: reviewers called the Write tool they do not have (16 times, 13
+# of them twice) and wrote checks to variable paths the guard refuses (8 times); one review
+# ran a 72-minute backtest. The definition says what to do instead, and the guard agrees.
+reviewer = (REPO / "agents" / "code-reviewer.md").read_text(encoding="utf-8")
+check(
+    "D11 the reviewer is told: no Write/Edit tool, inline checks first, a literal temp path "
+    "without backslashes, 5 minutes per check, no pipeline or backtest (PLAUSIBLE instead)",
+    (
+        "no Write or Edit tool" in reviewer,
+        "python -I -c" in reviewer,
+        "full literal path, no variable" in reviewer,
+        "backslashes out of the heredoc body" in reviewer,
+        "under 5 minutes" in reviewer,
+        "backtest" in reviewer and "PLAUSIBLE" in reviewer,
+    ),
+    (True,) * 6,
+)
+
+
+def guard_says_as(agent_type: str, command: str) -> str:
+    done = subprocess.run(
+        [sys.executable, str(HOOKS / "guard.py")],
+        input=json.dumps(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+                "agent_id": "r1",
+                "agent_type": agent_type,
+            }
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return {0: "allowed", 2: "blocked"}.get(done.returncode, f"exit {done.returncode}")
+
+
+TEMP_FILE = Path(tempfile.gettempdir()).as_posix() + "/d11_check.py"
+check(
+    "D11 the guard lets a reviewer write a heredoc to a literal temp path, and refuses a "
+    "variable path and a path in the repository",
+    (
+        guard_says_as("code-reviewer", f"cat > '{TEMP_FILE}' <<'EOF'\nprint(1)\nEOF\n"),
+        guard_says_as(
+            "code-reviewer",
+            f"S='{Path(tempfile.gettempdir()).as_posix()}'; cat > \"$S/x.py\" <<'EOF'\nprint(1)\nEOF\n",
+        ),
+        guard_says_as(
+            "code-reviewer",
+            f"cat > '{(REPO / 'x.py').as_posix()}' <<'EOF'\nprint(1)\nEOF\n",
+        ),
+    ),
+    ("allowed", "blocked", "blocked"),
 )
 
 # ---------------------------------------------------------------- plan archive
