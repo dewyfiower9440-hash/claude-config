@@ -24,13 +24,14 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 if (
     TYPE_CHECKING
 ):  # names for annotations only: verification is imported where it is used
     from collections.abc import Mapping
 
+    from shellparse import SimpleCommand
     from verification import Policy
 
 _T0 = time.monotonic()  # earliest point of this hook run: every budget counts from here
@@ -982,9 +983,15 @@ MAX_COMMIT_REVIEW_ROOTS = 10
 REASON_COMMIT_REVIEW = (
     "[discipline] 커밋 전 독립 리뷰가 없습니다: {root}의 변경이 리뷰 기준({why})에 해당하는데 "
     "리뷰 상태가 {state}입니다({state_why}). 커밋하기 전에 `code-reviewer` 에이전트"
-    "(Agent subagent_type=code-reviewer)로 이 변경을 리뷰하고 CONFIRMED 지적을 고치세요.{skill} "
-    "이 커밋은 한 번만 막습니다: 그대로 다시 실행하면 통과하며, 그때는 리뷰 없이 커밋했음을 보고에 "
-    "적으세요. (CLAUDE_COMMIT_REVIEW=notify|off 로 완화)"
+    "(Agent subagent_type=code-reviewer)로 이 변경을 리뷰하고 CONFIRMED 지적을 고치세요. "
+    "리뷰 뒤에 지적을 고친 것이라면 고친 부분만 재리뷰하면 됩니다(리뷰어에게 `git diff`의 그 "
+    "부분만 보여 주세요).{skill} 재시도해도 같은 내용이면 다시 막습니다. 리뷰를 생략해야 한다면 "
+    "커밋 메시지 끝에 트레일러 `Review-Skipped: <이유>` 줄을 넣으세요: git 이력에 남고 보고에도 "
+    "적어야 합니다. (CLAUDE_COMMIT_REVIEW=notify|off 로 완화)"
+)
+REVIEW_SKIPPED_NOTE = (
+    "[discipline] 리뷰 생략 기록: {root}의 변경(리뷰 기준 {why}, 상태 {state})을 "
+    "`Review-Skipped: {reason}` 트레일러로 리뷰 없이 커밋했습니다. 보고에 적으세요."
 )
 COMMIT_REVIEW_NOTE = (
     "[discipline] 방금 커밋한 {root}의 변경은 리뷰 기준({why})에 해당하는데 리뷰 상태가 "
@@ -1006,10 +1013,18 @@ def commit_review_mode(raw: object) -> str:
     return "block"
 
 
-def commit_commands(command: object, dialect: str, cwd: str) -> list[str]:
-    """The working directory of every `git commit` a shell command runs (as git reads it:
-    `git -C x commit`, after `cd`), none for a dry run, a nested command or a command that
-    cannot be parsed."""
+class CommitCall(NamedTuple):
+    """One `git commit` of a command line: where git runs it, and its message as the
+    command line gives it (`-m` text, a `-F -` heredoc or pipe) or the `-F` file to read."""
+
+    where: str
+    message: str | None
+    message_file: str | None
+
+
+def commit_calls(command: object, dialect: str, cwd: str) -> list[CommitCall]:
+    """Every `git commit` a shell command runs (as git reads it: `git -C x commit`, after
+    `cd`), none for a dry run, a nested command or a command that cannot be parsed."""
     if not isinstance(command, str):
         return []
     from shellparse import ParseError, parse, program_and_args
@@ -1023,23 +1038,208 @@ def commit_commands(command: object, dialect: str, cwd: str) -> list[str]:
         ]
     except ParseError:
         return []
-    out: list[str] = []
+    out: list[CommitCall] = []
     for i, cmd in enumerate(cmds):
         program, args = program_and_args(cmd)
         if program != "git" or _git_subcommand(args)[:1] != ["commit"]:
             continue
         sub = _git_subcommand(args)
-        if "--dry-run" in sub:
+        texts, file, dry_run = _commit_message_args(sub[1:])
+        if dry_run:
             continue
-        where = cwd_at(cmds, i, cwd)
-        globals_ = args[: len(args) - len(sub)]
-        for j, a in enumerate(globals_):
-            if a == "-C" and j + 1 < len(globals_):
-                # as the shell hands it to git: /c/dev, ~ and relative paths (review
-                # finding 1: a Git Bash path used to miss every project)
-                where = resolve_dir(where, globals_[j + 1])
-        out.append(where)
+        where = git_workdir(cwd_at(cmds, i, cwd), args, sub)
+        if file is not None and file != "-":
+            file = resolve_dir(where, file)
+            if _written_by(command, dialect, cwd, file):
+                # (re-review 2) the line writes the file before git reads it: what the
+                # file holds now is not the message; unknown, so the commit is refused
+                out.append(CommitCall(where, None, None))
+                continue
+        if file == "-":
+            # `-F -` reads stdin: this command's heredoc, or what is piped into it
+            stdin = cmd.heredoc
+            if stdin is None and i > 0 and cmds[i - 1].op_after == "|":
+                stdin = _piped_text(cmds[i - 1])
+            if stdin is not None:
+                texts.append(stdin)
+            file = None
+        out.append(CommitCall(where, "\n\n".join(texts) if texts else None, file))
     return out
+
+
+def _written_by(command: str, dialect: str, cwd: str, path: str) -> bool:
+    """Whether the command line visibly writes `path` (a redirect, cp, tee, Set-Content...)."""
+    from shellwrites import write_targets
+
+    targets, _unknown = write_targets(
+        command, "powershell" if dialect == "powershell" else "bash", cwd
+    )
+    want = os.path.normcase(os.path.normpath(path))
+    return any(os.path.normcase(os.path.normpath(t)) == want for t in targets)
+
+
+# `git commit` options that take a value: the next word, or the rest of a short cluster.
+COMMIT_VALUED_SHORT = frozenset("cCFmt")
+COMMIT_OPTIONAL_SHORT = frozenset(
+    "uS"
+)  # a value only when attached: the rest is theirs
+COMMIT_VALUED_LONG = frozenset(
+    {
+        "--message",
+        "--file",
+        "--trailer",
+        "--author",
+        "--date",
+        "--fixup",
+        "--squash",
+        "--cleanup",
+        "--template",
+        "--reuse-message",
+        "--reedit-message",
+        "--pathspec-from-file",
+    }
+)
+MESSAGE_PRINTERS = frozenset({"echo", "printf", "write-output"})
+
+
+def _valued_long(word: str) -> str | None:
+    """The valued long option a word names, as git reads long options: the full name or
+    a prefix of it (`--auth` is `--author`, gitcli). "" for a prefix of several valued
+    options (git refuses it as ambiguous; its value is skipped all the same), None for a
+    word that names no valued option."""
+    if word in COMMIT_VALUED_LONG:
+        return word
+    matches = [o for o in COMMIT_VALUED_LONG if o.startswith(word)]
+    if len(word) <= 2 or not matches:
+        return None
+    return matches[0] if len(matches) == 1 else ""
+
+
+def _commit_message_args(args: list[str]) -> tuple[list[str], str | None, bool]:
+    """(message texts, -F file, dry run) of `git commit`'s arguments as git reads them: a
+    short cluster is read letter by letter until a letter that takes a value (`-am x`,
+    `-mx`, `-Fm` is `-F m`), long options also by a prefix (`--mess x`), other options'
+    values are skipped (`-m --dry-run` is a message), and `--trailer x` adds `x` as a
+    line of the message (`token=value` as git writes it, `token: value`)."""
+    texts: list[str] = []
+    file: str | None = None
+    dry_run = False
+    k = 0
+    while k < len(args):
+        a = args[k]
+        nxt = args[k + 1] if k + 1 < len(args) else None
+        if a == "--":
+            break
+        name, value = "", None
+        if a.startswith("--"):
+            long_name, eq, attached = a.partition("=")
+            valued = _valued_long(long_name)
+            if valued is None:
+                # `--dry-run` and its prefixes (`--d` is ambiguous with --date)
+                if len(long_name) >= 4 and "--dry-run".startswith(long_name):
+                    dry_run = True
+                elif len(long_name) >= 6 and "--no-dry-run".startswith(long_name):
+                    dry_run = False  # the last one counts, as git reads a boolean
+            else:
+                name = valued
+                if eq:
+                    value = attached
+                else:
+                    value = nxt
+                    k += 1
+        elif a.startswith("-") and len(a) > 1:
+            for j, letter in enumerate(a[1:], start=1):
+                if letter in COMMIT_OPTIONAL_SHORT:
+                    break
+                if letter in COMMIT_VALUED_SHORT:
+                    name = "-" + letter
+                    if a[j + 1 :]:
+                        value = a[j + 1 :]
+                    else:
+                        value = nxt
+                        k += 1
+                    break
+        if value is not None:
+            if name in ("-m", "--message"):
+                texts.append(value)
+            elif name == "--trailer":
+                # git writes `token=value` and `token:value` as `token: value`
+                sep = re.search(r"[=:]", value)
+                texts.append(
+                    f"{value[: sep.start()]}: {value[sep.end() :].strip()}"
+                    if sep
+                    else value
+                )
+            elif name in ("-F", "--file"):
+                file = value
+        k += 1
+    return texts, file, dry_run
+
+
+def _piped_text(cmd: SimpleCommand) -> str | None:
+    """What a command piped into `git commit -F -` writes, when the command line shows it:
+    a heredoc (`cat <<EOF |`), `echo`/`printf`/`Write-Output` words, or a PowerShell
+    string alone. Anything else (`grep ... |`) is unknown."""
+    from shellparse import program_and_args
+
+    if cmd.heredoc is not None:
+        return cmd.heredoc
+    program, args = program_and_args(cmd)
+    if program in MESSAGE_PRINTERS:
+        words = [a for a in args if not a.startswith("-")]
+        if program == "printf":
+            # printf prints its format, not its other words; a `%` makes it a format
+            ok = len(words) == 1 and "%" not in words[0]
+            return words[0] if ok else None
+        return "\n".join(words)
+    if len(cmd.words) == 1 and re.search(r"\s", cmd.words[0]):
+        return cmd.words[0]
+    return None
+
+
+def commit_commands(command: object, dialect: str, cwd: str) -> list[str]:
+    """The working directory of every `git commit` a shell command runs."""
+    return [c.where for c in commit_calls(command, dialect, cwd)]
+
+
+REVIEW_SKIPPED_TRAILER = re.compile(
+    r"^Review-Skipped:[ \t]*(\S[^\n]*?)[ \t]*$", re.IGNORECASE | re.MULTILINE
+)
+
+
+def review_skipped_reason(message: str | None) -> str | None:
+    """The reason of a `Review-Skipped: <reason>` line of a commit message; None when
+    there is none or its reason is empty. Any line counts, not only git's trailer block
+    (`git interpret-trailers`): the line is recorded in the history either way."""
+    if not message:
+        return None
+    m = REVIEW_SKIPPED_TRAILER.search(message)
+    return m.group(1) if m else None
+
+
+def commit_message_text(call: CommitCall) -> str | None:
+    """The message git will record: the command line's text, or the `-F` file read as
+    UTF-8. A file that cannot be read gives None (no trailer: the commit is refused)."""
+    if call.message_file is None:
+        return call.message
+    try:
+        text = Path(call.message_file).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        log.warning("discipline.commit_message_unreadable path=%s", call.message_file)
+        return None
+    return text if call.message is None else call.message + "\n\n" + text
+
+
+def git_workdir(where: str, args: list[str], sub: list[str]) -> str:
+    """The folder git runs in: `where` (after `cd`), moved by each global `-C <dir>`
+    before the subcommand `sub`."""
+    globals_ = args[: len(args) - len(sub)]
+    for j, a in enumerate(globals_):
+        if a == "-C" and j + 1 < len(globals_):
+            # as the shell hands it to git: /c/dev, ~ and relative paths (review
+            # finding 1: a Git Bash path used to miss every project)
+            where = resolve_dir(where, globals_[j + 1])
+    return where
 
 
 def commit_review_roots(state: dict[str, Any], top: str) -> list[str]:
@@ -1088,27 +1288,39 @@ def commit_review_denial(
     data: dict[str, Any], state: dict[str, Any], command: str, cwd: str
 ) -> str | None:
     """v1.1 step 2: the main conversation's `git commit` of a change that needs an
-    independent review and has none is refused once (block), or noted after the commit
-    (notify; also inside the /commit skill, whose run is recorded this turn). A problem in
-    the check itself refuses nothing: the commit is not what the hook protects."""
+    independent review and has none is refused (block, inside the /commit skill too), or
+    noted after the commit (notify). devenv-v1-2 step 2:
+    block refuses every attempt (retrying used to pass); a message with a
+    `Review-Skipped: <reason>` trailer passes, recorded in git, and the skip is said after
+    the commit. A problem in the check itself refuses nothing: the commit is not what the
+    hook protects."""
     mode = commit_review_mode(os.environ.get("CLAUDE_COMMIT_REVIEW"))
     if mode == "off" or actor(data) != "main":
         return None
     try:
         dialect = "powershell" if data.get("tool_name") == "PowerShell" else "bash"
-        for where in commit_commands(command, dialect, cwd):
-            found = commit_review_problem(state, cwd, where)
+        for call in commit_calls(command, dialect, cwd):
+            found = commit_review_problem(state, cwd, call.where)
             if found is None:
                 continue
             key, fields = found
-            told = state.setdefault("notified", {})
-            if key in told:
-                return None  # once per content
-            told[key] = state.get("turn")
             in_skill = skill_used_this_turn(state, "commit")
             fields["skill"] = "" if in_skill else COMMIT_SKILL_HINT
-            if mode == "block" and not in_skill:
-                return REASON_COMMIT_REVIEW.format(**fields)
+            # devenv-v1-2 (user decision 2026-11-23): inside the /commit skill too; the skill
+            # runs no reviewer, so it used to be a way around the refusal
+            if mode == "block":
+                why_skipped = review_skipped_reason(commit_message_text(call))
+                if why_skipped is None:
+                    return REASON_COMMIT_REVIEW.format(**fields)
+                state["commit_review_note"] = {
+                    "id": str(data.get("tool_use_id") or ""),
+                    "text": REVIEW_SKIPPED_NOTE.format(reason=why_skipped, **fields),
+                }
+                continue
+            told = state.setdefault("notified", {})
+            if key in told:
+                return None  # notify: once per content
+            told[key] = state.get("turn")
             state["commit_review_note"] = {
                 "id": str(data.get("tool_use_id") or ""),
                 "text": COMMIT_REVIEW_NOTE.format(**fields),
@@ -1254,10 +1466,14 @@ def flush_post_notes() -> None:
 OUTPUT_OBSERVE_MIN = 2000  # smaller outputs are not worth a row
 OUTPUT_ADVICE_DEFAULT = 8000  # initial prior; re-tune from output-size-observe.jsonl
 OUTPUT_ADVICE_NOTE = (
-    "[discipline] 방금 테스트·검사 명령의 출력이 {n}자였습니다(기준 {limit}자). 긴 출력은 "
-    "`test-runner` subagent에 맡기면 요약만 돌아옵니다. 직접 실행할 때는 조용한 옵션(-q 등)을 "
-    "쓰세요. (알림이며 차단이 아닙니다.)"
+    "[discipline] 방금 테스트·검사 명령의 출력이 {n}자였습니다(기준 {limit}자). 먼저 출력을 "
+    "줄이세요: 조용한 옵션(-q 등)을 쓰거나, 출력을 파일로 보낸 뒤 `tail`·`grep`으로 필요한 "
+    "부분만 보세요. 실패 진단이 길어지면 `test-runner` subagent에 맡기면 요약만 돌아옵니다. "
+    "(알림이며 차단이 아닙니다.)"
 )
+# devenv-v1-2 step 5: the hint was taken 0 times in 15 (session 2ea67f50); an initial prior,
+# re-tuned from the monitor's acceptance counts.
+MAX_TEST_ADVICE_PER_SESSION = 3
 
 
 OUTPUT_EXPLORE_NOTE = (
@@ -1345,9 +1561,12 @@ def note_output_size(
         advise = (
             main and not failed and state.get("output_advice_turn") != state.get("turn")
         )
+        given = int(state.get("test_advice_count") or 0)
         if advise and test and size >= limit:
-            state["output_advice_turn"] = state.get("turn") or 0
-            add_post_note(OUTPUT_ADVICE_NOTE.format(n=size, limit=limit))
+            if given < MAX_TEST_ADVICE_PER_SESSION:
+                state["output_advice_turn"] = state.get("turn") or 0
+                state["test_advice_count"] = given + 1
+                add_post_note(OUTPUT_ADVICE_NOTE.format(n=size, limit=limit))
         elif advise and not test and (size >= limit or persisted):
             # v1.1 step 3: a wide search or a long read in the main conversation
             state["output_advice_turn"] = state.get("turn") or 0
@@ -2827,7 +3046,9 @@ def record_ci_activity(
         ):
             from ci_status import push_info
 
-            info = push_info(cwd_at(cmds, i, cwd))
+            # devenv-v1-2 step 1: `git -C <dir> push` pushes <dir>'s branch
+            where = git_workdir(cwd_at(cmds, i, cwd), args, _git_subcommand(args))
+            info = push_info(where)
             if info:
                 state.setdefault("pushes", {})[info["toplevel"]] = {**info, "at": now}
                 state.setdefault("ci", {}).pop(info["toplevel"], None)

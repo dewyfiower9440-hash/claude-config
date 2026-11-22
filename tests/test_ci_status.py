@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 sys.path.insert(
@@ -53,8 +54,23 @@ def git(repo: Path, *args: str) -> str:
     ).stdout.strip()
 
 
+def remove_tree(path: Path) -> None:
+    """rmtree that also removes git's read-only object files (Windows refuses those)."""
+
+    def writable_then_retry(
+        func: Callable[[str], object], p: str, exc: BaseException
+    ) -> None:
+        if not isinstance(exc, PermissionError):
+            raise exc
+        os.chmod(p, 0o700)
+        func(p)
+
+    if path.exists():
+        shutil.rmtree(path, onexc=writable_then_retry)
+
+
 # ---- fixture: repo with a declared policy (ci: required) and two push workflows
-shutil.rmtree(WORK, ignore_errors=True)
+remove_tree(WORK)
 REPO = WORK / "repo"
 (REPO / ".github" / "workflows").mkdir(parents=True)
 (REPO / "src").mkdir()
@@ -147,14 +163,16 @@ def call(mode: str, session: str, **payload: object) -> dict | None:
     return json.loads(p.stdout) if p.stdout.strip() else None
 
 
-def bash(session: str, command: str, *, failed: bool = False) -> None:
+def bash(
+    session: str, command: str, *, failed: bool = False, cwd: Path | None = None
+) -> None:
     if failed:
         call(
             "fail",
             session,
             tool_name="Bash",
             tool_input={"command": command},
-            cwd=str(REPO),
+            cwd=str(cwd or REPO),
             error="Exit code 1",
         )
     else:
@@ -163,7 +181,7 @@ def bash(session: str, command: str, *, failed: bool = False) -> None:
             session,
             tool_name="Bash",
             tool_input={"command": command},
-            cwd=str(REPO),
+            cwd=str(cwd or REPO),
         )
 
 
@@ -379,6 +397,61 @@ check(
     [SHA],
 )
 
+# ---- devenv-v1-2 step 1: `git -C <dir> push` records the repository git pushes from,
+# not the session folder's (a work tree on another branch used to be recorded)
+OTHER = WORK / "wt"
+OTHER.mkdir()
+git(OTHER, "init", "-q", "-b", "devenv-final")
+git(OTHER, "remote", "add", "origin", "https://github.com/acme/other.git")
+(OTHER / "f.txt").write_text("x\n", encoding="utf-8")
+git(OTHER, "add", "-A")
+git(OTHER, "commit", "-q", "-m", "init")
+TOP = os.path.normpath(git(REPO, "rev-parse", "--show-toplevel"))
+OTHER_TOP = os.path.normpath(git(OTHER, "rev-parse", "--show-toplevel"))
+
+
+def pushed(session: str) -> dict[str, tuple[str, str]]:
+    return {
+        top: (str(p.get("repo")), str(p.get("branch")))
+        for top, p in (state(session).get("pushes") or {}).items()
+    }
+
+
+s = locally_verified()
+bash(s, f'git -C "{REPO}" push origin main', cwd=OTHER)
+check(
+    "`git -C <repo> push` from a work tree on another branch -> that repo's branch",
+    pushed(s),
+    {TOP: ("acme/demo", "main")},
+)
+
+s = locally_verified()
+msys = "/" + str(REPO)[0].lower() + str(REPO)[2:].replace("\\", "/")
+bash(s, f"git -C {msys} push origin main", cwd=OTHER)
+check(
+    "`git -C /c/...` (Git Bash path) -> resolved",
+    pushed(s),
+    {TOP: ("acme/demo", "main")},
+)
+
+s = locally_verified()
+bash(s, "git -C ../repo push origin main", cwd=OTHER)
+check(
+    "`git -C ../repo` (relative) -> resolved", pushed(s), {TOP: ("acme/demo", "main")}
+)
+
+s = locally_verified()
+bash(s, f'cd "{REPO}" && git push origin main', cwd=OTHER)
+check("`cd <repo> && git push` -> as before", pushed(s), {TOP: ("acme/demo", "main")})
+
+s = locally_verified()
+bash(s, "git push origin devenv-final", cwd=OTHER)
+check(
+    "plain `git push` in the session folder -> that folder's branch",
+    pushed(s),
+    {OTHER_TOP: ("acme/other", "devenv-final")},
+)
+
 # ---- ci: none needs no CI
 (REPO / "CLAUDE.md").write_text(
     "# demo\n\n## Verification\n- gate: `uv run pytest -q`\n- ci: none\n",
@@ -387,6 +460,6 @@ check(
 s = locally_verified()
 check("ci: none -> locally verified is enough", stop(s), None)
 
-shutil.rmtree(WORK, ignore_errors=True)
+remove_tree(WORK)
 print("FAILURES:", fails)
 sys.exit(1 if fails else 0)

@@ -295,6 +295,39 @@ hook("prompt", s, LOW, prompt="work")
 rc, said = shell(s, TEST, 3000, env=LOW)
 check("O-T3 a configured threshold is used by the hook", HINT in said, True)
 
+# devenv-v1-2 step 5: the test-runner hint was taken 0 times in 15; at most 3 per session,
+# and it leads with making the output small.
+s = uuid.uuid4().hex
+said_per_turn: list[bool] = []
+first = ""
+for n in range(1, 5):
+    hook("prompt", s, prompt_id=f"c{n}", prompt="next")
+    rc, said = shell(s, TEST, 9000, prompt_id=f"c{n}")
+    said_per_turn.append(HINT in said)
+    if n == 1:
+        first = said
+check(
+    "O-T13 the test-runner hint: in 3 turns of a session, not in the 4th",
+    said_per_turn,
+    [True, True, True, False],
+)
+check(
+    "O-T13b the hint leads with a smaller output (-q, a file and tail), then test-runner",
+    (
+        "-q" in first,
+        "tail" in first,
+        first.find("tail") < first.find(HINT) if HINT in first else False,
+    ),
+    (True, True, True),
+)
+hook("prompt", s, prompt_id="c5", prompt="next")
+rc, said = shell(s, "git log --stat", 9000, prompt_id="c5")
+check("O-T13c the cap does not touch the Explore hint", EXPLORE in said, True)
+before = len(rows())
+hook("prompt", s, prompt_id="c6", prompt="next")
+rc, said = shell(s, TEST, 9000, prompt_id="c6")
+check("O-T13d over the cap, the output is still observed", len(rows()) - before, 1)
+
 for p in (ROOT, PROJ):
     shutil.rmtree(p, ignore_errors=True)
 print("FAILURES:", fails)
