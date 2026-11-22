@@ -896,6 +896,7 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
         refusal = inline_patch_denial(data, state, str(ti.get("command", "")))
         if refusal:
             emit_pre("deny", refusal)
+        prepare_direct_commit_hint(data, state, str(ti.get("command", "")), cwd)
         tests = deleted_test_files(ti.get("command", ""))
         if tests:
             emit_pre(
@@ -1414,6 +1415,55 @@ def take_inline_patch_note(data: dict[str, Any], state: dict[str, Any]) -> None:
         add_post_note(str(note.get("text") or ""))
 
 
+# devenv-v1-2 step 8: `/commit` ran once against 59 direct `git commit`s; the hint lived only
+# in the refusal. A direct commit that passes gets it once per session.
+DIRECT_COMMIT_NOTE = (
+    "[discipline] 방금 `git commit`을 직접 실행했습니다(`/commit` 스킬 밖)."
+    + COMMIT_SKILL_HINT
+    + " (세션당 한 번 나오는 알림이며 차단이 아닙니다.)"
+)
+
+
+def prepare_direct_commit_hint(
+    data: dict[str, Any], state: dict[str, Any], command: str, cwd: str
+) -> None:
+    """PreToolUse, after the checks that may refuse it: a main-conversation `git commit`
+    outside the /commit skill gets the hint after it ran, once per session (not with
+    CLAUDE_COMMIT_REVIEW=off)."""
+    if actor(data) != "main" or state.get("direct_commit_hint_given"):
+        return
+    if commit_review_mode(os.environ.get("CLAUDE_COMMIT_REVIEW")) == "off":
+        return
+    try:
+        dialect = "powershell" if data.get("tool_name") == "PowerShell" else "bash"
+        if not commit_calls(command, dialect, cwd) or skill_used_this_turn(
+            state, "commit"
+        ):
+            return
+    except (ValueError, TypeError, AttributeError, RecursionError):
+        log.exception("discipline.direct_commit_hint_failed")
+        return
+    me = str(data.get("tool_use_id") or "")
+    review_note = state.get("commit_review_note")
+    if (
+        isinstance(review_note, dict)
+        and review_note.get("id") == me
+        and COMMIT_SKILL_HINT in str(review_note.get("text"))
+    ):
+        # (review 3) the review note after this commit already names /commit
+        state["direct_commit_hint_given"] = state.get("turn") or 1
+        return
+    state["direct_commit_hint"] = me
+
+
+def take_direct_commit_hint(data: dict[str, Any], state: dict[str, Any]) -> None:
+    """The hint the commit's PreToolUse prepared, after that very tool call only."""
+    pending = state.pop("direct_commit_hint", None)
+    if pending is not None and pending == str(data.get("tool_use_id") or ""):
+        state["direct_commit_hint_given"] = state.get("turn") or 1
+        add_post_note(DIRECT_COMMIT_NOTE)
+
+
 def take_commit_review_note(data: dict[str, Any], state: dict[str, Any]) -> None:
     """The note the commit's PreToolUse prepared, said after that very tool call only."""
     note = state.pop("commit_review_note", None)
@@ -1487,6 +1537,82 @@ def note_dependency_add(data: dict[str, Any], state: dict[str, Any]) -> None:
     if what:
         state["dep_advice_turn"] = state.get("turn") or 0
         add_post_note(DEPENDENCY_NOTE.format(what=", ".join(sorted(set(what)))))
+
+
+# devenv-v1-2 step 7: security-auditor was never called, also when a dependency brought in
+# order signing (session 2ea67f50). Words of a path that name security-relevant code.
+SECURITY_WORD_PREFIXES = ("auth", "oauth", "crypt", "secret")
+SECURITY_WORDS = frozenset(
+    {"sign", "signs", "signed", "signer", "signing", "signature", "token", "tokens"}
+    | {"key", "keys", "apikey", "privkey", "pubkey", "password", "passwords"}
+)
+SECURITY_AGENT = "security-auditor"
+SECURITY_NOTE = (
+    "[discipline] 보안에 닿는 변경입니다({what}). 이 세션에는 `security-auditor` 실행 기록이 "
+    "없습니다. 커밋이나 배포 전에 `security-auditor` 에이전트(Agent "
+    "subagent_type=security-auditor)로 감사하세요(글로벌 규칙 §8: auth/secrets/deps 변경). "
+    "(세션당 한 번 나오는 알림이며 차단이 아닙니다.)"
+)
+
+
+def security_triggers(
+    tool: str, tool_input: dict[str, Any], root: str | None = None
+) -> list[str]:
+    """Why a tool call touches security (pure): a dependency add (`uv add` ...), or an edit
+    of a file whose path inside its repository `root` has a word for auth/crypt/secret/
+    sign/token/key (outside a repository: the file name only; the folders above, such as
+    `C:/dev/auth-service` or a user folder, are not looked at). Test files and plan files
+    are not; `author.py` is (a known false positive: `auth...`)."""
+    if tool in ("Bash", "PowerShell"):
+        dialect = "powershell" if tool == "PowerShell" else "bash"
+        adds = dependency_adds(tool_input.get("command"), dialect)
+        return [f"의존성 추가({a})" for a in sorted(set(adds))]
+    if tool not in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+        return []
+    path = edit_target(tool_input)
+    if not path or TEST_PATH.search(path) or PLAN_DIR.search(path):
+        return []
+    if root and _inside(path, root):
+        rel = os.path.relpath(path, root)
+    elif os.path.isabs(path):
+        rel = Path(path).name
+    else:
+        rel = os.path.splitdrive(path)[1]
+    parts = re.split(r"[\\/]", rel)
+    words = [w for part in parts for w in re.split(r"[^a-z0-9]+", part.lower()) if w]
+    if any(w.startswith(SECURITY_WORD_PREFIXES) or w in SECURITY_WORDS for w in words):
+        return [f"보안 관련 파일({Path(path).name})"]
+    return []
+
+
+def security_audit_seen(state: dict[str, Any]) -> bool:
+    agents = state.get("agents") or {}
+    return bool(state.get("security_audit_launched")) or any(
+        str(k).startswith(SECURITY_AGENT + ":") for k in agents
+    )
+
+
+def note_security_change(data: dict[str, Any], state: dict[str, Any]) -> None:
+    """devenv-v1-2 step 7: the hint, once per session, for the main conversation's
+    security-relevant change in a session without a security-auditor run. A note only."""
+    if actor(data) != "main" or state.get("security_advice_given"):
+        return
+    try:
+        if security_audit_seen(state):
+            return
+        tool = str(data.get("tool_name") or "")
+        ti = data.get("tool_input") or {}
+        root = None
+        if tool not in ("Bash", "PowerShell") and edit_target(ti):
+            cwd = str(data.get("cwd") or os.getcwd())
+            root = track_repo(state, absolute(edit_target(ti), cwd))
+        why = security_triggers(tool, ti, root)
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+        log.exception("discipline.security_advice_failed")
+        return
+    if why:
+        state["security_advice_given"] = state.get("turn") or 1
+        add_post_note(SECURITY_NOTE.format(what=", ".join(why)))
 
 
 def note_plan_by_hand(data: dict[str, Any], state: dict[str, Any], path: str) -> None:
@@ -2032,6 +2158,7 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
         if path:
             note_plan_by_hand(data, state, absolute(path, cwd))
         if path and not ignored_path(state, path, cwd):
+            note_security_change(data, state)  # (review 7) not for an ignored file
             path = absolute(path, cwd)
             if path not in state["turn_files"]:
                 state["turn_files"].append(path)
@@ -2075,10 +2202,14 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
         note_output_size(data, state, failed=False)
         take_commit_review_note(data, state)
         take_inline_patch_note(data, state)
+        take_direct_commit_hint(data, state)
         note_dependency_add(data, state)
+        note_security_change(data, state)
     elif tool in ("Agent", "Task"):
         if ti.get("subagent_type") in REVIEW_AGENTS:
             state["last_review"] = now  # a review, not verification
+        if ti.get("subagent_type") == SECURITY_AGENT:
+            state["security_audit_launched"] = now
         note_launched_agent(data, state)
     elif tool == "ExitPlanMode":
         state["plan_approved_turn"] = state.get("turn") or 0

@@ -382,10 +382,19 @@ agent(s, "start", "r1")
 agent(s, "stop", "r1")
 decision, reason, said = shell(s)
 check(
-    "C-T6 reviewed (the reviewer ended on this content): the commit passes",
-    (decision, said),
-    ("", ""),
+    "C-T6 reviewed (the reviewer ended on this content): the commit passes, no review note",
+    (decision, "code-reviewer" in said),
+    ("", False),
 )
+check(
+    "C-T18 (devenv-v1-2 step 8) a direct commit outside /commit: the /commit hint after it",
+    ("Skill commit" in said, "알림" in said),
+    (True, True),
+)
+agent(s, "start", "r1b")
+agent(s, "stop", "r1b")
+decision, reason, said = shell(s)
+check("C-T18b ... once per session", ("Skill commit" in said, decision), (False, ""))
 edit(s)
 decision, reason, said = shell(s)
 check(
@@ -408,9 +417,9 @@ s = start()
 edit(s, "src/a.py")
 decision, reason, said = shell(s)
 check(
-    "C-T9 a small change no review rule applies to: no check",
-    (decision, said),
-    ("", ""),
+    "C-T9 a small change no review rule applies to: no check (the /commit hint only)",
+    (decision, "code-reviewer" in said, "Skill commit" in said),
+    ("", False, True),
 )
 
 s = start()
@@ -461,6 +470,23 @@ check(
     "C-T14c notify inside the skill: a note without the /commit hint",
     (decision, "code-reviewer" in said, "/commit" in said),
     ("", True, False),
+)
+s = start()
+edit(s, "src/a.py")
+skill(s, "commit")
+decision, reason, said = shell(s)
+check("C-T18c a commit inside /commit: no hint", (decision, said), ("", ""))
+s = start()
+edit(s, "src/a.py")
+decision, reason, said = shell(s, agent_id="g2", agent_type="general-purpose")
+check("C-T18d a subagent's commit: no hint", said, "")
+s = start()
+edit(s)
+decision, reason, said = shell(s, env=dict(ENV, CLAUDE_COMMIT_REVIEW="notify"))
+check(
+    "C-T18e (review 3) notify: the review note names /commit once, no second hint",
+    (decision, said.count("Skill commit")),
+    ("", 1),
 )
 
 s = start()

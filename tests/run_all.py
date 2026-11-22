@@ -93,6 +93,7 @@ TESTS = [
     "test_usage_state",
     "test_commit_review",
     "test_inline_patch",
+    "test_security_advice",
     "test_risk",
     "test_recurrence",
     "test_memory_search",

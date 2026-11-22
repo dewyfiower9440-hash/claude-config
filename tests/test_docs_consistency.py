@@ -390,7 +390,7 @@ check(
         "full literal path, no variable" in reviewer,
         "backslashes out of the heredoc body" in reviewer,
         "under 5 minutes" in reviewer,
-        "backtest" in reviewer and "PLAUSIBLE" in reviewer,
+        "backtest" in reviewer and "label the finding PLAUSIBLE" in reviewer,
     ),
     (True,) * 6,
 )
@@ -430,6 +430,12 @@ check(
         ),
     ),
     ("allowed", "blocked", "blocked"),
+)
+VARIABLE_PATH = f"S='{Path(tempfile.gettempdir()).as_posix()}'; cat > \"$S/x.py\" <<'EOF'\nprint(1)\nEOF\n"
+check(
+    "D11 ... and it is the read-only rule that refuses them: the main session may (control)",
+    guard_says(VARIABLE_PATH),
+    "allowed",
 )
 
 # ---------------------------------------------------------------- plan archive
