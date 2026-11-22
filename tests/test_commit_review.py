@@ -200,6 +200,7 @@ check(
         msgs("echo -e 'subj' | git commit -F -"),
         msgs("printf 'Review-Skipped: %s' '' | git commit -F -"),
         msgs("printf 'feat' 'Review-Skipped: x' | git commit -F -"),
+        msgs("printf 'fix\\n\\nReview-Skipped: docs only\\n' | git commit -F -"),
         msgs("git commit --dry-run --no-dry-run -m feat"),
     ],
     [
@@ -208,6 +209,7 @@ check(
         [("subj", None)],
         [(None, None)],
         [(None, None)],
+        [("fix\n\nReview-Skipped: docs only\n", None)],
         [("feat", None)],
     ],
 )

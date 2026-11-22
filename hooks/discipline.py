@@ -1176,6 +1176,14 @@ def _commit_message_args(args: list[str]) -> tuple[list[str], str | None, bool]:
     return texts, file, dry_run
 
 
+PRINTF_ESCAPES = {"n": "\n", "t": "\t", "\\": "\\"}
+
+
+def _printf_escapes(fmt: str) -> str:
+    """A printf format as printf writes it: `\\n`, `\\t` and `\\\\` (others left as they are)."""
+    return re.sub(r"\\(.)", lambda m: PRINTF_ESCAPES.get(m.group(1), m.group(0)), fmt)
+
+
 def _piped_text(cmd: SimpleCommand) -> str | None:
     """What a command piped into `git commit -F -` writes, when the command line shows it:
     a heredoc (`cat <<EOF |`), `echo`/`printf`/`Write-Output` words, or a PowerShell
@@ -1190,7 +1198,7 @@ def _piped_text(cmd: SimpleCommand) -> str | None:
         if program == "printf":
             # printf prints its format, not its other words; a `%` makes it a format
             ok = len(words) == 1 and "%" not in words[0]
-            return words[0] if ok else None
+            return _printf_escapes(words[0]) if ok else None
         return "\n".join(words)
     if len(cmd.words) == 1 and re.search(r"\s", cmd.words[0]):
         return cmd.words[0]

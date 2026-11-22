@@ -192,8 +192,13 @@ check(
         kinds("python -c \"print(open('f').read().replace('\\\\', 'x'))\""),
         kinds("python -c \"import os; os.write(1, b'\\\\n')\""),
         kinds("python -c \"f = get(); f.write('\\\\n')\""),
+        kinds(
+            "python - <<'EOF'\nimport json\nwith open(\n    p,\n    'w',\n) as f:\n"
+            "    json.dump({'a': 'C:\\\\x'}, f)\nEOF\n"
+        ),
+        kinds("python -c \"f = open('a;b', 'w'); print('\\\\n', file=f)\""),
     ],
-    [[], [], ["python-c"]],
+    [[], [], ["python-c"], ["python-heredoc"], ["python-c"]],
 )
 
 f = ip.inline_patches(INCIDENT, "bash")

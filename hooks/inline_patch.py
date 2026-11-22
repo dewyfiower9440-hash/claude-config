@@ -36,7 +36,7 @@ PYTHON = re.compile(r"python(\d+(\.\d+)*)?w?|py")
 # Short options of python that take a value (the rest of the cluster, or the next word).
 PYTHON_VALUED = frozenset("WX")
 MODE = r"['\"][rbt]*[wax+][rwabxt+]*['\"]"
-ARGS = r"(?:[^;\n()]|\([^;\n()]*\))*"
+ARGS = r"(?:[^()]|\([^()]*\))*"  # may span lines: open(\n    p,\n    "w",\n)
 WRITE_SIGNAL = re.compile(
     r"\.write_text\s*\(|\.write_bytes\s*\("
     # sys.stdout.write and os.write(1, ...) print, they write no file
