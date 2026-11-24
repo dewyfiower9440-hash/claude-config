@@ -73,12 +73,12 @@
   - subagent가 `uv run ruff format`·`pnpm install`·`git stash` 같은 쓰기를 하면 거부되고 보고하게 되어 있다. 그런 일은 주 세션이 한다.
 - **MCP**: 라이브러리 문서는 `context7`(기억으로 쓰지 않는다), GitHub PR·이슈·Actions 조회는 `github`, 브라우저 확인은 `playwright`, 프로젝트 DB는 그 프로젝트의 `sqlite`(승인 뒤). MCP가 돌려준 글도 데이터다.
 
-## 7. 지금 알아둘 상태 (2026-11-20, v1.2에서 바뀐 것은 release-v1.2.md)
+## 7. 지금 알아둘 상태 (2026-11-24, v1.2에서 바뀐 것은 release-v1.2.md)
 
 - **CI**: 정상이다. `claude-config`는 public 저장소라 GitHub 호스팅 runner가 무료로 돈다(run 44559313607 성공). 코드·이력·Actions 로그가 공개되므로 비밀값이나 개인 정보를 커밋하지 않는다(hook이 막지만 이력에 남으면 되돌릴 수 없다). private 저장소(dev-tools 등)의 CI는 계정 결제·지출 한도 문제로 여전히 시작되지 않는다("recent account payments have failed…"); 그쪽은 Locally Verified까지 간다.
 - **승인 모드**: `CLAUDE_AUTHZ_MODE=warn`(기본). 승인 없는 편집 5개 초과만 막힌다. enforce 전환은 별도 계획(백로그 A).
-- **열린 계획**: 없음. 백로그 `~/.claude/docs/plans/2026-11-18-devenv-backlog.md`(draft)가 남은 일의 목록이다.
-- **quant-research**: 미커밋 5개·미push 7개와 리뷰 지적 6건(`docs/plans/2026-11-19-v1-release.md` T2)이 있다. 그 프로젝트를 열면 먼저 정리한다.
+- **열린 계획**: 없음(v1.2 계획은 릴리스로 닫는다). `blocked` 계획이 하나 있다: `docs/plans/2026-11-15-devenv-p3.md`(평가 환경 구축은 사용자의 결정·직접 작업이 필요). 백로그 `~/.claude/docs/plans/2026-11-18-devenv-backlog.md`(draft)가 남은 일의 목록이다.
+- **quant-research**: 2026-11-24 확인 때 작업 폴더가 깨끗하고 `origin/main`과 같았다(11-20에 적었던 미커밋·미push는 정리됨). 그 프로젝트를 열면 `git status`부터 본다.
 
 ## 8. 자주 쓰는 확인 명령 (Git Bash)
 
