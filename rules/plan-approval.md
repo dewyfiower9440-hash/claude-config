@@ -10,6 +10,8 @@ when the plan was approved. The hook looks for the saved plan in that root's `do
 - **A `cd` into another repository does not take the approval along.** Edits there need that
   repository's own approved plan. For reading, prefer `git -C <path>` and absolute paths:
   the session stays where its approval is.
+  One exception, and only this one: `/distill`, run by the user, writes its notes under
+  `C:\dev\vault\notes\knowledge`. The hook makes no exception and may report the write.
 - **Two repositories, two plans.** A task that changes two repositories is planned and
   approved once in each, one after the other, each from its own root.
 - **A message is not an approval.** "승인", "approved", "go on" in the user's message do

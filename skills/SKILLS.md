@@ -15,6 +15,7 @@ Single source of truth for the skills in this environment. Update it whenever a 
 | `/commit` | Self-review checklist, Conventional Commits on main, push + CI diagnosis | own | 2026-11-05 |
 | `/predeploy` | Live-vs-candidate diff, drift check, all gates → GO/NO-GO | own | 2026-11-05 |
 | `/new-project` | Scaffold Python/TS/PowerShell project with layered structure, tooling, CI | own | 2026-11-05 |
+| `/distill` | What a session learned → knowledge notes in the Obsidian vault (`C:\dev\vault\notes\knowledge`): problem → cause → patch → verification, decisions with the options dropped; appends when the problem came back; `vault-sync check` and the vault's gate before the report. Only when the user runs it | own | 2026-11-25 |
 
 Every description ends with when not to use the skill (2026-11-18): a skill that fires on the wrong request costs more than one that is missed.
 

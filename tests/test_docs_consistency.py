@@ -206,6 +206,80 @@ check(
     ),
     (True, False, True, True, True, False),
 )
+# ---------------------------------------------------------------- /distill (2026-11-25)
+distill_file = REPO / "skills" / "distill" / "SKILL.md"
+distill = distill_file.read_text(encoding="utf-8") if distill_file.is_file() else ""
+distill_front = re.match(r"---\n(.*?)\n---\n", distill, re.DOTALL)
+distill_meta = distill_front.group(1) if distill_front else ""
+registry = (REPO / "skills" / "SKILLS.md").read_text(encoding="utf-8")
+check(
+    "D14 /distill is a skill the user runs: it is there, registered, never started by the "
+    "model, and its description ends with when not to use it",
+    (
+        bool(distill),
+        bool(re.search(r"^name: distill$", distill_meta, re.MULTILINE)),
+        bool(
+            re.search(r"^disable-model-invocation: true$", distill_meta, re.MULTILINE)
+        ),
+        bool(re.search(r"^description: .*\bNot for\b", distill_meta, re.MULTILINE)),
+        bool(re.search(r"^\| `/distill` \|", registry, re.MULTILINE)),
+    ),
+    (True, True, True, True, True),
+)
+check(
+    "D14 ... it names what it uses as it is: the vault's two templates, the headings it "
+    "appends under, the check command, and the one folder it writes to",
+    [
+        phrase in distill
+        for phrase in (
+            "`templates/problem.md`",
+            "`templates/decision.md`",
+            "`## 다시 나왔을 때`",
+            "`## 다시 볼 조건`",
+            "`uv run --project C:/dev/vault vault-sync check <each file written>`",
+            "that folder is the only place this skill writes",
+            "`${CLAUDE_SESSION_ID}`",
+            "`$ARGUMENTS`",
+        )
+    ],
+    [True] * 8,
+)
+check(
+    "D14 ... and the plan-approval rule names it as the one exception it is, without making "
+    "it a licence for other skills; neither text promises that the hooks let it through",
+    (
+        "One exception, and only this one: `/distill`, run by the user, writes its notes under\n"
+        "  `C:\\dev\\vault\\notes\\knowledge`. The hook makes no exception and may report the write."
+        in all_rules.get("plan-approval.md", ""),
+        "a skill the user invokes may write" in all_rules.get("plan-approval.md", ""),
+        "The hooks make no exception for it" in distill,
+        "needs no plan" in distill,
+    ),
+    (True, False, True, False),
+)
+check(
+    "D14 ... what the first trial showed to be unclear is said: the check takes absolute "
+    "paths, the session note is found and never guessed from the newest transcript, the "
+    "date is the day it happened, and a problem's status",
+    (
+        [
+            phrase in distill
+            for phrase in (
+                "each file by its\n  absolute path",
+                "Find it, do not build it",
+                "Do not guess the session from the newest transcript",
+                "`status` of a\n  problem",
+                "not today when the note is about an earlier day",
+                "Under `CLAUDE_AUTHZ_MODE=enforce` the write itself is\n  refused",
+            )
+        ],
+        [
+            phrase in distill
+            for phrase in ("newest `.jsonl`", "(today,", "expected name")
+        ],
+    ),
+    ([True] * 6, [False] * 3),
+)
 approvals_source = (HOOKS / "approvals.py").read_text(encoding="utf-8")
 check(
     "D12 the rule says what a plan parked as blocked loses, as the store decides it: any "
