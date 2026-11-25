@@ -44,8 +44,17 @@ def check(name: str, got: object, want: object) -> None:
 
 
 rules = (REPO / "CLAUDE.md").read_text(encoding="utf-8")
-language_rules = {
+all_rules = {
     p.name: p.read_text(encoding="utf-8") for p in sorted((REPO / "rules").glob("*.md"))
+}
+# A language rule is path-scoped: it starts with a `paths:` frontmatter and is read only when
+# a matching file is opened. A rule without one is read into every session.
+language_rules = {
+    name: text
+    for name, text in all_rules.items()
+    # inside the frontmatter block only: a `paths:` line in the body does not count
+    if (block := re.match(r"---\n(.*?)\n---\n", text, re.DOTALL))
+    and re.search(r"^paths:", block.group(1), re.MULTILINE)
 }
 
 # ---------------------------------------------------------------- plan statuses
@@ -155,6 +164,93 @@ check(
         "CLAUDE_LOST_APPROVAL"
         in discipline_source_of("REASON_LOST_APPROVAL")
         + discipline_source_of("LOST_NOTE"),
+    ),
+    (True, True, True, True, False),
+)
+# ---------------------------------------------------------------- rules/ (2026-11-25)
+check(
+    "D12 the language rules are the path-scoped ones, by name; every other rule file is "
+    "read into every session and is listed here on purpose",
+    (sorted(language_rules), sorted(set(all_rules) - set(language_rules))),
+    (["powershell.md", "python.md", "typescript.md"], ["plan-approval.md"]),
+)
+check(
+    "D12 no markdown lies in a subfolder of rules/ (Claude Code reads those too: a draft "
+    "kept there is a rule)",
+    sorted(p.relative_to(REPO).as_posix() for p in (REPO / "rules").glob("*/**/*.md"))
+    + sorted(p.relative_to(REPO).as_posix() for p in (REPO / "rules").glob("*/*.md")),
+    [],
+)
+plan_rule = all_rules.get("plan-approval.md", "")
+refusal = discipline_source_of("REASON_LOST_APPROVAL")
+check(
+    "D12 the plan-approval rule is a rule, not a draft, and says what the hook's refusal "
+    "says: a message is not an approval, and the three things the user can do",
+    (
+        bool(plan_rule) and not plan_rule.startswith("---"),
+        any(word in plan_rule.lower() for word in ("draft", "초안", "미적용")),
+        "**A message is not an approval.**" in plan_rule,
+        all(
+            way in plan_rule
+            for way in (
+                "first line starts with\n  `task:<id>`",
+                "ExitPlanMode",
+                "`revoke task:<id>`",
+            )
+        ),
+        all(
+            way in refusal
+            for way in ("task:{task} 로 시작", "ExitPlanMode", "revoke task:{task}")
+        ),
+        "CLAUDE_LOST_APPROVAL" in plan_rule,
+    ),
+    (True, False, True, True, True, False),
+)
+approvals_source = (HOOKS / "approvals.py").read_text(encoding="utf-8")
+check(
+    "D12 the rule says what a plan parked as blocked loses, as the store decides it: any "
+    "status but in-progress revokes the approval, and the rule does not promise that "
+    "setting it back continues it",
+    (
+        "A plan parked as `blocked` has\n  lost its approval for good" in plan_rule,
+        "do\n  not continue it" in plan_rule,
+        "continued only after" in plan_rule,
+        bool(
+            re.search(
+                r'if status != "in-progress":\s+return Verdict\(f"plan_status:\{status\}", '
+                r"revoke=True\)",
+                approvals_source,
+            )
+        ),
+        approvals.plan_status("---\nstatus: blocked\ntask: x\n---\n") != "in-progress",
+    ),
+    (True, True, False, True, True),
+)
+settings = json.loads((REPO / "settings.json").read_text(encoding="utf-8"))
+state_ttl = str(settings.get("env", {}).get("CLAUDE_STATE_TTL_DAYS", ""))
+transcripts = settings.get("cleanupPeriodDays", 30)  # Claude Code's default when unset
+retention = (HOOKS / "retention.md").read_text(encoding="utf-8")
+check(
+    "D13 session state outlives the transcripts it belongs to: CLAUDE_STATE_TTL_DAYS is "
+    "set, a whole number above cleanupPeriodDays and within what state_gc accepts, and "
+    "retention.md names both values",
+    (
+        state_ttl.isdigit() and int(state_ttl) > int(transcripts),
+        state_ttl.isdigit() and int(state_ttl) <= 365,
+        # the number as a whole: 9 must not pass for a document that says 90
+        bool(
+            re.search(
+                rf"`CLAUDE_STATE_TTL_DAYS`는 `settings.json`의 `env`에 {state_ttl}(?!\d)",
+                retention,
+            )
+        ),
+        bool(
+            re.search(
+                rf"`cleanupPeriodDays`는 `settings.json`에 {transcripts}(?!\d)",
+                retention,
+            )
+        ),
+        "지켜지지 않는다" in retention,
     ),
     (True, True, True, True, False),
 )
