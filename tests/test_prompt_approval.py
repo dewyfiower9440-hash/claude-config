@@ -1184,6 +1184,614 @@ check(
     (["ok_1-2.x"], [], [], [], True),
 )
 
+# ---- lost-approval-block (2026-11-25): once an approval the session held is lost at a
+# prompt, edits in that repository are refused until an approval stands again. Observed
+# 2026-11-24: the loss was said, the session took the word "승인" in the user's message for
+# an approval and edited six files; under warn the hook let five of them through.
+NO_RECORD = "승인 기록 없음: 계획 승인 다시 받기"
+
+
+def pre(
+    s: str, prompt_id: str, env: dict[str, str] | None = None, **payload: object
+) -> dict:
+    p = inproc.run(
+        HOOKS / "discipline.py",
+        ["pre"],
+        json.dumps(
+            {"session_id": s, "cwd": str(PROJ), "prompt_id": prompt_id, **payload}
+        ),
+        env=env or ENV,
+    )
+    assert p.returncode == 0, ("pre", p.returncode, p.stderr[-300:])
+    out = json.loads(p.stdout) if p.stdout.strip() else {}
+    return out.get("hookSpecificOutput", {})
+
+
+def write_refusal(
+    s: str, target: Path, prompt_id: str, env: dict[str, str] | None = None
+) -> str:
+    """Why a Write of that file is refused ("" when it is not)."""
+    out = pre(
+        s,
+        prompt_id,
+        env,
+        tool_name="Write",
+        tool_input={"file_path": str(target), "content": "x\n"},
+    )
+    return (
+        str(out.get("permissionDecisionReason") or "")
+        if out.get("permissionDecision") == "deny"
+        else ""
+    )
+
+
+def shell_refusal(s: str, command: str, prompt_id: str) -> str:
+    out = pre(s, prompt_id, tool_name="Bash", tool_input={"command": command})
+    return (
+        str(out.get("permissionDecisionReason") or "")
+        if out.get("permissionDecision") == "deny"
+        else ""
+    )
+
+
+def lose(prompt: str, prompt_id: str = "p2") -> str:
+    """A session that was approved for alpha and then got this prompt."""
+    s = start()
+    approve(s, "alpha")
+    hook("prompt", s, prompt_id, prompt=prompt)
+    return s
+
+
+for words in (
+    "승인",
+    "7단계까지 계속 진행해 승인",
+    "approved, go on",
+    "yes, I approve task alpha",
+):
+    s = lose(words)
+    why = write_refusal(s, PROJ / "src" / "a.py", "p2")
+    check(
+        f"L-T1 a user prompt that says {words!r} without naming the task on its first line "
+        "re-arms nothing, and the first edit after it is refused with the reason and the task",
+        (task_of(s), NO_RECORD in why, "task:alpha" in why),
+        (None, True, True),
+    )
+s = lose("승인")
+check(
+    "L-T2 the refusal covers a file outside the lost plan's scope too, and a new file",
+    (
+        NO_RECORD in write_refusal(s, PROJ / "other" / "keep.txt", "p2"),
+        NO_RECORD in write_refusal(s, PROJ / "src" / "brand_new.py", "p2"),
+    ),
+    (True, True),
+)
+check(
+    "L-T3 ... but not a file the hook never counts (under the temp folder)",
+    write_refusal(s, TMPD / "scratch.txt", "p2"),
+    "",
+)
+check(
+    "L-T4 ... and a shell command whose write targets can be read is refused the same way",
+    (
+        NO_RECORD in shell_refusal(s, "sed -i s/a/b/ src/a.py", "p2"),
+        NO_RECORD in shell_refusal(s, "echo x > src/out.txt", "p2"),
+        shell_refusal(s, "git status --short", "p2"),
+    ),
+    (True, True, ""),
+)
+hook("prompt", s, "p3", prompt="and one more thing")
+hook("prompt", s, "p4", prompt="please")
+check(
+    "L-T5 the refusal lasts over later prompts that name no task",
+    NO_RECORD in write_refusal(s, PROJ / "src" / "a.py", "p4"),
+    True,
+)
+hook("prompt", s, "p5", prompt="task:alpha\ncontinue")
+check(
+    "L-T6 a prompt whose first line names the task re-arms the approval: the edit goes through",
+    (task_of(s), write_refusal(s, PROJ / "src" / "a.py", "p5")),
+    ("alpha", ""),
+)
+hook("prompt", s, "p6", prompt="thanks")
+check(
+    "L-T7 ... and losing it again refuses again",
+    NO_RECORD in write_refusal(s, PROJ / "src" / "a.py", "p6"),
+    True,
+)
+s = lose("승인")
+approve(s, "beta", "p2")
+check(
+    "L-T8 a new plan approved with ExitPlanMode lifts the refusal (the approval is beta's now)",
+    (task_of(s), write_refusal(s, PROJ / "lib" / "b.py", "p2")),
+    ("beta", ""),
+)
+s = start()
+hook("prompt", s, "p2", prompt="승인")
+check(
+    "L-T9 a session that never held an approval is not refused: warn's allowance is as before",
+    (
+        write_refusal(s, PROJ / "src" / "a.py", "p2"),
+        write_refusal(s, PROJ / "other" / "keep.txt", "p2"),
+    ),
+    ("", ""),
+)
+hook("prompt", (s := start()), "p2", prompt="approved, go on")
+OBSERVED = ROOT / "home" / "authz-observe.jsonl"
+seen_before = (
+    len(OBSERVED.read_text(encoding="utf-8").splitlines()) if OBSERVED.exists() else 0
+)
+allowed = []
+for n in range(7):
+    target = PROJ / "other" / f"n{n}.txt"
+    allowed.append(write_refusal(s, target, "p2") == "")
+    if allowed[-1]:
+        target.write_text("x\n", encoding="utf-8")
+        hook(
+            "post",
+            s,
+            "p2",
+            tool_name="Write",
+            tool_input={"file_path": str(target), "content": "x\n"},
+            tool_use_id=uuid.uuid4().hex,
+        )
+sixth = write_refusal(s, PROJ / "other" / "n5.txt", "p2")
+seen_after = (
+    len(OBSERVED.read_text(encoding="utf-8").splitlines()) if OBSERVED.exists() else 0
+)
+check(
+    "L-T9b ... in full: five files without a plan go through, the sixth is refused with the "
+    "old wording (not the lost-approval one), and each allowed edit left an observation",
+    (allowed[:6], NO_RECORD in sixth, "한도" in sixth, seen_after - seen_before >= 5),
+    ([True, True, True, True, True, False], False, True, True),
+)
+
+# ---- what ends the refusal, and what does not (second design, after the reviews of
+# 2026-11-25: the session remembers the last approval it held; no plan file is read)
+s = start()
+approve(s, "alpha")
+edit(s, "src/done.py")
+close_alpha()
+try:
+    stop(s)  # the hook sees the plan closed as done while the approval stands
+    hook("prompt", s, "p2", prompt="next thing")
+    closed_then = write_refusal(s, PROJ / "src" / "a.py", "p2")
+    held_then = state_of(s).get("approval_held")
+finally:
+    reopen_alpha()
+check(
+    "L-T10 a plan closed as done while its approval stood ended it in the ordinary way: "
+    "nothing is remembered and nothing is refused afterwards",
+    (closed_then, held_then),
+    ("", None),
+)
+
+
+def after_loss(change) -> tuple[bool, bool]:
+    """Whether a write is still refused, right away and at a later prompt, after the session
+    did `change` to its plan file once the approval was lost."""
+    s = lose("승인")
+    original = FILE["alpha"].read_text(encoding="utf-8")
+    try:
+        change()
+        now = NO_RECORD in write_refusal(s, PROJ / "src" / "a.py", "p2")
+        hook("prompt", s, "p3", prompt="go on")
+        later = NO_RECORD in write_refusal(s, PROJ / "src" / "a.py", "p3")
+    finally:
+        for stray in PLANS.glob("moved-*.md"):
+            stray.unlink()
+        FILE["alpha"].write_text(original, encoding="utf-8")
+    return now, later
+
+
+check(
+    "L-T11 what the session does to its plan file after the loss does not lift the refusal: "
+    "closing it as done, parking it as blocked, renaming it, deleting it, breaking its "
+    "status line, making it unreadable",
+    [
+        after_loss(close_alpha),
+        after_loss(
+            lambda: FILE["alpha"].write_text(
+                plan("alpha", "src/**", "blocked"), encoding="utf-8"
+            )
+        ),
+        after_loss(lambda: FILE["alpha"].rename(PLANS / "moved-alpha.md")),
+        after_loss(lambda: FILE["alpha"].unlink()),
+        after_loss(
+            lambda: FILE["alpha"].write_text(
+                TEXT["alpha"].replace(
+                    "status: in-progress", "status: in-progress\nstatus: done"
+                ),
+                encoding="utf-8",
+            )
+        ),
+        after_loss(lambda: FILE["alpha"].write_bytes(b"\xff\xfe\x00\xd8")),
+    ],
+    [(True, True)] * 6,
+)
+s = lose(LOST, "r1")
+check(
+    "L-T12 an approval lost to a notification this session did not start is refused the same way",
+    NO_RECORD in write_refusal(s, PROJ / "src" / "a.py", "r1"),
+    True,
+)
+s = lose("승인")
+check(
+    "L-T13 CLAUDE_LOST_APPROVAL=notify (the user's switch, read from the hook's own "
+    "environment): the loss is only said; any other value refuses",
+    (
+        write_refusal(
+            s, PROJ / "src" / "a.py", "p2", dict(ENV, CLAUDE_LOST_APPROVAL="notify")
+        ),
+        NO_RECORD
+        in write_refusal(
+            s, PROJ / "src" / "a.py", "p2", dict(ENV, CLAUDE_LOST_APPROVAL="off")
+        ),
+        NO_RECORD
+        in shell_refusal(s, "CLAUDE_LOST_APPROVAL=notify sed -i s/a/b/ src/a.py", "p2"),
+    ),
+    ("", True, True),
+)
+s = start()
+approve(s, "alpha")
+out = hook("prompt", s, "p2", prompt="please also fix the other thing")
+s2 = start()
+approve(s2, "alpha")
+p = inproc.run(
+    HOOKS / "discipline.py",
+    ["prompt"],
+    json.dumps(
+        {"session_id": s2, "cwd": str(PROJ), "prompt_id": "p2", "prompt": "please"}
+    ),
+    env=dict(ENV, CLAUDE_LOST_APPROVAL="notify"),
+)
+quiet = json.loads(p.stdout) if p.stdout.strip() else {}
+why = write_refusal(lose("승인"), PROJ / "src" / "a.py", "p2")
+check(
+    "L-T14 the note at the loss says that edits are refused (not so under notify), and "
+    "neither it nor the refusal tells the session the name of the switch",
+    (
+        "거부" in said(out),
+        "task:alpha" in said(out),
+        "거부" in said(quiet),
+        LOST_WORDS in said(quiet),
+        "CLAUDE_LOST_APPROVAL" in said(out) + why,
+        "revoke task:alpha" in why,
+    ),
+    (True, True, False, True, False, True),
+)
+
+# ---- the ways an approval goes without a prompt saying so (review 2026-11-25, findings 1, 2)
+s = start()
+approve(s, "alpha")
+edit(s, "src/pc.py")
+FILE["alpha"].write_text(
+    TEXT["alpha"].replace("- src/**", "- src/**\n- other/**"), encoding="utf-8"
+)
+try:
+    stop(s)  # the plan's scope changed after the approval: the Stop drops it
+    dropped = task_of(s)
+    hook("prompt", s, "p2", prompt="approved")
+    after_stop = write_refusal(s, PROJ / "src" / "a.py", "p2")
+finally:
+    reopen_alpha()
+check(
+    "L-T15 an approval dropped at a Stop (the plan changed after it) is waited for like one "
+    "lost at a prompt: the next prompt's edit is refused",
+    (dropped, NO_RECORD in after_stop, "task:alpha" in after_stop),
+    (None, True, True),
+)
+s = start()
+approve(s, "alpha")
+set_turn(s, float("inf"))
+hook(
+    "prompt", s, "p2", prompt="task:alpha\ngo on"
+)  # the prompt hook fails: approval dropped
+set_turn(s, 1)
+failed_now = write_refusal(s, PROJ / "src" / "a.py", "p2")
+hook("prompt", s, "p3", prompt="approved")
+failed_later = write_refusal(s, PROJ / "src" / "a.py", "p3")
+check(
+    "L-T16 an approval dropped because the prompt hook failed: refused in that prompt and "
+    "in the next one",
+    (NO_RECORD in failed_now, NO_RECORD in failed_later),
+    (True, True),
+)
+
+# ---- task ids the prompt parser cannot spell (finding 3 / audit 4)
+ODD = {
+    "feat/x": "2026-11-25-odd1.md",
+    "v1.": "2026-11-25-odd2.md",
+    "승인차단": "2026-11-25-odd3.md",
+}
+odd_results = []
+for odd_task, name in ODD.items():
+    FILE[odd_task] = PLANS / name
+    TEXT[odd_task] = plan(odd_task, "src/**")
+    FILE[odd_task].write_text(TEXT[odd_task], encoding="utf-8")
+    try:
+        s = start()
+        approve(s, odd_task)
+        held = task_of(s)
+        hook("prompt", s, "p2", prompt="승인")
+        odd_results.append(
+            held != odd_task
+            or NO_RECORD in write_refusal(s, PROJ / "src" / "a.py", "p2")
+        )
+    finally:
+        FILE[odd_task].unlink()
+check(
+    "L-T17 a task id with a slash, a trailing dot or Korean letters: if it was approved at "
+    "all, its loss is waited for like any other",
+    odd_results,
+    [True, True, True],
+)
+
+# ---- other spellings of a path in the repository (audit 2)
+import _winapi
+import ctypes
+
+s = lose("승인")
+link = ROOT / "link-to-proj"
+_winapi.CreateJunction(str(PROJ), str(link))
+buffer = ctypes.create_unicode_buffer(600)
+got = ctypes.windll.kernel32.GetShortPathNameW(
+    str(PROJ / "src" / "brand_new_long_name.py"), buffer, 600
+)
+(PROJ / "src" / "brand_new_long_name.py").write_text("x\n", encoding="utf-8")
+got = ctypes.windll.kernel32.GetShortPathNameW(
+    str(PROJ / "src" / "brand_new_long_name.py"), buffer, 600
+)
+short = Path(buffer.value) if got else PROJ / "src" / "brand_new_long_name.py"
+check(
+    "L-T18 the repository reached another way is the repository: through a junction, by "
+    "another letter case, with forward slashes, with `..`, and by an 8.3 short name where "
+    "the volume has them",
+    (
+        NO_RECORD in write_refusal(s, link / "src" / "a.py", "p2"),
+        NO_RECORD in write_refusal(s, Path(str(PROJ / "src" / "a.py").upper()), "p2"),
+        NO_RECORD in write_refusal(s, Path((PROJ / "src" / "a.py").as_posix()), "p2"),
+        NO_RECORD in write_refusal(s, PROJ / "other" / ".." / "src" / "a.py", "p2"),
+        NO_RECORD in write_refusal(s, short, "p2"),
+    ),
+    (True, True, True, True, True),
+)
+print("     (L-T18 short name tried:", short.name, ")")
+elsewhere = ROOT / "another-repo"
+(elsewhere / "src").mkdir(parents=True)
+subprocess.run(["git", "init", "-q"], cwd=elsewhere, check=True)
+check(
+    "L-T19 a file in another repository is not this approval's to refuse",
+    write_refusal(s, elsewhere / "src" / "x.py", "p2"),
+    "",
+)
+
+# ---- shell commands (finding 4 / audit 3)
+check(
+    "L-T20 while an approval is waited for, a shell write whose target cannot be read is "
+    "refused too; commands that write nothing the check sees are not",
+    (
+        NO_RECORD in shell_refusal(s, "F=src/x.py; echo x > $F", "p2"),
+        NO_RECORD in shell_refusal(s, 'echo x > "$TARGET"', "p2"),
+        shell_refusal(s, "git status --short", "p2"),
+        shell_refusal(s, "python -I tests/run_all.py", "p2"),
+        shell_refusal(s, "grep -n foo src/a.py | head -5", "p2"),
+    ),
+    (True, True, "", "", ""),
+)
+fresh = start()
+check(
+    "L-T21 ... and without an approval ever held, the unreadable target is only observed, as before",
+    shell_refusal(fresh, "F=src/x.py; echo x > $F", "p1"),
+    "",
+)
+
+# ---- the user's own ways out
+s = lose("승인")
+hook("prompt", s, "p3", prompt="revoke task:alpha")
+check(
+    "L-T22 `revoke task:<id>` on the first line lays the task down: nothing is waited for",
+    (state_of(s).get("approval_held"), write_refusal(s, PROJ / "src" / "a.py", "p3")),
+    (None, ""),
+)
+s = lose("승인")
+hook("prompt", s, "p3", prompt="revoke task:beta")
+check(
+    "L-T23 ... revoking another task does not",
+    NO_RECORD in write_refusal(s, PROJ / "src" / "a.py", "p3"),
+    True,
+)
+approve(s, "alpha", "p3")  # the plan presented again and approved with ExitPlanMode
+check(
+    "L-T24 the plan approved again at a later prompt: edits go through, the plan file too",
+    (
+        write_refusal(s, PROJ / "src" / "a.py", "p3"),
+        write_refusal(s, FILE["alpha"], "p3"),
+    ),
+    ("", ""),
+)
+
+
+# ---- what names a task (user decision 2026-11-25: the first line must start with it)
+def rearmed_by(prompt: str) -> object:
+    s = start()
+    approve(s, "alpha")
+    hook("prompt", s, "p2", prompt=prompt)
+    return task_of(s)
+
+
+def slash(args: str) -> str:
+    return (
+        "<command-message>implement</command-message>\n<command-name>/implement</command-name>\n"
+        f"<command-args>{args}</command-args>"
+    )
+
+
+check(
+    "L-T25 a first line that starts with the task continues the approval, with words after "
+    "it or without, after blank lines too; so do a slash command's arguments (task or plan file)",
+    [
+        rearmed_by("task:alpha"),
+        rearmed_by("task:alpha 이어서 진행해"),
+        rearmed_by("task: alpha\ncontinue"),
+        rearmed_by("\n\n  task:alpha go on"),
+        rearmed_by("TASK_ID=alpha continue"),
+        rearmed_by("`task:alpha` continue"),
+        rearmed_by(slash("task:alpha")),
+        rearmed_by(slash("docs/plans/2026-11-15-alpha.md")),
+    ],
+    ["alpha"] * 8,
+)
+check(
+    "L-T26 a first line that only mentions the task, or names the plan file, does not; nor "
+    "does a second line, pasted text or a quoted reviewer",
+    [
+        rearmed_by("do NOT go on with task:alpha yet"),
+        rearmed_by("the reviewer said: task:alpha approved"),
+        rearmed_by("please continue task:alpha"),
+        rearmed_by("docs/plans/2026-11-15-alpha.md"),
+        rearmed_by("continue 2026-11-15-alpha.md"),
+        rearmed_by("go on\ntask:alpha"),
+        rearmed_by("<pasted_content>\ntask:alpha\n</pasted_content>"),
+        rearmed_by("승인 task:alpha"),
+    ],
+    [None] * 8,
+)
+check(
+    "L-T27 the first-line commands still work on a line of their own",
+    (
+        disc_h.REVOKE_CMD.match(disc_h.naming_text("revoke task:alpha")) is not None,
+        disc_h.naming_text("recover-state").strip().lower(),
+    ),
+    (True, "recover-state"),
+)
+
+# ---- second review (2026-11-25): the ordinary end of a task must not lock the next prompt,
+# whichever hook is the first to see the closed plan
+DONE_TEXT = plan("alpha", "src/**", "done")
+
+
+def close_with_write(s: str) -> None:
+    FILE["alpha"].write_text(DONE_TEXT, encoding="utf-8")
+    hook(
+        "post",
+        s,
+        "p1",
+        tool_name="Write",
+        tool_input={"file_path": str(FILE["alpha"]), "content": DONE_TEXT},
+        tool_use_id=uuid.uuid4().hex,
+    )
+
+
+def bash_post(s: str, command: str) -> None:
+    hook(
+        "post",
+        s,
+        "p1",
+        tool_name="Bash",
+        tool_input={"command": command},
+        tool_response={"stdout": ""},
+        tool_use_id=uuid.uuid4().hex,
+    )
+
+
+def after_closing(*steps) -> tuple[str, object]:
+    """An approved task closed as done in the turn, then `steps`, then the next prompt: the
+    refusal of an unrelated edit there ("" = none), and what is still remembered."""
+    s = start()
+    approve(s, "alpha")
+    edit(s, "src/work.py")
+    try:
+        for step in steps:
+            step(s)
+        hook("prompt", s, "p2", prompt="an unrelated small thing")
+        return write_refusal(s, PROJ / "other" / "keep.txt", "p2"), state_of(s).get(
+            "approval_held"
+        )
+    finally:
+        reopen_alpha()
+
+
+check(
+    "L-T28 a plan closed as done while approved does not lock the next prompt: closed with "
+    "Write then a shell command then Stop (close, commit, stop); closed then another edit "
+    "then Stop; closed by a shell command then Stop; closed and interrupted before any Stop; "
+    "closed and stopped at once",
+    [
+        after_closing(
+            close_with_write, lambda s: bash_post(s, "git status --short"), stop
+        ),
+        after_closing(close_with_write, lambda s: may_write(s, "src/a.py"), stop),
+        after_closing(
+            lambda s: FILE["alpha"].write_text(DONE_TEXT, encoding="utf-8"),
+            lambda s: bash_post(
+                s, "sed -i s/in-progress/done/ docs/plans/2026-11-15-alpha.md"
+            ),
+            stop,
+        ),
+        after_closing(close_with_write),
+        after_closing(close_with_write, stop),
+    ],
+    [("", None)] * 5,
+)
+s = lose("승인")
+hook("prompt", s, "p3", prompt="recover-state")
+check(
+    "L-T29 `recover-state` is for a damaged state, not a way to lay a task down: the held "
+    "approval is still waited for after it",
+    NO_RECORD in write_refusal(s, PROJ / "src" / "a.py", "p3"),
+    True,
+)
+check(
+    "L-T30 a first line that merely starts with a slash is not a command: a comment, a path, "
+    "a lone slash name nothing; a command word does",
+    [
+        rearmed_by("//comment task:alpha"),
+        rearmed_by("// reviewer said task:alpha approved"),
+        rearmed_by("/tmp/log.txt mentions task:alpha, ignore it"),
+        rearmed_by("/ 2026-11-15-alpha.md"),
+        rearmed_by("/implement task:alpha"),
+        rearmed_by("/implement docs/plans/2026-11-15-alpha.md"),
+        rearmed_by("/my-plugin:implement task:alpha"),
+    ],
+    [None, None, None, None, "alpha", "alpha", "alpha"],
+)
+s = lose("승인")
+check(
+    "L-T31 device and share spellings of a path in the repository are the repository too",
+    (
+        NO_RECORD
+        in write_refusal(s, Path("\\\\?\\" + str(PROJ / "src" / "a.py")), "p2"),
+        NO_RECORD
+        in write_refusal(s, Path("\\\\.\\" + str(PROJ / "src" / "a.py")), "p2"),
+        NO_RECORD
+        in write_refusal(
+            s,
+            Path("\\\\localhost\\" + str(PROJ / "src" / "a.py").replace(":", "$", 1)),
+            "p2",
+        ),
+    ),
+    (True, True, True),
+)
+s = start()
+approve(s, "alpha")
+check(
+    "L-T32 while the approval stands, a tool call that carries another prompt id or none (a "
+    "subagent's) is not taken for a lost approval",
+    (
+        NO_RECORD in write_refusal(s, PROJ / "src" / "a.py", "sub-agent-prompt"),
+        NO_RECORD
+        in str(
+            pre(
+                s,
+                None,
+                tool_name="Write",
+                tool_input={"file_path": str(PROJ / "src" / "a.py"), "content": "x"},
+            )
+        ),
+    ),
+    (False, False),
+)
+
 for p in (ROOT, PROJ):
     shutil.rmtree(p, ignore_errors=True)
 print("FAILURES:", fails)

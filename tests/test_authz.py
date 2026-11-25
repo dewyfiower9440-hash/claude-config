@@ -457,6 +457,291 @@ check(
     (0, True),
 )
 
+# ---- lost-approval-block (2026-11-25): the refusal while this session has held an approval
+# and none stands. The cases through the hooks are in test_prompt_approval.py (L-T); here
+# the decision and its record alone.
+_base = os.path.normcase(str(REPO))
+_inside_repo = str(REPO / "src" / "x.py")
+_held = {"task_id": "zeta", "base": _base, "approval_id": "ap-1"}
+os.environ.pop("CLAUDE_LOST_APPROVAL", None)
+check(
+    "Z-T22 nothing is refused for a state without the key, with an empty or a malformed one "
+    "(a state file written before this change has no such key)",
+    [
+        d.lost_approval_denial(state, "p1", [_inside_repo])
+        for state in (
+            {},
+            {"approval_held": None},
+            {"approval_held": "zeta"},
+            {"approval_held": {"task_id": 7}},
+            {"approval_held": {"task_id": ""}},
+        )
+    ],
+    [None, None, None, None, None],
+)
+_reason = str(
+    d.lost_approval_denial({"approval_held": dict(_held)}, "p1", [_inside_repo])
+)
+check(
+    "Z-T23 a held approval that does not stand refuses a write in its repository: the "
+    "words the user asked for, the task, the three things the user can do, and nothing "
+    "that tells the session how to switch it off",
+    (
+        _reason.startswith("[discipline] 승인 기록 없음: 계획 승인 다시 받기"),
+        "task:zeta" in _reason,
+        "ExitPlanMode" in _reason,
+        "revoke task:zeta" in _reason,
+        "CLAUDE_LOST_APPROVAL" in _reason,
+    ),
+    (True, True, True, True, False),
+)
+check(
+    "Z-T24 ... not a write outside that repository, and not while an approval stands for "
+    "this prompt (one of an earlier prompt does not count)",
+    (
+        d.lost_approval_denial(
+            {"approval_held": dict(_held)},
+            "p1",
+            [str(TMP_ROOT.parent.parent / "elsewhere.py")],
+        ),
+        d.lost_approval_denial(
+            {
+                "approval_held": dict(_held),
+                "approval": {"task_id": "other", "prompt_id": "p1"},
+            },
+            "p1",
+            [_inside_repo],
+        ),
+        d.lost_approval_denial(
+            {
+                "approval_held": dict(_held),
+                "approval": {"task_id": "other", "prompt_id": "p0"},
+            },
+            "p1",
+            [_inside_repo],
+        )
+        is not None,
+    ),
+    (None, None, True),
+)
+_state = {"approval_held": {"task_id": "gone", "base": _base, "approval_id": "ap-2"}}
+check(
+    "Z-T25 no plan file is read: a held approval whose task has no plan at all is refused "
+    "all the same, and the record stays",
+    (
+        d.lost_approval_denial(_state, "p1", [_inside_repo]) is not None,
+        _state["approval_held"]["task_id"],
+    ),
+    (True, "gone"),
+)
+check(
+    "Z-T26 the switch: only the exact word `notify` relaxes it",
+    [
+        d.lost_approval_mode(raw)
+        for raw in ("notify", " NOTIFY ", "block", "off", "", None, 0)
+    ],
+    ["notify", "notify", "block", "block", "block", "block", "block"],
+)
+_s: dict = {
+    "approval": {
+        "task_id": "zeta",
+        "base": _base,
+        "approval_id": "ap-1",
+        "prompt_id": "p1",
+        "v": 2,
+    }
+}
+d.sync_approval_held(_s)
+_recorded = dict(_s["approval_held"])
+_s["approval"] = None  # dropped by any path
+d.sync_approval_held(_s)
+_kept = dict(_s["approval_held"])
+d.forget_approval_held(_s, approval_id="ap-other")
+d.forget_approval_held(_s, task="other")
+_still = _s["approval_held"] is not None
+d.forget_approval_held(_s, task="ZETA")
+_by_task = _s["approval_held"]
+_s["approval_held"] = dict(_held)
+d.forget_approval_held(_s, approval_id="ap-1")
+_by_id = _s["approval_held"]
+_s["approval_held"] = dict(_held)
+d.forget_approval_held(_s)
+_by_nothing = _s["approval_held"] is not None
+check(
+    "Z-T27 the record: taken from the approval that stands, kept when the approval goes, "
+    "forgotten for that approval id or that task only (never for no reason)",
+    (_recorded, _kept == _recorded, _still, _by_task, _by_id, _by_nothing),
+    (
+        {"task_id": "zeta", "base": _base, "approval_id": "ap-1"},
+        True,
+        True,
+        None,
+        None,
+        True,
+    ),
+)
+check(
+    "Z-T28 unjudged writes (a shell target that could not be read) are refused while held, "
+    "a record without a repository refuses every path, and a failing check refuses with the task",
+    (
+        d.lost_approval_denial({"approval_held": dict(_held)}, "p1", [], unjudged=True)
+        is not None,
+        d.lost_approval_denial({"approval_held": dict(_held)}, "p1", []),
+        d.lost_approval_denial(
+            {"approval_held": {"task_id": "zeta", "base": None}},
+            "p1",
+            [str(TMP_ROOT.parent.parent / "elsewhere.py")],
+        )
+        is not None,
+        "task:zeta"
+        in d.lost_approval_failure({"approval_held": dict(_held)}, ValueError("x")),
+        "ValueError" in d.lost_approval_failure({}, ValueError("secret text")),
+        "secret text" in d.lost_approval_failure({}, ValueError("secret text")),
+    ),
+    (True, None, True, True, True, False),
+)
+
+
+def _synced(state: dict) -> object:
+    d.sync_approval_held(state)
+    return state.get("approval_held")
+
+
+_v2 = {
+    "task_id": "zeta",
+    "base": _base,
+    "approval_id": "ap-1",
+    "prompt_id": "p1",
+    "v": 2,
+}
+check(
+    "Z-T29 what is not recorded: an approval of the earlier store (nothing forgets it), an "
+    "approval whose plan was closed as done in this prompt (the pointer stays until the "
+    "Stop: recording it locked the next prompt), a pointer without a task",
+    (
+        _synced({"approval": {"task_id": "zeta", "base": _base, "prompt_id": "p1"}}),
+        _synced(
+            {"approval": dict(_v2), "approval_invalid": "REVOKED(plan_status:done)"}
+        ),
+        _synced({"approval": dict(_v2), "v2_block": "x plan_status:done y"}),
+        _synced({"approval": {"v": 2, "task_id": "", "base": _base}}),
+        _synced({"approval": dict(_v2), "approval_invalid": "plan_changed(scope)"})
+        is not None,
+    ),
+    (None, None, None, None, True),
+)
+check(
+    "Z-T30 an approval stands by the id of this call or by the prompt the state has in "
+    "progress (a subagent's call carries another id or none)",
+    (
+        d.lost_approval_denial(
+            {"approval_held": dict(_held), "approval": dict(_v2), "prompt_id": "p1"},
+            "sub-1",
+            [_inside_repo],
+        ),
+        d.lost_approval_denial(
+            {"approval_held": dict(_held), "approval": dict(_v2), "prompt_id": "p1"},
+            None,
+            [_inside_repo],
+        ),
+        d.lost_approval_denial(
+            {"approval_held": dict(_held), "approval": dict(_v2), "prompt_id": "p2"},
+            "sub-1",
+            [_inside_repo],
+        )
+        is not None,
+    ),
+    (None, None, True),
+)
+check(
+    "Z-T31 a recovery carries the record over, well-formed fields only, and makes none up",
+    (
+        d.recovery_carry({"approval_held": dict(_held)}).get("approval_held"),
+        d.recovery_carry(
+            {
+                "approval_held": {
+                    "task_id": "zeta",
+                    "base": 7,
+                    "approval_id": ["x"],
+                    "extra": "text",
+                }
+            }
+        ).get("approval_held"),
+        "approval_held" in d.recovery_carry({"approval_held": {"task_id": 3}}),
+        "approval_held" in d.recovery_carry({"approval_held": "zeta"}),
+        "approval_held" in d.recovery_carry({}),
+    ),
+    (
+        {"task_id": "zeta", "base": _base, "approval_id": "ap-1"},
+        {"task_id": "zeta", "base": None, "approval_id": None},
+        False,
+        False,
+        False,
+    ),
+)
+_real = str(REPO / "src" / "x.py")
+check(
+    "Z-T32 a path in the repository under other spellings: device prefixes, a share, "
+    "slashes, letter case; a volume or object name cannot be told and counts as inside; "
+    "another folder on the disk does not",
+    (
+        d._in_repository("\\\\?\\" + _real, _base),
+        d._in_repository("\\\\.\\" + _real, _base),
+        d._in_repository("//?/" + _real.replace("\\", "/"), _base),
+        d._in_repository("\\\\?\\GLOBALROOT\\Device\\HarddiskVolume3\\x.py", _base),
+        d._in_repository("\\\\?\\UNC\\server\\share\\x.py", _base),
+        d._in_repository("\\\\server\\share\\x.py", _base),
+        d._in_repository(_real.upper(), _base),
+        d._in_repository(_real.replace("\\", "/"), _base),
+        d._in_repository(str(TMP_ROOT.parent.parent / "elsewhere.py"), _base),
+        d._in_repository(
+            "\\\\?\\" + str(TMP_ROOT.parent.parent / "elsewhere.py"), _base
+        ),
+    ),
+    (True, True, True, True, True, True, True, True, False, False),
+)
+import planscope
+
+check(
+    "Z-T33 what a plain first line names: only a task it starts with; what a typed slash "
+    "command is: a slash, a command word, then a blank or the end",
+    (
+        [
+            sorted(planscope.leading_task(text))
+            for text in (
+                "task:zeta",
+                "task: zeta go on",
+                "  `task:zeta` go",
+                "TASK_ID=Zeta.",
+                "﻿task:zeta",
+                "go on task:zeta",
+                "- task:zeta",
+                "> task:zeta",
+                "**task:zeta**",
+                "네, task:zeta",
+                "",
+            )
+        ],
+        [
+            bool(planscope.TYPED_COMMAND.match(text))
+            for text in (
+                "/implement x.md",
+                "/implement",
+                "/my-plugin:run task:z",
+                "//comment",
+                "/tmp/log.txt says",
+                "/ x.md",
+                "/1abc",
+                "x /implement",
+            )
+        ],
+    ),
+    (
+        [["zeta"]] * 5 + [[]] * 6,
+        [True, True, True, False, False, False, False, False],
+    ),
+)
+
 for _p in (HOME, WITNESS, REPO):
     shutil.rmtree(_p, ignore_errors=True)
 print("FAILURES:", fails)

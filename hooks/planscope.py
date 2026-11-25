@@ -182,6 +182,9 @@ PLAN_REF = re.compile(
     r"[A-Za-z0-9_.:/\\~-]+\.md(?![A-Za-z0-9_-])", re.IGNORECASE | re.ASCII
 )
 COMMAND_HEADER = re.compile(r"\A\s*<command-(?:message|name)>")
+# A slash command as typed: a slash, a command word (a plugin's may hold `:`), then a blank
+# or the end. A comment (`//...`), a path (`/tmp/x.md ...`) or a lone slash is not one.
+TYPED_COMMAND = re.compile(r"/[A-Za-z][A-Za-z0-9_:-]*(?:\s|\Z)", re.ASCII)
 # The args block counts only directly after the header tags, never later in an expanded body.
 COMMAND_ARGS = re.compile(
     r"\A\s*(?:<command-(message|name)>.*?</command-\1>\s*)+<command-args>(.*?)</command-args>",
@@ -210,6 +213,16 @@ def naming_text(prompt: str) -> str:
 def prompt_tasks(text: str) -> set[str]:
     """Task ids named explicitly; only these may re-arm an earlier approval."""
     return {m.group(1).rstrip(".").lower() for m in TASK_REF.finditer(text)}
+
+
+def leading_task(text: str) -> set[str]:
+    """The task id a line starts with (`task:<id>`, words may follow), as a set of none or
+    one. A line that only mentions a task ("do NOT go on with task:x yet", "the reviewer
+    said: task:x approved") names none: since 2026-11-25 a prompt the user typed continues
+    an approval only by starting with the task."""
+    start = text.lstrip(" \t﻿\u200b").removeprefix("`")
+    m = TASK_REF.match(start)
+    return {m.group(1).rstrip(".").lower()} if m else set()
 
 
 def names_plan(text: str, plan: Path, root: str, cwd: str) -> bool:
@@ -283,12 +296,18 @@ def named_plans(
     cwd: str, prompt: str
 ) -> tuple[str, list[tuple[Path, str, str | None]]]:
     """(git root, [(plan file, text, task)]) of the plans in this root's docs/plans that the
-    prompt's naming text names by task id or by plan file."""
+    prompt names. A slash command names them in its arguments, by task id or by plan file
+    (`/implement docs/plans/x.md`); any other prompt only by starting its first line with
+    `task:<id>`: a task mentioned later in the line, or a plan file's name, names nothing."""
     import worktree
 
     naming = naming_text(prompt)
-    tasks = prompt_tasks(naming)
-    if not tasks and not PLAN_REF.search(naming):
+    # a slash command: expanded by the harness (the <command-...> header) or as typed
+    command = bool(COMMAND_HEADER.match(prompt) or TYPED_COMMAND.match(naming))
+    # A line that starts with a task names every task on it (two of them stay ambiguous, as
+    # before); a line that does not start with one names none.
+    tasks = prompt_tasks(naming) if command or leading_task(naming) else set()
+    if not tasks and not (command and PLAN_REF.search(naming)):
         return "", []  # nothing named: no git call needed
     root = os.path.normcase(worktree.toplevel(cwd) or os.path.abspath(cwd))
     plans_dir = Path(root) / "docs" / "plans"
@@ -299,8 +318,8 @@ def named_plans(
         except (OSError, ValueError):  # unreadable or not UTF-8: skip it
             continue
         task = plan_task(text)
-        if (task and task.lower() in tasks) or names_plan(
-            naming, plan, root, os.path.abspath(cwd)
+        if (task and task.lower() in tasks) or (
+            command and names_plan(naming, plan, root, os.path.abspath(cwd))
         ):
             named.append((plan, text, task))
     return root, named

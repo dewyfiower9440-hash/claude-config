@@ -128,6 +128,36 @@ check(
     "the hook refuses Edit/Write outside `docs/plans`." in rules,
     True,
 )
+
+
+def discipline_source_of(constant: str) -> str:
+    """The parenthesised text assigned to that module-level constant in discipline.py."""
+    source = (HOOKS / "discipline.py").read_text(encoding="utf-8")
+    found = re.search(rf"^{constant} = \((.*?)^\)", source, re.DOTALL | re.MULTILINE)
+    return found.group(1) if found else "(constant not found: CLAUDE_LOST_APPROVAL)"
+
+
+check(
+    "D4 a lost approval: how it is continued, what does not continue it, and the switch the "
+    "hook reads",
+    (
+        "An approval the session held and no longer holds is continued only by a prompt "
+        "whose first line starts with `task:<id>` (a slash command may name the task or the "
+        "plan file in its arguments) or by a new ExitPlanMode approval, never by the word "
+        '"approved" (승인) in a message or a task mentioned later in the line' in rules,
+        "the hook refuses edits in that repository, whatever is done to the plan file"
+        in rules,
+        "`CLAUDE_LOST_APPROVAL=notify` in the hooks' environment: the user's switch, not "
+        "the session's" in rules,
+        'os.environ.get("CLAUDE_LOST_APPROVAL")'
+        in (HOOKS / "discipline.py").read_text(encoding="utf-8"),
+        # the refusal and the note never name the switch to the session
+        "CLAUDE_LOST_APPROVAL"
+        in discipline_source_of("REASON_LOST_APPROVAL")
+        + discipline_source_of("LOST_NOTE"),
+    ),
+    (True, True, True, True, False),
+)
 check(
     "D4 a blocked plan: no approval, and the one it had is gone",
     "grants no approval and revokes the one it had" in rules,

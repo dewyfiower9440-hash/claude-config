@@ -443,7 +443,12 @@ for name, text in (
     ),
 ):
     check(f"P0-03 {name} -> not re-armed", prompt_rearm(text), None)
-for name, text, cwd in (
+# lost-approval-block (2026-11-25, the user's decision): a prompt the user typed continues an
+# approval only by starting its first line with the task. A plan file's name does so in a
+# slash command's arguments only, and a task mentioned later in the line names nothing. The
+# four path forms below re-armed from any first line until then; they are kept as forms of
+# the argument, and the plain lines are checked not to re-arm.
+PATH_FORMS = (
     ("sentence period after the path", "see docs/plans/2026-11-06-widget.md.", REPO),
     ("@ file mention", "@docs/plans/2026-11-06-widget.md 계속", REPO),
     ("Korean right before the path", "계획docs/plans/2026-11-06-widget.md 진행", REPO),
@@ -452,8 +457,35 @@ for name, text, cwd in (
         "../docs/plans/2026-11-06-widget.md 계속",
         REPO / "src",
     ),
+)
+for name, text, cwd in PATH_FORMS:
+    check(
+        f"P0-03 {name}, as a slash command's argument -> re-armed",
+        prompt_rearm(f"/implement {text}", cwd=cwd),
+        "widget",
+    )
+    check(
+        f"P0-03 {name}, on a plain first line -> not re-armed",
+        prompt_rearm(text, cwd=cwd),
+        None,
+    )
+for name, text in (
+    (
+        "a task mentioned in the middle of the first line",
+        "do NOT go on with task:widget yet",
+    ),
+    ("a quoted reviewer", "the reviewer said: task:widget approved"),
+    ("the task after a polite word", "please continue task:widget"),
+    ("the word approved before the task", "승인 task:widget"),
+    ("the plan file's bare name", "2026-11-06-widget.md"),
 ):
-    check(f"P0-03 {name} -> re-armed", prompt_rearm(text, cwd=cwd), "widget")
+    check(f"P0-03 {name} -> not re-armed", prompt_rearm(text), None)
+for name, text in (
+    ("the task first, words after", "task:widget 이어서 진행해"),
+    ("blank lines before the task line", "\n\n  task:widget go on"),
+    ("a typed slash command naming the task", "/implement task:widget"),
+):
+    check(f"P0-03 {name} -> re-armed", prompt_rearm(text), "widget")
 SUFFIX_FILE = (
     REPO / "docs" / "plans" / "x-2026-11-06-widget.md"
 )  # unapproved, longer name

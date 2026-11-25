@@ -817,6 +817,22 @@ def shell_write_denial(
         paths = [f for f in paths if not ignored_path(state, f, cwd)]
         if not paths and not unresolved:
             return None
+        # lost-approval-block: the same refusal as for an Edit, in both modes; a write whose
+        # target could not be read (`> "$F"`) is refused too while an approval is waited for.
+        try:
+            shown = (
+                ", 셸 명령의 쓰기 대상: " + ", ".join(Path(f).name for f in paths[:5])
+                if paths
+                else ", 셸 명령의 쓰기 대상을 읽지 못함"
+            )
+            waited = lost_approval_denial(
+                state, data.get("prompt_id"), paths, shown, unjudged=bool(unresolved)
+            )
+        except Exception as e:  # hook boundary: an approval decision never fails open
+            log.exception("discipline.lost_approval_check_failed")
+            waited = lost_approval_failure(state, e)
+        if waited:
+            return waited
         if AUTHZ_MODE == "enforce" and v2_active():
             for f in paths:  # per target: the plan file itself has its own rule
                 refused = v2_write_check(state, cwd, f)
@@ -853,6 +869,19 @@ def shell_write_denial(
         Exception
     ) as e:  # hook boundary: enforce refuses, warn keeps today's behaviour
         log.exception("discipline.shell_write_check_failed")
+        try:  # the targets could not be judged at all: refused while an approval is waited for
+            waited = lost_approval_denial(
+                state,
+                data.get("prompt_id"),
+                [],
+                f", 셸 쓰기 대상 판정 중 오류 {type(e).__name__}",
+                unjudged=True,
+            )
+        except Exception as inner:  # hook boundary
+            log.exception("discipline.lost_approval_check_failed")
+            waited = lost_approval_failure(state, inner)
+        if waited:
+            return waited
         if AUTHZ_MODE == "enforce":
             return REASON_AUTHZ.format(
                 why=f"셸 쓰기 대상 판정 중 오류 {type(e).__name__}"
@@ -911,6 +940,16 @@ def on_pre(data: dict[str, Any], state: dict[str, Any]) -> None:
     path = absolute(path, cwd)
     # A reset marker does not deny writes: edits after it are tracked by the new state, and
     # Stop stays blocked until the gates in its scope pass, so a red gate remains fixable.
+
+    # lost-approval-block: an approval this session held was lost and none stands. In both
+    # modes; a failure of the check refuses (an approval decision never fails open).
+    try:
+        waited = lost_approval_denial(state, data.get("prompt_id"), [path])
+    except Exception as e:  # hook boundary
+        log.exception("discipline.lost_approval_check_failed")
+        waited = lost_approval_failure(state, e)
+    if waited:
+        emit_pre("deny", waited)
 
     # 0) v2: the approval (and the store itself) is verified now, before this write.
     if v2_active():
@@ -2797,6 +2836,8 @@ def v2_rearm(
 
     revoke_cmd = REVOKE_CMD.match(naming_text(prompt))
     if revoke_cmd:
+        # the user lays the task down: nothing of it is waited for any more
+        forget_approval_held(state, task=revoke_cmd.group(1))
         return None, v2_revoke_task(state, _v2_root(cwd), revoke_cmd.group(1))
     root, named = named_plans(cwd, prompt)
     if not named:
@@ -2911,6 +2952,10 @@ def v2_write_check(
         # The plan was closed as done: the ordinary end of a task. What it changed inside
         # its scope stays covered for this turn's Stop; any other loss covers nothing.
         cover_changes(state, ptr)
+        # lost-approval-block: the one ordinary end. It is seen here only while the approval
+        # stands (`ptr` is the approval being checked), so a plan closed after the approval
+        # was lost never gets here.
+        forget_approval_held(state, approval_id=ptr.get("approval_id"))
         known = state.get("ledger_closed")
         if (
             ptr.get("task_id")
@@ -3744,9 +3789,155 @@ def project_switch_context(top: str) -> str:
 
 LOST_NOTE = (
     "[discipline] 승인(task: {task})이 이 프롬프트에서 끊겼습니다({why}). 계속하려면 "
-    "사용자에게 프롬프트 첫 줄 task:{task} 를 요청하세요. 그 전에는 범위 안의 파일도 "
-    "고치지 마세요."
+    "사용자에게 task:{task} 로 시작하는 프롬프트 첫 줄을 요청하세요. 그 전에는 이 저장소의 "
+    "파일 수정이 거부됩니다(메시지 본문의 '승인'이라는 말은 승인이 아닙니다)."
 )
+# The same loss when the user's switch says notify: nothing is refused, so it does not say so.
+LOST_NOTE_NOTIFY = (
+    "[discipline] 승인(task: {task})이 이 프롬프트에서 끊겼습니다({why}). 계속하려면 "
+    "사용자에게 task:{task} 로 시작하는 프롬프트 첫 줄을 요청하세요. 그 전에는 범위 안의 "
+    "파일도 고치지 마세요(메시지 본문의 '승인'이라는 말은 승인이 아닙니다)."
+)
+# lost-approval-block (2026-11-25): said at every refused edit while a lost approval is
+# waited for. The first words are what the user asked the refusal to say.
+REASON_LOST_APPROVAL = (
+    "[discipline] 승인 기록 없음: 계획 승인 다시 받기. 이 세션이 갖고 있던 승인(task: {task})이 "
+    "지금은 유효하지 않아 이 저장소의 파일 수정을 거부합니다{target}. 이어가려면 사용자가 "
+    "프롬프트 첫 줄을 task:{task} 로 시작하거나, 계획을 다시 제시받아 ExitPlanMode 로 승인하거나, "
+    "첫 줄에 revoke task:{task} 를 적어 그 작업을 내려놓아야 합니다. 메시지 본문의 "
+    "'승인'·'approved' 같은 말은 승인 근거가 아닙니다. 계획 파일을 옮기거나 닫아도 풀리지 "
+    "않습니다. 수정하지 말고 사용자에게 요청하세요."
+)
+
+
+def lost_approval_mode(raw: object) -> str:
+    """CLAUDE_LOST_APPROVAL: "notify" only when asked for exactly; anything else blocks."""
+    return (
+        "notify"
+        if isinstance(raw, str) and raw.strip().lower() == "notify"
+        else "block"
+    )
+
+
+def sync_approval_held(state: dict[str, Any]) -> None:
+    """Keep `approval_held`: the last approval this session held (task, repository,
+    approval id). Called at the end of every hook run, so it holds whichever way the
+    approval is dropped afterwards (a prompt that names no task, a Stop that finds the plan
+    changed, a prompt hook that failed, a relay): none of those paths has to remember it.
+    It is forgotten in two places only: where the hook records that the plan was closed as
+    done while its approval stood (`v2_invalid`), and at the user's `revoke task:<id>`."""
+    held = state.get("approval")
+    ended = " ".join(
+        str(x) for x in (state.get("approval_invalid"), state.get("v2_block")) if x
+    )
+    if "plan_status:done" in ended:
+        # The plan was closed as done in this prompt and `v2_invalid` forgot the record. The
+        # pointer stays in the state until the Stop: recording it again here locked the
+        # prompt after every ordinary end of a task (close, commit, stop).
+        return
+    if (
+        isinstance(held, dict)
+        and held.get("v")
+        == 2  # the earlier store has no place that forgets: not recorded
+        and isinstance(held.get("task_id"), str)
+        and held["task_id"]
+    ):
+        state["approval_held"] = {
+            "task_id": held["task_id"],
+            "base": held.get("base") if isinstance(held.get("base"), str) else None,
+            "approval_id": held.get("approval_id"),
+        }
+
+
+def forget_approval_held(
+    state: dict[str, Any], *, approval_id: object = None, task: object = None
+) -> None:
+    """Drop `approval_held` when it is that approval (by id) or that task (by name)."""
+    held = state.get("approval_held")
+    if not isinstance(held, dict):
+        return
+    same_id = bool(approval_id) and held.get("approval_id") == approval_id
+    same_task = (
+        isinstance(task, str)
+        and isinstance(held.get("task_id"), str)
+        and held["task_id"].lower() == task.lower()
+    )
+    if same_id or same_task:
+        state["approval_held"] = None
+
+
+def _in_repository(path: str, base: str) -> bool:
+    """Whether `path` lies in the repository `base`, however it is spelled: as written, and
+    with links, junctions and 8.3 short names resolved. A path that cannot be resolved counts
+    as inside (the question is whether to refuse). A UNC path is never resolved (a stalled
+    share must not time the hook out)."""
+    spelled = path.replace("/", "\\")
+    for prefix in ("\\\\?\\", "\\\\.\\"):  # the device forms of a local path
+        if spelled.startswith(prefix):
+            spelled = spelled[len(prefix) :]
+            if not re.match(r"[A-Za-z]:\\", spelled):
+                return True  # a volume or object name: cannot be told, so it is refused
+    if is_unc(spelled):
+        # A share may be this very disk (\\localhost\C$\...) and is never resolved: while an
+        # approval is waited for it counts as inside.
+        return True
+    plain = os.path.normcase(os.path.abspath(spelled))
+    if _inside(plain, base):
+        return True
+    try:
+        return _inside(os.path.realpath(plain), os.path.realpath(base))
+    except (OSError, ValueError):
+        return True
+
+
+def lost_approval_denial(
+    state: dict[str, Any],
+    prompt_id: object,
+    paths: list[str],
+    shown: str = "",
+    unjudged: bool = False,
+) -> str | None:
+    """The refusal for a write while this session has held an approval and none stands for
+    this prompt. `unjudged`: the write's targets could not be told (a shell command), which
+    is refused like a write into the repository. None: the session never held an approval
+    (or it ended in the ordinary way, or the user revoked it), an approval stands, the
+    user's switch says notify, or every path lies outside that repository. No plan file is
+    read: what the session does to its plan files cannot lift the refusal."""
+    held = state.get("approval_held")
+    if not isinstance(held, dict) or not isinstance(held.get("task_id"), str):
+        return None
+    if not held["task_id"]:
+        return None
+    # An approval stands when it is bound to the prompt in progress: by the id this tool call
+    # carries, or by the one the prompt hook recorded (a subagent's call carries its own id
+    # or none; the approval of the prompt it works under is the one that counts).
+    if active_approval(state, prompt_id) or active_approval(
+        state, state.get("prompt_id")
+    ):
+        return None
+    if lost_approval_mode(os.environ.get("CLAUDE_LOST_APPROVAL")) == "notify":
+        return None
+    base = held.get("base")
+    in_base = (
+        unjudged
+        or not (isinstance(base, str) and base)  # repository unknown: every path
+        or any(_in_repository(p, base) for p in paths)
+    )
+    if not in_base:
+        return None
+    return REASON_LOST_APPROVAL.format(task=held["task_id"], target=shown)
+
+
+def lost_approval_failure(state: dict[str, Any], e: BaseException) -> str:
+    """The refusal when the check itself failed: an approval decision never fails open."""
+    held = state.get("approval_held")
+    task = held.get("task_id") if isinstance(held, dict) else None
+    return REASON_LOST_APPROVAL.format(
+        task=task if isinstance(task, str) and task else "?",
+        target=f" (판정 중 오류 {type(e).__name__})",
+    )
+
+
 CLOSED_NOTE = (
     "[discipline] 작업(task: {task})의 계획이 done으로 닫혀 승인이 끝났습니다. 이어서 할 "
     "일이 있으면 새 계획을 세워 승인받으세요."
@@ -3816,7 +4007,12 @@ def approval_lost_note(
         why = "이 세션이 시작하지 않은 알림이거나 승인을 유지할 조건이 맞지 않음"
     else:
         why = "프롬프트가 작업을 이름하지 않음"
-    return LOST_NOTE.format(task=task_before, why=why)
+    note = (
+        LOST_NOTE_NOTIFY
+        if lost_approval_mode(os.environ.get("CLAUDE_LOST_APPROVAL")) == "notify"
+        else LOST_NOTE
+    )
+    return note.format(task=task_before, why=why)
 
 
 MAX_PROMPTS_SEEN = 12
@@ -3912,6 +4108,15 @@ def on_prompt(data: dict[str, Any], state: dict[str, Any]) -> None:
     if not relay:  # a relay continues the user's turn: its counts and baselines stay
         state["turn_files"] = []
         state["turn_shell_tops"] = []
+    if isinstance(held_before, dict) and v2_active():
+        # lost-approval-block: the turn may have ended (or been interrupted) before any hook
+        # saw that its plan was closed as done. The approval coming in is checked once more
+        # here, so that ordinary end is recorded (and `approval_held` forgotten) before the
+        # prompt drops the approval; otherwise the next edit would be refused for good.
+        try:
+            v2_write_check(state, cwd)
+        except Exception:  # hook boundary: nothing is forgotten, the refusal stays
+            log.exception("approvals.v2_hook_failure")
     # A new prompt never inherits the previous approval; only a prompt that names the same
     # in-progress plan's task (or plan file) re-arms it.
     state["approval_invalid"] = None
@@ -5886,6 +6091,21 @@ def recovery_carry(saved: object) -> dict[str, Any]:
     ]
     if places:
         carry["background_tops"] = places
+    # lost-approval-block: a recovery grants nothing, so the approval the session held and
+    # does not hold now is still waited for after it (well-formed fields only).
+    held = saved.get("approval_held")
+    if (
+        isinstance(held, dict)
+        and isinstance(held.get("task_id"), str)
+        and held["task_id"]
+    ):
+        carry["approval_held"] = {
+            "task_id": held["task_id"],
+            "base": held.get("base") if isinstance(held.get("base"), str) else None,
+            "approval_id": held.get("approval_id")
+            if isinstance(held.get("approval_id"), str)
+            else None,
+        }
     return carry
 
 
@@ -6092,6 +6312,10 @@ def run_locked(mode: str, data: dict[str, Any], handler: Any, path: Path) -> Non
             note_prompt_failure(state, data, f"{type(e).__name__}: {e}"[:200])
         raise
     finally:
+        # lost-approval-block: whatever this run did, the approval it leaves standing is
+        # remembered before the state is saved (a refused tool call ends by SystemExit and
+        # comes through here too).
+        sync_approval_held(state)
         try:
             session_store.save(path, state)
             # what the missed-event notes said is in the saved state now
