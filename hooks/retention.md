@@ -8,7 +8,7 @@
 
 | 종류 | 위치 | 만드는 쪽 | 지우는 쪽 | 2026-11-15 |
 |---|---|---|---|---|
-| 대화 기록 | `~/.claude/projects/<폴더별>/` | Claude Code | Claude Code, `cleanupPeriodDays`(기본 30일) 뒤 | 193개, 471MB |
+| 대화 기록 | `~/.claude/projects/<폴더별>/` | Claude Code | Claude Code, `cleanupPeriodDays` 뒤(`settings.json`의 값 90일. 정하지 않으면 기본 30일) | 193개, 471MB |
 | 파일 이력 | `~/.claude/file-history/` | Claude Code | Claude Code, 같은 설정 | 2,307개, 40MB |
 | 세션 상태 `<id>.json`, `<id>.lock` | 임시 폴더의 `claude-discipline/` | `hooks/discipline.py` | `hooks/state_gc.py`(세션 종료 때, 35일 넘게 안 쓰인 것, 한 번에 1초·2,000개까지) | 약 37,000개, 68MB |
 | 세션 상태 복구용 사본 `*.recovered-*` | 같은 폴더 | `hooks/discipline.py`(`session_store.keep_copy`) | **아무도 지우지 않는다** | 10개 안팎 |
@@ -21,7 +21,8 @@
 | 승인 기록, 관측 기록(`*-observe.jsonl`), 복구 감사 기록 | `~/.claude/discipline/` | `hooks/discipline.py`, `hooks/approvals.py` | **지우지 않는다**. 관측 기록은 크기 상한이 없다 | 미확인(도구로 읽지 못하게 막힌 폴더) |
 | 계획 문서, 기준선 측정 | `docs/plans/`, `tests/_baseline/` | 작업 중 작성 | git으로 관리 | — |
 
-- `cleanupPeriodDays`는 `settings.json`에 따로 정하지 않았다(기본값 30일). 이 값을 늘리면 대화 기록과 파일 이력이 더 오래 남는다. 세션 상태의 보존 기간(35일)은 이 값보다 길어야 한다: 대화를 다시 열 수 있는 동안 상태가 먼저 지워지면 "검증 안 된 변경" 기록이 표시 없이 사라진다(`hooks/state_gc.py`의 설명). 30일보다 늘릴 때는 환경 변수 `CLAUDE_STATE_TTL_DAYS`도 함께 늘린다.
+- `cleanupPeriodDays`는 `settings.json`에 90으로 정해져 있다(2026-11-25에 파일에서 확인. 정하지 않았을 때의 기본값은 30일). 대화 기록과 파일 이력은 90일 동안 남는다. 세션 상태의 보존 기간은 이 값보다 길어야 한다: 대화를 다시 열 수 있는 동안 상태가 먼저 지워지면 "검증 안 된 변경" 기록이 표시 없이 사라진다(`hooks/state_gc.py`의 설명).
+- **지금은 그 조건이 지켜지지 않는다.** 세션 상태의 보존 기간은 35일(`hooks/state_gc.py`의 `DEFAULT_TTL_DAYS`)이고, 이를 늘리는 환경 변수 `CLAUDE_STATE_TTL_DAYS`는 `settings.json`에 없다(35 < 90). 36일에서 90일 사이에 다시 여는 대화는 세션 상태 없이 열린다. 맞추려면 `settings.json`의 `env`에 `CLAUDE_STATE_TTL_DAYS`를 90보다 크게(예: 95) 두거나 `cleanupPeriodDays`를 35 미만으로 줄인다. 설정 변경은 사용자가 결정한다.
 - 게이트(`python -I tests/run_all.py`)의 테스트는 전용 임시 폴더에서 돌고 끝나면 지워진다(P0-15). 그 전에 쌓인 세션 상태 약 37,000개는 35일이 지나면서 세션 종료 때마다 조금씩 줄어든다.
 
 ## 측정과 경고
