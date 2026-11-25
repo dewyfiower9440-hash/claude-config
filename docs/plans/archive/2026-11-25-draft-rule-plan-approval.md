@@ -1,4 +1,7 @@
 <!-- 초안, 미적용 (2026-11-25). 사용자 확인 전에는 규칙이 아니다.
+     여기(docs/plans/archive/)에 둔 이유: Claude Code는 rules/ 아래의 .md를 하위 폴더까지 모두
+     읽고, paths: 머리말이 없으면 모든 세션에 로드한다(공식 문서 memory 절). rules/drafts/에
+     두면 ~/.claude에 반영되는 순간 적용되므로 릴리스 전에 옮겼다. 이 폴더는 hook이 읽지 않는다.
      적용하려면: 문장을 확정하고, 이 파일을 rules/ 바로 아래로 옮길지 CLAUDE.md 2절에 한두
      문장으로 넣을지 정한다. rules/ 바로 아래에 두려면 tests/test_docs_consistency.py가
      rules/*.md를 모두 언어 규칙으로 읽는 부분(Quality gate 검사)을 함께 고쳐야 한다.
