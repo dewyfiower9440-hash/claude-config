@@ -22,6 +22,7 @@ The live hooks run from the working tree of `~/.claude`. A broken guard or pre h
 
 ## 4. Merge, push, CI
 - `git -C ~/.claude merge --ff-only <branch>`. Not a fast-forward: stop, never force; rebase the work tree branch onto `main`, run the gate again.
+- Merge in a later turn than the one that made the commits when you can. The discipline hook does not count what git brings in as edits, except commits made in the same turn (`edit; git commit` must not slip through): a merge of commits made in this very turn is listed once at the Stop as files changed without an approved plan in `~/.claude` (the plan's approval is bound to the work tree, another git root; observed 2026-11-25, 11 files). Nothing is blocked. When it happens, do not revert: say in the report what the files are and that they came in by the release merge.
 - Right after the merge, run a few ordinary commands (`git status`, a Read, an Edit in a scratch folder): the live hooks must not block them.
 - Push needs the user's go-ahead unless this task's pushes were approved (global rules, section 6): `git -C ~/.claude push origin main`. Never force-push.
 - Follow the CI run of the pushed commit to its end (`gh run watch <id> --exit-status`) and read the result from the API. A job that never started (no steps, an annotation about billing or limits) is "unknown", not a failure of the change: report it, do not rerun in a loop.
