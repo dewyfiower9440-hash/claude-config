@@ -409,7 +409,8 @@
   "env": {
     "BASH_MAX_TIMEOUT_MS": "1200000",
     "CLAUDE_REVIEW_GATE": "1",
-    "CLAUDE_COMMIT_REVIEW": "block"
+    "CLAUDE_COMMIT_REVIEW": "block",
+    "CLAUDE_STATE_TTL_DAYS": "95"
   },
   "autoUpdatesChannel": "stable",
   "cleanupPeriodDays": 90,

@@ -10,7 +10,7 @@
 |---|---|---|---|---|
 | 대화 기록 | `~/.claude/projects/<폴더별>/` | Claude Code | Claude Code, `cleanupPeriodDays` 뒤(`settings.json`의 값 90일. 정하지 않으면 기본 30일) | 193개, 471MB |
 | 파일 이력 | `~/.claude/file-history/` | Claude Code | Claude Code, 같은 설정 | 2,307개, 40MB |
-| 세션 상태 `<id>.json`, `<id>.lock` | 임시 폴더의 `claude-discipline/` | `hooks/discipline.py` | `hooks/state_gc.py`(세션 종료 때, 35일 넘게 안 쓰인 것, 한 번에 1초·2,000개까지) | 약 37,000개, 68MB |
+| 세션 상태 `<id>.json`, `<id>.lock` | 임시 폴더의 `claude-discipline/` | `hooks/discipline.py` | `hooks/state_gc.py`(세션 종료 때, 95일 넘게 안 쓰인 것, 한 번에 1초·2,000개까지. 날수는 `CLAUDE_STATE_TTL_DAYS`, 없으면 35일) | 약 37,000개, 68MB |
 | 세션 상태 복구용 사본 `*.recovered-*` | 같은 폴더 | `hooks/discipline.py`(`session_store.keep_copy`) | **아무도 지우지 않는다** | 10개 안팎 |
 | 승인 저장소 손상 사본 `*.corrupt-*` | `~/.claude/discipline/` | `hooks/approvals.py` | **아무도 지우지 않는다** | 미확인 |
 | 놓친 이벤트 기록 폴더 `<id>.notes/` | 같은 폴더 | `hooks/session_store.py` | 안의 기록은 읽힌 뒤 지워지고, 빈 폴더는 남는다 | 드묾 |
@@ -22,8 +22,8 @@
 | 계획 문서, 기준선 측정 | `docs/plans/`, `tests/_baseline/` | 작업 중 작성 | git으로 관리 | — |
 
 - `cleanupPeriodDays`는 `settings.json`에 90으로 정해져 있다(2026-11-25에 파일에서 확인. 정하지 않았을 때의 기본값은 30일). 대화 기록과 파일 이력은 90일 동안 남는다. 세션 상태의 보존 기간은 이 값보다 길어야 한다: 대화를 다시 열 수 있는 동안 상태가 먼저 지워지면 "검증 안 된 변경" 기록이 표시 없이 사라진다(`hooks/state_gc.py`의 설명).
-- **지금은 그 조건이 지켜지지 않는다.** 세션 상태의 보존 기간은 35일(`hooks/state_gc.py`의 `DEFAULT_TTL_DAYS`)이고, 이를 늘리는 환경 변수 `CLAUDE_STATE_TTL_DAYS`는 `settings.json`에 없다(35 < 90). 36일에서 90일 사이에 다시 여는 대화는 세션 상태 없이 열린다. 맞추려면 `settings.json`의 `env`에 `CLAUDE_STATE_TTL_DAYS`를 90보다 크게(예: 95) 두거나 `cleanupPeriodDays`를 35 미만으로 줄인다. 설정 변경은 사용자가 결정한다.
-- 게이트(`python -I tests/run_all.py`)의 테스트는 전용 임시 폴더에서 돌고 끝나면 지워진다(P0-15). 그 전에 쌓인 세션 상태 약 37,000개는 35일이 지나면서 세션 종료 때마다 조금씩 줄어든다.
+- 그 조건을 맞추는 값: `CLAUDE_STATE_TTL_DAYS`는 `settings.json`의 `env`에 95로 정해져 있다(2026-11-25, 사용자 결정. 그 전에는 변수가 없어 기본값 35일이었고, 36일에서 90일 사이에 다시 여는 대화는 세션 상태 없이 열렸다). 두 값은 함께 움직여야 한다: `cleanupPeriodDays`를 늘리면 `CLAUDE_STATE_TTL_DAYS`도 그보다 크게 늘린다(`hooks/state_gc.py`가 받는 범위는 1~365). `tests/test_docs_consistency.py`의 D13이 이 순서를 확인한다.
+- 게이트(`python -I tests/run_all.py`)의 테스트는 전용 임시 폴더에서 돌고 끝나면 지워진다(P0-15). 그 전에 쌓인 세션 상태 약 37,000개는 보존 기간(95일)이 지나면서 세션 종료 때마다 조금씩 줄어든다.
 
 ## 측정과 경고
 
@@ -45,6 +45,6 @@
 
 1. 무엇이 큰지 본다: `python -I -c "import sys; sys.path.insert(0,'hooks'); import usage; print(usage.read())"` (저장소 루트에서).
 2. 대화 기록·파일 이력이 크면: `cleanupPeriodDays`를 줄이는 것을 검토한다(설정 변경은 사용자가 결정한다). 직접 지울 때는 지금 쓰는 세션의 폴더를 피한다.
-3. 세션 상태 파일이 많으면: 35일 정리가 따라가는지 본다(세션 종료 한 번에 1초 안에서 2,000개까지 지운다. 파일이 수만 개인 폴더에서는 목록을 읽는 데 시간이 들어 실제로는 수백 개 수준이다). 게이트 밖에서 테스트 파일을 직접 여러 번 돌리면 실제 임시 폴더에 다시 쌓인다.
+3. 세션 상태 파일이 많으면: 95일 정리가 따라가는지 본다(세션 종료 한 번에 1초 안에서 2,000개까지 지운다. 파일이 수만 개인 폴더에서는 목록을 읽는 데 시간이 들어 실제로는 수백 개 수준이다). 게이트 밖에서 테스트 파일을 직접 여러 번 돌리면 실제 임시 폴더에 다시 쌓인다.
 4. 관측 기록이 크면: 필요한 집계를 낸 뒤(`python -I hooks/authz_report.py`, 사용자가 직접 실행) 사용자가 파일을 정리한다. 이 폴더는 도구가 읽지 못하게 막혀 있다.
 5. 원장, 복구용 사본, 빈 `.notes` 폴더는 작지만 지우는 장치가 없다. 정리 방법은 아직 정하지 않았다(별도 제안).
