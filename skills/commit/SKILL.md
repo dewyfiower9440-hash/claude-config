@@ -37,7 +37,7 @@ Run the project's fast checks (lint + format check + types + unit tests) unless 
 - Commit via `git commit -F <file>` (write the message with the Write tool to a file outside the repository) so the newlines survive; never a shell heredoc (global rules, section 9). Show `git log --oneline -n <k>`.
 
 ## 5. Push + CI (only with `push` in the arguments, or after the user confirms)
-- `git push origin main`, then `gh run list -L 1 --json databaseId,status,conclusion,workflowName` and `gh run watch <id> --exit-status`.
+- `git push origin main`, then `gh run list -L 1 --json databaseId,status,conclusion,workflowName`. Start `gh run watch <id> --exit-status` in the background (`run_in_background`) and go on with the next piece of work; do not wait for it in the foreground. When the watch's completion notice arrives, record the verdict with a foreground `gh run view <id> --json status,conclusion` (the hook reads CI from the GitHub API whenever a `gh run` command runs; the background start alone sees the run still in progress).
 - **CI failed** → diagnose before touching anything: `gh run view <id> --log-failed`, then classify:
   - real failure (test/lint/types): reproduce locally with the same command, fix test-first, and make a new commit (never amend a pushed commit or force-push);
   - environment/CI-only (OS differences, path separators, missing secrets, Node/Python version, lockfile out of date, an action version): fix the workflow or config and explain;

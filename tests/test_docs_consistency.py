@@ -434,6 +434,31 @@ check(
     ],
     [True],
 )
+# c80-followup step 1: the main session waited ~625 minutes on `gh run watch` in one
+# session; both skills now watch CI in the background and record the verdict afterwards.
+commit_skill = (REPO / "skills" / "commit" / "SKILL.md").read_text(encoding="utf-8")
+check(
+    "D15 /commit and /implement watch CI in the background, record the verdict with a "
+    "foreground `gh run view`, and never tell a foreground watch",
+    [
+        (
+            "in the background" in text
+            and "gh run view <id> --json status,conclusion" in text
+            and "and `gh run watch <id> --exit-status`." not in text
+        )
+        for text in (commit_skill, skill["implement"])
+    ],
+    [True, True],
+)
+check(
+    "D15 /implement stops the current step on a red CI, and closes the plan only after "
+    "the last push's CI has ended",
+    (
+        "stop the current step and fix CI first" in skill["implement"],
+        "before the plan is closed" in skill["implement"],
+    ),
+    (True, True),
+)
 check(
     "D6 /debug says what to do when the layer has no test harness",
     "no test harness" in skill["debug"] and "회귀 테스트 없음" in skill["debug"],

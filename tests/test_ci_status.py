@@ -297,6 +297,42 @@ bash(s, "git push origin main")
 bash(s, "gh run list")
 check("required run still in progress -> block", stop(s) is not None, True)
 
+# c80-followup step 1: /commit and /implement watch CI in the background and record the
+# verdict with a short foreground `gh run view` once the watch has ended.
+s = locally_verified()
+scenario(
+    [
+        run(1, ".github/workflows/ci.yml", status="in_progress", conclusion=""),
+        run(2, ".github/workflows/lint.yml"),
+    ],
+    GREEN_JOBS,
+)
+bash(s, "git push origin main")
+call(
+    "post",
+    s,
+    tool_name="Bash",
+    tool_input={"command": "gh run watch 1 --exit-status", "run_in_background": True},
+    tool_response={"backgroundTaskId": "bg1", "stdout": "", "stderr": ""},
+    cwd=str(REPO),
+)
+check(
+    "a background watch started while CI runs: still pending at the Stop -> block",
+    stop(s) is not None,
+    True,
+)
+call("prompt", s, cwd=str(REPO))
+scenario(
+    [run(1, ".github/workflows/ci.yml"), run(2, ".github/workflows/lint.yml")],
+    GREEN_JOBS,
+)
+bash(s, "gh run view 1 --json status,conclusion")
+check(
+    "the foreground `gh run view` after the watch ended records the green verdict -> allowed",
+    stop(s),
+    None,
+)
+
 s = locally_verified()
 scenario(
     [run(1, ".github/workflows/ci.yml"), run(2, ".github/workflows/lint.yml")],
