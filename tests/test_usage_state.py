@@ -270,7 +270,13 @@ check("U-T18b the next turn's addition: the hint again", CONTEXT7 in said(out), 
 post(s, "mcp__context7__query-docs", prompt_id="p2", libraryId="/x", query="q")
 hook("prompt", s, prompt_id="p3", prompt="next")
 rc, out = post(s, "Bash", prompt_id="p3", command="uv add httpx")
-check("U-T19 after a context7 lookup in this session: no hint", said(out), "")
+# c80-followup step 7: the security-auditor hint for a dependency add now comes once per
+# turn (up to its cap), so only the context7 hint is looked for here
+check(
+    "U-T19 after a context7 lookup in this session: no context7 hint",
+    (CONTEXT7 in said(out), "researcher" in said(out)),
+    (False, False),
+)
 s = uuid.uuid4().hex
 hook("prompt", s, prompt="work")
 rc, out = hook(

@@ -201,9 +201,47 @@ check(
     (True, True, True),
 )
 check(
-    "S-T5 the second time in the session: no hint",
+    "S-T5 the second time in the same turn: no hint",
     AUDITOR in edit(s, "src/auth.py"),
     False,
+)
+# c80-followup step 7: once per turn while no audit ran, up to 3 in a session
+per_turn: list[bool] = []
+for n in range(2, 6):
+    hook("prompt", s, prompt=f"turn {n}", prompt_id=f"t{n}")
+    per_turn.append(AUDITOR in edit(s, "src/auth.py"))
+check(
+    "S-T5b in the 2nd and 3rd turn the hint again, not in the 4th and 5th",
+    per_turn,
+    [True, True, False, False],
+)
+check(
+    "S-T5c the hint says how often it comes",
+    ("최대 3번" in disc.SECURITY_NOTE, "세션당 한 번" in disc.SECURITY_NOTE),
+    (True, False),
+)
+check(
+    "S-T5d hints a session already used under the old once-per-session key count as one",
+    [
+        disc.hints_used({}, "security_advice_count", "security_advice_given"),
+        disc.hints_used(
+            {"security_advice_given": 4},
+            "security_advice_count",
+            "security_advice_given",
+        ),
+        disc.hints_used(
+            {"security_advice_given": 4, "security_advice_count": 2},
+            "security_advice_count",
+            "security_advice_given",
+        ),
+        disc.hints_used(
+            {"direct_commit_hint_given": 1},
+            "direct_commit_hints",
+            "direct_commit_hint_given",
+        ),
+        disc.hints_used({"direct_commit_hints": "x"}, "direct_commit_hints", "-"),
+    ],
+    [0, 1, 2, 1, 0],
 )
 
 s = start()

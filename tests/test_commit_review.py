@@ -391,10 +391,24 @@ check(
     ("Skill commit" in said, "알림" in said),
     (True, True),
 )
-agent(s, "start", "r1b")
-agent(s, "stop", "r1b")
-decision, reason, said = shell(s)
-check("C-T18b ... once per session", ("Skill commit" in said, decision), (False, ""))
+# c80-followup step 7: after the one hint of session c80ac8d8 about 15 direct commits
+# followed; the hint now comes with every direct commit, up to 5 in a session.
+hinted: list[bool] = []
+for n in range(2, 7):
+    agent(s, "start", f"r1b{n}")
+    agent(s, "stop", f"r1b{n}")
+    decision, reason, said = shell(s)
+    hinted.append(("Skill commit" in said, decision) == (True, ""))
+check(
+    "C-T18b ... again with the 2nd to 5th direct commit, not with the 6th",
+    hinted,
+    [True, True, True, True, False],
+)
+check(
+    "C-T18b ... the hint says how often it comes",
+    "최대 5번" in disc.DIRECT_COMMIT_NOTE,
+    True,
+)
 edit(s)
 decision, reason, said = shell(s)
 check(
@@ -441,7 +455,13 @@ check(
     ("", True, True),
 )
 decision, reason, said = shell(s, env=dict(ENV, CLAUDE_COMMIT_REVIEW="notify"))
-check("C-T13 notify: said once per content", said, "")
+# c80-followup step 7: the /commit hint now comes with every direct commit (up to its
+# cap); the review note itself is still said once per content
+check(
+    "C-T13 notify: the review note is said once per content (the /commit hint again)",
+    ("code-reviewer" in said, "Skill commit" in said),
+    (False, True),
+)
 decision, reason, said = shell(
     s, "git status", env=dict(ENV, CLAUDE_COMMIT_REVIEW="notify")
 )

@@ -1455,21 +1455,36 @@ def take_inline_patch_note(data: dict[str, Any], state: dict[str, Any]) -> None:
 
 
 # devenv-v1-2 step 8: `/commit` ran once against 59 direct `git commit`s; the hint lived only
-# in the refusal. A direct commit that passes gets it once per session.
+# in the refusal. c80-followup step 7: once per session was not enough either (about 15
+# direct commits after the one hint of session c80ac8d8): every direct commit that passes
+# gets it, up to a cap (an initial prior, re-tuned from the monitor's acceptance counts).
+DIRECT_COMMIT_HINT_CAP = 5
+DIRECT_COMMIT_HINTS = "direct_commit_hints"
+DIRECT_COMMIT_LEGACY = "direct_commit_hint_given"  # the once-per-session flag before
 DIRECT_COMMIT_NOTE = (
     "[discipline] 방금 `git commit`을 직접 실행했습니다(`/commit` 스킬 밖)."
     + COMMIT_SKILL_HINT
-    + " (세션당 한 번 나오는 알림이며 차단이 아닙니다.)"
+    + f" (직접 커밋마다 세션당 최대 {DIRECT_COMMIT_HINT_CAP}번 나오는 알림이며 차단이 아닙니다.)"
 )
+
+
+def hints_used(state: dict[str, Any], count_key: str, legacy_key: str) -> int:
+    """How many times a capped hint was given in this session (pure): its count, or one
+    for a session that gave it under the old once-per-session flag."""
+    count = state.get(count_key)
+    if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+        return count
+    return 1 if state.get(legacy_key) else 0
 
 
 def prepare_direct_commit_hint(
     data: dict[str, Any], state: dict[str, Any], command: str, cwd: str
 ) -> None:
     """PreToolUse, after the checks that may refuse it: a main-conversation `git commit`
-    outside the /commit skill gets the hint after it ran, once per session (not with
-    CLAUDE_COMMIT_REVIEW=off)."""
-    if actor(data) != "main" or state.get("direct_commit_hint_given"):
+    outside the /commit skill gets the hint after it ran, up to DIRECT_COMMIT_HINT_CAP
+    times a session (not with CLAUDE_COMMIT_REVIEW=off)."""
+    used = hints_used(state, DIRECT_COMMIT_HINTS, DIRECT_COMMIT_LEGACY)
+    if actor(data) != "main" or used >= DIRECT_COMMIT_HINT_CAP:
         return
     if commit_review_mode(os.environ.get("CLAUDE_COMMIT_REVIEW")) == "off":
         return
@@ -1490,7 +1505,7 @@ def prepare_direct_commit_hint(
         and COMMIT_SKILL_HINT in str(review_note.get("text"))
     ):
         # (review 3) the review note after this commit already names /commit
-        state["direct_commit_hint_given"] = state.get("turn") or 1
+        state[DIRECT_COMMIT_HINTS] = used + 1
         return
     state["direct_commit_hint"] = me
 
@@ -1499,7 +1514,9 @@ def take_direct_commit_hint(data: dict[str, Any], state: dict[str, Any]) -> None
     """The hint the commit's PreToolUse prepared, after that very tool call only."""
     pending = state.pop("direct_commit_hint", None)
     if pending is not None and pending == str(data.get("tool_use_id") or ""):
-        state["direct_commit_hint_given"] = state.get("turn") or 1
+        state[DIRECT_COMMIT_HINTS] = (
+            hints_used(state, DIRECT_COMMIT_HINTS, DIRECT_COMMIT_LEGACY) + 1
+        )
         add_post_note(DIRECT_COMMIT_NOTE)
 
 
@@ -1586,11 +1603,16 @@ SECURITY_WORDS = frozenset(
     | {"key", "keys", "apikey", "privkey", "pubkey", "password", "passwords"}
 )
 SECURITY_AGENT = "security-auditor"
+# c80-followup step 7: once per session; now once per turn while no audit ran, up to a cap
+# (an initial prior, re-tuned from the monitor's acceptance counts).
+SECURITY_HINT_CAP = 3
+SECURITY_HINTS = "security_advice_count"
+SECURITY_LEGACY = "security_advice_given"  # the once-per-session flag before
 SECURITY_NOTE = (
     "[discipline] 보안에 닿는 변경입니다({what}). 이 세션에는 `security-auditor` 실행 기록이 "
     "없습니다. 커밋이나 배포 전에 `security-auditor` 에이전트(Agent "
     "subagent_type=security-auditor)로 감사하세요(글로벌 규칙 §8: auth/secrets/deps 변경). "
-    "(세션당 한 번 나오는 알림이며 차단이 아닙니다.)"
+    f"(감사 전까지 턴마다 한 번, 세션당 최대 {SECURITY_HINT_CAP}번 나오는 알림이며 차단이 아닙니다.)"
 )
 
 
@@ -1632,9 +1654,13 @@ def security_audit_seen(state: dict[str, Any]) -> bool:
 
 
 def note_security_change(data: dict[str, Any], state: dict[str, Any]) -> None:
-    """devenv-v1-2 step 7: the hint, once per session, for the main conversation's
-    security-relevant change in a session without a security-auditor run. A note only."""
-    if actor(data) != "main" or state.get("security_advice_given"):
+    """devenv-v1-2 step 7: the hint for the main conversation's security-relevant change
+    in a session without a security-auditor run, once per turn and up to
+    SECURITY_HINT_CAP times a session (c80-followup step 7). A note only."""
+    used = hints_used(state, SECURITY_HINTS, SECURITY_LEGACY)
+    if actor(data) != "main" or used >= SECURITY_HINT_CAP:
+        return
+    if state.get("security_advice_turn") == (state.get("turn") or 0):
         return
     try:
         if security_audit_seen(state):
@@ -1650,7 +1676,8 @@ def note_security_change(data: dict[str, Any], state: dict[str, Any]) -> None:
         log.exception("discipline.security_advice_failed")
         return
     if why:
-        state["security_advice_given"] = state.get("turn") or 1
+        state["security_advice_turn"] = state.get("turn") or 0
+        state[SECURITY_HINTS] = used + 1
         add_post_note(SECURITY_NOTE.format(what=", ".join(why)))
 
 
@@ -1726,7 +1753,8 @@ MAX_TEST_ADVICE_PER_SESSION = 3
 # c80-followup step 4: the hint went out 32 times in session c80ac8d8, each time for a
 # passing run of the declared gate, which only the main session may run. It is said for a
 # failed test run that is not the gate. A PostToolUseFailure is not known to carry
-# additionalContext, so the failure prepares the note and the next PostToolUse says it.
+# additionalContext, so the failure prepares the note and a later PostToolUse of the main
+# conversation in the same turn says it.
 TEST_ADVICE_PENDING = "test_advice_note"
 
 
