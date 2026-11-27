@@ -1,4 +1,11 @@
 {
+  "cleanupPeriodDays": 90,
+  "env": {
+    "BASH_MAX_TIMEOUT_MS": "1200000",
+    "CLAUDE_REVIEW_GATE": "1",
+    "CLAUDE_COMMIT_REVIEW": "block",
+    "CLAUDE_STATE_TTL_DAYS": "95"
+  },
   "permissions": {
     "allow": [
       "Read",
@@ -250,7 +257,7 @@
       "PowerShell(uv build:*)"
     ]
   },
-  "model": "fable",
+  "model": "opus",
   "hooks": {
     "PreToolUse": [
       {
@@ -406,14 +413,10 @@
       }
     ]
   },
-  "env": {
-    "BASH_MAX_TIMEOUT_MS": "1200000",
-    "CLAUDE_REVIEW_GATE": "1",
-    "CLAUDE_COMMIT_REVIEW": "block",
-    "CLAUDE_STATE_TTL_DAYS": "95"
+  "enabledPlugins": {
+    "pyright-lsp@claude-plugins-official": true
   },
   "autoUpdatesChannel": "stable",
-  "cleanupPeriodDays": 90,
   "theme": "light",
   "switchModelsOnFlag": false,
   "agentPushNotifEnabled": true,
@@ -444,8 +447,5 @@
       "**Trusted repo**: C:\\ itself is not a git repository. Trusted working repositories: ~/.claude (origin dewyfiower9440-hash/claude-config), C:\\dev\\tools (origin dewyfiower9440-hash/dev-tools), and project repositories under C:\\dev\\<project>",
       "**Org-specific CLIs**: None configured"
     ]
-  },
-  "enabledPlugins": {
-    "pyright-lsp@claude-plugins-official": true
   }
 }
