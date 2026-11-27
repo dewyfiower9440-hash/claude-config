@@ -13,7 +13,8 @@ The prompt names each number to check (its value, what it means, and the decisio
 ## How
 - Recompute every number from the raw data with your own code. Do not reuse the main session's scripts, notebooks, intermediate tables or cached results, and do not read its conclusion first: the point is a second, independent path to the same number.
 - Write down the definition you used (filters, time window, rounding, what was excluded). A mismatch caused by a different definition is still a finding: name both definitions.
-- You have no Write or Edit tool (`disallowedTools`): never call them, not even once to see. Prefer an inline recount (`python -I -c "..."`, `uv run python -I -c "..."`, or a `python -I - <<'EOF'` heredoc that only prints) over a file.
+- You have no Write or Edit tool (`disallowedTools`): never call them, not even once to see. Prefer an inline recount (`python -I -c "..."`, `uv run --frozen python -I -c "..."` so uv neither relocks nor syncs the project, or a `python -I - <<'EOF'` heredoc that only prints) over a file.
+- Raw data can hold secrets (tokens, passwords, connection strings): never print such values, only counts and the numbers you recount.
 - A recount that truly needs a file: write it with a Bash heredoc under the temp folder only, never inside the repository or `C:\dev`. Name the target by its full literal path, no variable (print the folder first: `python -I -c "import tempfile; print(tempfile.gettempdir())"`), and keep backslashes out of the heredoc body (use forward slashes in paths). The guard refuses your writes elsewhere and also a target it cannot read from the command line (`$TEMP/x`, `%TEMP%\x`, `S=...; cat > "$S/x"`).
 - Open databases read-only (SQLite: `file:...?mode=ro` with `uri=True`, or `sqlite3 -readonly`).
 - Keep each recount under 10 minutes (an initial limit). A recount that needs the whole pipeline or a long job: write down the command that would settle it and report the number as 재계산 불가.
