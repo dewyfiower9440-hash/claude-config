@@ -417,6 +417,40 @@ check(
     (f.read_text(encoding="utf-8"), "F401" in reason, "F821" in reason),
     (FIXABLE, True, True),
 )
+# (review after the c80-followup release) `--no-fix` does not undo a project's
+# `fix-only = true`: ruff then fixed the file at the Stop and reported nothing
+# ruff takes `fix` and `fix-only` from the settings of the folder it runs in, and the Stop
+# runs it in the repository's root: F-T16's settings sit in a subfolder and never applied,
+# so each case here is a repository with the setting in its root.
+for setting in ("fix", "fix-only"):
+    repo = BASE / f"root-{setting}"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    write("pyproject.toml", f"[tool.ruff]\n{setting} = true\n", repo)
+    both = write("both.py", FIXABLE, repo)
+    lines = "\n".join(fl.deferred_problems([str(both)], str(repo)))
+    check(
+        f"F-T19 a repository whose root says `{setting} = true`: the Stop's check leaves "
+        "the file as it was and names both problems",
+        (both.read_text(encoding="utf-8"), "F401" in lines, "F821" in lines),
+        (FIXABLE, True, True),
+    )
+write("fixonly/pyproject.toml", "[tool.ruff]\nfix-only = true\n")
+r = edit(write("fixonly/repeated.py", REPEATED_KEY))
+check(
+    "F-T20 a project with `fix-only = true`: a problem right after the edit is still "
+    "reported",
+    (r.returncode, "F601" in r.stderr),
+    (2, True),
+)
+kept = write("fixing/unused.py", "x = 1\nimport os\n")
+r = edit(kept)
+check(
+    "F-T21 a project with `fix = true`: the unused import is not removed right after "
+    "the edit either",
+    (kept.read_text(encoding="utf-8"), r.returncode),
+    ("x = 1\nimport os\n", 0),
+)
 # (final review 1) the check never takes more than the hook has left
 lone = write("deferred/budget.py", UNDEFINED)
 check(

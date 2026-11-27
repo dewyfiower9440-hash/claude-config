@@ -154,6 +154,9 @@ def python_file(path: Path, cwd: Path) -> list[str]:
         [
             ruff,
             "check",
+            # the report only: the settings' `fix-only` would fix and say nothing
+            "--no-fix",
+            "--no-fix-only",
             "--extend-ignore",
             f"{NOT_JUDGED},{DEFERRED}",
             "--output-format",
@@ -276,7 +279,7 @@ def deferred_problems(
     (`file:line:col: CODE message`), judged by each file's own ruff settings (review 1: a
     rule the project switched off is not judged here either) but never fixed (audit 1:
     `--no-fix`, a project's `fix = true` would rewrite files after the turn's evidence was
-    recorded). Only files that still exist inside the session's repository and outside its
+    recorded; `--no-fix-only` for its `fix-only = true`, which `--no-fix` does not undo). Only files that still exist inside the session's repository and outside its
     plans; at most `budget_s` (the caller's time left) and DEFERRED_BUDGET_S. None when ruff
     is missing, fails or runs out of time (the gate still judges them; `deferred_skipped`
     says why)."""
@@ -315,6 +318,7 @@ def deferred_problems(
             ruff,
             "check",
             "--no-fix",
+            "--no-fix-only",
             "--no-cache",
             "--output-format",
             "concise",
