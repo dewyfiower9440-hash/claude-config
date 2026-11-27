@@ -528,6 +528,13 @@ check(
     (True, True, True, True),
 )
 check(
+    "D16 /implement says to put an import and its first use in the same edit (c80-followup "
+    "step 8: the hooks judge F401/F821/F841 at the end of the turn)",
+    "an import and its first use" in skill["implement"]
+    and "end of the turn" in skill["implement"],
+    True,
+)
+check(
     "D6 /debug says what to do when the layer has no test harness",
     "no test harness" in skill["debug"] and "회귀 테스트 없음" in skill["debug"],
     True,

@@ -1,7 +1,9 @@
 """Auto-format and lint the file Claude just edited (PostToolUse).
 
 Formatting is applied silently (one line on stdout says that the file changed). Remaining
-lint problems are fed back to Claude (exit 2 + stderr) so it fixes them in the same turn.
+lint problems are fed back to Claude (exit 2 + stderr) so it fixes them in the same turn,
+except DEFERRED (unused imports and variables, undefined names): `deferred_problems` judges
+those once at the end of the turn, for discipline.py's Stop.
 
 `process(data)` does the work and never exits: discipline.py calls it in-process for an
 edit, before it reads the file's content (two hooks of the same event run in parallel, so a
@@ -37,6 +39,13 @@ UNFIXABLE = "F401,F841,I001"
 # module had the import moved, and the project's gate failed on it once the module was
 # there (devenv-final 42). The gate judges it, on the complete tree.
 NOT_JUDGED = "I001"
+# c80-followup step 8: judged at the end of the turn, not after each edit. Session
+# c80ac8d8 had 121 edit-time refusals, 112 of them these three between two edits of one
+# change (an import added before its use, a name used before its definition).
+DEFERRED = "F401,F821,F841"
+DEFERRED_BUDGET_S = (
+    20.0  # the Stop hook has 60 s in settings.json, shared with git work
+)
 NO_FORMAT = ("docs/plans/",)  # repository-relative prefixes that are never rewritten
 
 _deadline: float | None = None
@@ -146,7 +155,7 @@ def python_file(path: Path, cwd: Path) -> list[str]:
             ruff,
             "check",
             "--extend-ignore",
-            NOT_JUDGED,
+            f"{NOT_JUDGED},{DEFERRED}",
             "--output-format",
             "concise",
             str(path),
@@ -250,6 +259,50 @@ def process(data: object) -> tuple[bool, list[str]]:
     before = _content(path)
     problems = handler(path, cwd)
     return _content(path) != before, problems
+
+
+deferred_skipped = (
+    ""  # why the last deferred_problems judged nothing although it had files
+)
+
+
+def deferred_problems(paths: list[str], cwd: str) -> list[str]:
+    """The DEFERRED problems left in the turn's Python files, as ruff's concise lines
+    (`file:line:col: CODE message`), judged by each file's own ruff settings (review 1: a
+    rule the project switched off is not judged here either). Only files that still exist
+    inside the session's repository and outside its plans; none when ruff is missing,
+    fails or runs out of time (the gate still judges them; `deferred_skipped` says why)."""
+    global _deadline, deferred_skipped
+    deferred_skipped = ""
+    root = repository_root(Path(cwd))
+    if root is None:
+        return []
+    files: list[Path] = []
+    for raw in dict.fromkeys(paths):
+        path = Path(raw)
+        if path.suffix.lower() not in (".py", ".pyi") or not path.is_file():
+            continue
+        relative = inside(path, root)
+        if relative is not None and not relative.startswith(NO_FORMAT):
+            files.append(path)
+    if not files:
+        return []
+    ruff = which_outside("ruff", Path(cwd), *{f.parent for f in files})
+    if not ruff:
+        deferred_skipped = "ruff not found"
+        return []
+    _deadline = time.monotonic() + DEFERRED_BUDGET_S
+    res = run(
+        [ruff, "check", "--output-format", "concise", *(str(f) for f in files)], root
+    )
+    if res is None:
+        deferred_skipped = "ruff did not answer in time or could not start"
+        return []
+    if res.returncode not in (0, 1):  # 2: ruff failed (bad config, required-version)
+        deferred_skipped = f"ruff exit {res.returncode}: {res.stderr.strip()[:200]}"
+        return []
+    codes = tuple(f" {code} " for code in DEFERRED.split(","))
+    return [ln for ln in res.stdout.splitlines() if any(c in ln for c in codes)]
 
 
 def main() -> None:

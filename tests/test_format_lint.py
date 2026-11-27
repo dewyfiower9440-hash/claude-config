@@ -65,10 +65,22 @@ ELSEWHERE.mkdir()
 subprocess.run(["git", "init", "-q"], cwd=ROOT, check=True)
 
 # ---- python
+# c80-followup step 9 of the analysis (plan step 8): 121 edit-time refusals in session
+# c80ac8d8, 112 of them F821/F401/F841 between two edits of one change. Those three are
+# judged at the end of the turn (the Stop, below); everything else right after the edit.
 bad = write("bad.py", "def f():\n    return undefined_name\n")
 r = edit(bad)
-check("py undefined name -> exit 2", r.returncode, 2)
-check("py lint feedback names the rule", "F821" in r.stderr, True)
+check(
+    "F-T11 an undefined name right after the edit: not reported (judged at the Stop)",
+    (r.returncode, "F821" in r.stderr),
+    (0, False),
+)
+# a problem of another rule (in ruff's default set, not fixed by --fix) right after the edit
+REPEATED_KEY = 'd = {"a": 1, "a": 2}\nprint(d)\n'
+repeated = write("repeated.py", REPEATED_KEY)
+r = edit(repeated)
+check("py repeated dict key -> exit 2", r.returncode, 2)
+check("py lint feedback names the rule", "F601" in r.stderr, True)
 
 ugly = write("ugly.py", "x=1\ny  =  2\n")
 r = edit(ugly)
@@ -87,9 +99,9 @@ check("F-T6 ... and a file left as it was says nothing", edit(ugly).stdout.strip
 unused = write("unused.py", "x=1\nimport os\n")
 r = edit(unused)
 check(
-    "F-T3 an unused import stays in the file (formatted) and is reported",
+    "F-T3 an unused import stays in the file (formatted); it is judged at the Stop",
     (unused.read_text(encoding="utf-8"), r.returncode, "F401" in r.stderr),
-    ("x = 1\nimport os\n", 2, True),
+    ("x = 1\nimport os\n", 0, False),
 )
 
 # ---- inputs the hook must ignore
@@ -251,10 +263,10 @@ check(
     any("via_post.py" in str(f) for f in state.get("turn_files", [])),
     True,
 )
-r = post(write("via_post_bad.py", "def f():\n    return undefined_name\n"), session)
+r = post(write("via_post_bad.py", REPEATED_KEY), session)
 check(
     "F-T9 lint problems that remain come back as before: exit 2, the rule on stderr",
-    (r.returncode, "F821" in r.stderr),
+    (r.returncode, "F601" in r.stderr),
     (2, True),
 )
 check(
@@ -293,6 +305,112 @@ check(
     "file is still formatted)",
     (late.read_text(encoding="utf-8"), r.returncode),
     ("import sys\nimport os\n\nx = 1\nprint(os, sys, x)\n", 0),
+)
+
+
+# ---- c80-followup step 8: F821/F401/F841 at the end of the turn
+def hook(mode: str, session: str, **payload: object) -> str:
+    """The discipline hook in `mode`; the Stop's block reason ("" when it lets it end)."""
+    done = subprocess.run(
+        [sys.executable, "-I", str(DISC), mode],
+        input=json.dumps({"session_id": session, "cwd": str(ROOT), **payload}),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=ENV,
+        check=False,
+        timeout=180,
+    )
+    if mode != "stop" or not done.stdout.strip():
+        return ""
+    return str(json.loads(done.stdout).get("reason") or "")
+
+
+def turn_with(name: str, text: str, base: Path | None = None) -> tuple[str, Path]:
+    s = uuid.uuid4().hex
+    hook("prompt", s, prompt="work", prompt_id="p1")
+    f = write(name, text, base)
+    post(f, s)
+    return s, f
+
+
+UNDEFINED = "def f():\n    return undefined_name\n"
+s, f = turn_with("deferred/left.py", UNDEFINED)
+reason = hook("stop", s, prompt_id="p1")
+check(
+    "F-T12 an undefined name still there at the Stop: one block naming the rule and file:line",
+    ("F821" in reason, "left.py:2" in reason.replace("\\", "/")),
+    (True, True),
+)
+check(
+    "F-T12 ... the Stop that follows the block lets the turn end",
+    "F821" in hook("stop", s, prompt_id="p1", stop_hook_active=True),
+    False,
+)
+s, f = turn_with("deferred/fixed.py", UNDEFINED)
+f.write_text("undefined_name = 1\n\n\ndef f():\n    return undefined_name\n", "utf-8")
+check(
+    "F-T13 fixed within the turn: no block for it",
+    "F821" in hook("stop", s, prompt_id="p1"),
+    False,
+)
+s, f = turn_with("deferred/gone.py", UNDEFINED)
+f.unlink()
+check(
+    "F-T13 deleted within the turn: skipped",
+    "F821" in hook("stop", s, prompt_id="p1"),
+    False,
+)
+s, f = turn_with("away.py", UNDEFINED, ELSEWHERE)
+check(
+    "F-T13 a file outside the session's repository: skipped",
+    "F821" in hook("stop", s, prompt_id="p1"),
+    False,
+)
+# (review 1) the project's own ruff settings decide: a rule it switched off blocks nothing
+write("quiet/pyproject.toml", '[tool.ruff.lint]\nignore = ["F841"]\n')
+s, f = turn_with("quiet/unused_var.py", "def f():\n    y = 1\n")
+check(
+    "F-T14 a project that ignores F841: an unused variable does not block the Stop",
+    "F841" in hook("stop", s, prompt_id="p1"),
+    False,
+)
+s, f = turn_with("deferred/unused_var.py", "def f():\n    y = 1\n")
+check(
+    "F-T14 ... where it is not ignored, it does",
+    "F841" in hook("stop", s, prompt_id="p1"),
+    True,
+)
+# (review 3) ruff fails on the project's settings: no block, no crash, the skip is logged
+write("broken/ruff.toml", 'required-version = ">=99"\n')
+s, f = turn_with("broken/left.py", UNDEFINED)
+done = subprocess.run(
+    [sys.executable, "-I", str(DISC), "stop"],
+    input=json.dumps({"session_id": s, "cwd": str(ROOT), "prompt_id": "p1"}),
+    capture_output=True,
+    text=True,
+    encoding="utf-8",
+    errors="replace",
+    env=ENV,
+    check=False,
+    timeout=180,
+)
+check(
+    "F-T15 ruff fails on a project's settings: exit 0, no lint block, the skip logged",
+    (
+        done.returncode,
+        "F821" in done.stdout,
+        "deferred_lint_skipped" in done.stderr,
+        "Traceback" in done.stderr,
+    ),
+    (0, False, True, False),
+)
+s, f = turn_with("deferred/imports.py", "import os\n\nx = 1\n")
+check(
+    "F-T12 an unused import at the Stop: named too",
+    "F401" in hook("stop", s, prompt_id="p1"),
+    True,
 )
 
 shutil.rmtree(BASE, ignore_errors=True)

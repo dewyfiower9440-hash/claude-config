@@ -5544,6 +5544,46 @@ def _record_task(
     )
 
 
+REASON_DEFERRED_LINT = (
+    "[discipline] 이번 턴에 고친 Python 파일에 턴 끝까지 남은 린트 문제가 있습니다(F821·F401·F841: "
+    "편집 직후에는 다음 편집을 기다리느라 보고하지 않은 규칙). 고치고 끝내세요. 의도한 것이면 "
+    "그렇게 보고하세요.\n{problems}"
+)
+DEFERRED_LINT_SHOWN = 20  # lines of ruff output in the block
+
+
+def deferred_lint_reason(data: dict[str, Any], state: dict[str, Any]) -> str | None:
+    """c80-followup step 8: the block for F821/F401/F841 still in the turn's Python files,
+    once per turn (the Stop after the block passes: `stop_hook_active`). A failure of the
+    check is logged and blocks nothing."""
+    key = f"deferred-lint|{state.get('turn')}"
+    if not _not_yet_notified(state, key):
+        return None
+    try:
+        import format_lint
+
+        problems = format_lint.deferred_problems(
+            [str(f) for f in state.get("turn_files") or []],
+            str(data.get("cwd") or os.getcwd()),
+        )
+    except Exception:  # hook boundary: a convenience check, never a reason to crash
+        log.exception("discipline.deferred_lint_failed")
+        return None
+    if format_lint.deferred_skipped:
+        # (review 3) not judged: the gate still judges these rules
+        log.warning(
+            "discipline.deferred_lint_skipped why=%s", format_lint.deferred_skipped
+        )
+    if not problems:
+        return None
+    state.setdefault("notified", {})[key] = state.get("turn")
+    shown = problems[:DEFERRED_LINT_SHOWN]
+    more = len(problems) - len(shown)
+    return REASON_DEFERRED_LINT.format(
+        problems="\n".join(shown) + (f"\n… 외 {more}건" if more > 0 else "")
+    )
+
+
 def on_stop(data: dict[str, Any], state: dict[str, Any]) -> None:
     if data.get("stop_hook_active"):
         return
@@ -5588,7 +5628,14 @@ def on_stop(data: dict[str, Any], state: dict[str, Any]) -> None:
     note_risk(state, worked_under)
     note_ci_failures(state, data.get("session_id"))
     damaged = state_reset_active(state)
+    lint = deferred_lint_reason(data, state)
     decision = _stop_decision(state)
+    if lint:
+        # (review 2) after the other reasons: a reset marker stays first, where the code
+        # below looks for it
+        decision = (
+            (f"{decision[0]}\n\n{lint}", decision[1]) if decision else (lint, None)
+        )
     if decision is None:
         return
     reason, notify_key = decision
