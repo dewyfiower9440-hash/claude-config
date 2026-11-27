@@ -12,7 +12,9 @@
                         or once per failure when the last verification failed (report it honestly)
 
 State: %TEMP%/claude-discipline/<session_id>.json
-notify.py imports session_key/load_state/stop_block_reason so it never toasts on a blocked Stop.
+notify.py imports session_key/load_state/stop_block_reason so it never toasts on a blocked Stop
+(one exception: the end-of-turn F401/F821/F841 block of `deferred_lint_reason` runs ruff, which
+notify does not; a turn blocked for that alone still toasts).
 """
 
 from __future__ import annotations
@@ -4790,8 +4792,10 @@ REASON_NOT_PUSHED = (
     "(현재 상태: Locally Verified). push가 사용자 승인 대기라면 보고에 'CI 미검증(push 전)'으로 명시하고 종료하세요."
 )
 REASON_CI_UNCHECKED = (
-    "[discipline] {ref} push 이후 CI 결과를 확인하지 않았습니다. `gh run watch <run id> --exit-status`로 "
-    "확인하세요. 판정은 명령 출력이 아니라 GitHub API의 repository·branch·workflow·headSha·job 결과로 합니다."
+    "[discipline] {ref} push 이후 CI 결과를 확인하지 않았습니다. 백그라운드로 돌린 `gh run watch <run id> "
+    "--exit-status`의 완료 알림을 받은 뒤 `gh run view <run id> --json status,conclusion`으로 확인하거나, "
+    "아직 진행 중이면 'CI 진행 중'으로 보고하세요. 판정은 명령 출력이 아니라 GitHub API의 "
+    "repository·branch·workflow·headSha·job 결과로 합니다."
 )
 REASON_CI_FAILED = (
     "[discipline] {ref}의 CI가 실패했습니다({detail}). 고친 뒤 다시 push해 확인하거나, 실패한 run과 원인을 "
@@ -5550,6 +5554,7 @@ REASON_DEFERRED_LINT = (
     "그렇게 보고하세요.\n{problems}"
 )
 DEFERRED_LINT_SHOWN = 20  # lines of ruff output in the block
+DEFERRED_SAVE_S = 3.0  # kept back from the Stop's time for writing the state afterwards
 
 
 def deferred_lint_reason(data: dict[str, Any], state: dict[str, Any]) -> str | None:
@@ -5561,10 +5566,15 @@ def deferred_lint_reason(data: dict[str, Any], state: dict[str, Any]) -> str | N
         return None
     try:
         import format_lint
+        import worktree
 
+        # (final review 1) within what the Stop has left, after git and before the state
+        # is saved: a Stop killed at its timeout would drop every block of the turn
+        left = hook_time_left("stop", time.monotonic() - _T0) - DEFERRED_SAVE_S
         problems = format_lint.deferred_problems(
             [str(f) for f in state.get("turn_files") or []],
             str(data.get("cwd") or os.getcwd()),
+            budget_s=0.0 if worktree.budget_exhausted else left,
         )
     except Exception:  # hook boundary: a convenience check, never a reason to crash
         log.exception("discipline.deferred_lint_failed")

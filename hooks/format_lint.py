@@ -266,14 +266,26 @@ deferred_skipped = (
 )
 
 
-def deferred_problems(paths: list[str], cwd: str) -> list[str]:
+MIN_DEFERRED_S = 2.0  # less than this left for the Stop: ruff is not started at all
+
+
+def deferred_problems(
+    paths: list[str], cwd: str, budget_s: float = DEFERRED_BUDGET_S
+) -> list[str]:
     """The DEFERRED problems left in the turn's Python files, as ruff's concise lines
     (`file:line:col: CODE message`), judged by each file's own ruff settings (review 1: a
-    rule the project switched off is not judged here either). Only files that still exist
-    inside the session's repository and outside its plans; none when ruff is missing,
-    fails or runs out of time (the gate still judges them; `deferred_skipped` says why)."""
+    rule the project switched off is not judged here either) but never fixed (audit 1:
+    `--no-fix`, a project's `fix = true` would rewrite files after the turn's evidence was
+    recorded). Only files that still exist inside the session's repository and outside its
+    plans; at most `budget_s` (the caller's time left) and DEFERRED_BUDGET_S. None when ruff
+    is missing, fails or runs out of time (the gate still judges them; `deferred_skipped`
+    says why)."""
     global _deadline, deferred_skipped
     deferred_skipped = ""
+    budget = min(budget_s, DEFERRED_BUDGET_S)
+    if budget < MIN_DEFERRED_S:
+        deferred_skipped = f"no time left for ruff ({budget:.1f} s)"
+        return []
     root = repository_root(Path(cwd))
     if root is None:
         return []
@@ -291,15 +303,32 @@ def deferred_problems(paths: list[str], cwd: str) -> list[str]:
     if not ruff:
         deferred_skipped = "ruff not found"
         return []
-    _deadline = time.monotonic() + DEFERRED_BUDGET_S
+    if ruff.lower().endswith((".cmd", ".bat")) and any(
+        CMD_META.search(text) for text in (ruff, *(str(f) for f in files))
+    ):
+        # (audit 2) as in ts_file: a shim runs through cmd.exe, which reads the arguments
+        deferred_skipped = "ruff is a cmd shim and a path holds a cmd.exe metacharacter"
+        return []
+    _deadline = time.monotonic() + budget
     res = run(
-        [ruff, "check", "--output-format", "concise", *(str(f) for f in files)], root
+        [
+            ruff,
+            "check",
+            "--no-fix",
+            "--no-cache",
+            "--output-format",
+            "concise",
+            *(str(f) for f in files),
+        ],
+        root,
     )
     if res is None:
         deferred_skipped = "ruff did not answer in time or could not start"
         return []
     if res.returncode not in (0, 1):  # 2: ruff failed (bad config, required-version)
-        deferred_skipped = f"ruff exit {res.returncode}: {res.stderr.strip()[:200]}"
+        # (audit 3) its first line only: an `extend`ed file's text may follow
+        first = (res.stderr.strip().splitlines() or [""])[0][:200]
+        deferred_skipped = f"ruff exit {res.returncode}: {first}"
         return []
     codes = tuple(f" {code} " for code in DEFERRED.split(","))
     return [ln for ln in res.stdout.splitlines() if any(c in ln for c in codes)]

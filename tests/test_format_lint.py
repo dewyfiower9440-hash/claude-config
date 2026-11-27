@@ -406,6 +406,42 @@ check(
     ),
     (0, False, True, False),
 )
+# (final audit 1) a project's `fix = true` must not make the Stop rewrite the file: the
+# evidence of the turn is recorded before this check
+write("fixing/pyproject.toml", "[tool.ruff]\nfix = true\n")
+FIXABLE = "import os\n\nx = undefined_name\n"
+s, f = turn_with("fixing/both.py", FIXABLE)
+reason = hook("stop", s, prompt_id="p1")
+check(
+    "F-T16 a project with `fix = true`: the file stays as it was, and both problems are named",
+    (f.read_text(encoding="utf-8"), "F401" in reason, "F821" in reason),
+    (FIXABLE, True, True),
+)
+# (final review 1) the check never takes more than the hook has left
+lone = write("deferred/budget.py", UNDEFINED)
+check(
+    "F-T17 no time left: ruff is not run, and the skip says why",
+    (
+        fl.deferred_problems([str(lone)], str(ROOT), budget_s=0.5),
+        "time" in fl.deferred_skipped,
+    ),
+    ([], True),
+)
+# (final audit 2) a ruff that is a .cmd shim is not run with a path cmd.exe would read
+SHIM = BASE / "shimbin"
+write("../shimbin/ruff.cmd", f'@echo off\r\necho ran> "{BASE / "shim-ran.txt"}"\r\n')
+meta_file = write("deferred/a&b.py", UNDEFINED)
+saved_path = os.environ.get("PATH", "")
+os.environ["PATH"] = str(SHIM)
+try:
+    shim_result = fl.deferred_problems([str(meta_file)], str(ROOT))
+finally:
+    os.environ["PATH"] = saved_path
+check(
+    "F-T18 a ruff.cmd shim and a path with a cmd.exe metacharacter: not run, skip recorded",
+    (shim_result, (BASE / "shim-ran.txt").exists(), "cmd" in fl.deferred_skipped),
+    ([], False, True),
+)
 s, f = turn_with("deferred/imports.py", "import os\n\nx = 1\n")
 check(
     "F-T12 an unused import at the Stop: named too",

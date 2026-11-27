@@ -20,7 +20,7 @@ Single source of truth for the skills in this environment. Update it whenever a 
 
 Every description ends with when not to use the skill (2026-11-18): a skill that fires on the wrong request costs more than one that is missed.
 
-Related hooks (`~/.claude/hooks/`): `session_context.py` (SessionStart: git state + in-progress plan, compact resume), `discipline.py` (plan gate, test-weakening ask, Stop verification incl. failed runs; runs the formatter of `format_lint.py` inside its post step), `handoff.py` (SessionEnd), `notify.py` (toast, skipped while discipline blocks), `guard.py`.
+Related hooks (`~/.claude/hooks/`): `session_context.py` (SessionStart: git state + in-progress plan, compact resume with the rules' situation → call line), `discipline.py` (plan gate, test-weakening ask, Stop verification incl. failed runs; runs the formatter of `format_lint.py` inside its post step and its F401/F821/F841 check at the Stop), `handoff.py` (SessionEnd), `notify.py` (toast, skipped while discipline blocks, except a block for end-of-turn lint alone), `guard.py`.
 
 Built-in or plugin skills used as-is: `code-review`, `simplify`, `security-review`, `skill-creator` (anthropic-skills), `claude-api`, `init`.
 
