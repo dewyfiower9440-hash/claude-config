@@ -591,7 +591,12 @@ _asks: list[str] = []  # questions for the user; a block anywhere in the command
 
 # Subagents whose definitions say "read-only". Their definitions have no edit tool; this
 # makes the shell follow (2026-11-18: a reviewer killed every grep on the machine by name).
-READ_ONLY_AGENTS = {"code-reviewer", "security-auditor", "test-runner"}
+READ_ONLY_AGENTS = {
+    "code-reviewer",
+    "result-verifier",
+    "security-auditor",
+    "test-runner",
+}
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 READ_ONLY_REASON = (
     "the read-only subagent ({agent}) may not {what}; say so in your report and leave it "

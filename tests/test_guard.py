@@ -250,6 +250,7 @@ CLAUDE = f"{HOME}/.claude"
 ELSEWHERE = "C:/dev/some-project"
 TMP = tempfile.gettempdir().replace("\\", "/")
 REVIEWER, AUDITOR, RUNNER = "code-reviewer", "security-auditor", "test-runner"
+VERIFIER = "result-verifier"  # c80-followup step 5
 
 
 def answer(tool: str, ti: dict, agent: str | None = None, cwd: str = ELSEWHERE) -> str:
@@ -283,6 +284,13 @@ def ps(command: str) -> tuple[str, dict]:
 M_CASES: list[tuple[str, tuple[str, dict], str | None, str, str]] = [
     # M-T1 a read-only agent has no edit tool, whatever its definition says
     ("M-T1", ("Edit", {"file_path": f"{ELSEWHERE}/a.py"}), REVIEWER, ELSEWHERE, "deny"),
+    (
+        "M-T1",
+        ("Write", {"file_path": f"{ELSEWHERE}/a.csv"}),
+        VERIFIER,
+        ELSEWHERE,
+        "deny",
+    ),
     ("M-T1", ("Write", {"file_path": f"{ELSEWHERE}/a.py"}), AUDITOR, ELSEWHERE, "deny"),
     (
         "M-T1",
@@ -336,6 +344,10 @@ M_CASES: list[tuple[str, tuple[str, dict], str | None, str, str]] = [
     ("M-T2", sh("git branch -D old"), REVIEWER, ELSEWHERE, "deny"),
     ("M-T2", sh("cd sub && git push origin main"), REVIEWER, ELSEWHERE, "deny"),
     ("M-T2", sh("bash -c 'echo x > deep.txt'"), REVIEWER, ELSEWHERE, "deny"),
+    # c80-followup step 5: the result verifier recounts in the temp folder only
+    ("M-T2", sh("echo x > recount.txt"), VERIFIER, ELSEWHERE, "deny"),
+    ("M-T2", sh(f"echo x > {TMP}/recount.txt"), VERIFIER, ELSEWHERE, "allow"),
+    ("M-T2", sh("python -I -c 'print(1)'"), VERIFIER, ELSEWHERE, "allow"),
     # the same commands from the main session are none of this rule's business
     ("M-T2", sh("echo x > probe.txt"), None, ELSEWHERE, "allow"),
     ("M-T2", sh("git commit -m x"), "researcher", ELSEWHERE, "allow"),

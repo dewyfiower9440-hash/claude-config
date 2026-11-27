@@ -627,10 +627,47 @@ check(
         [],
         {
             name: (["Edit", "MultiEdit", "NotebookEdit", "Write"], [])
-            for name in ("code-reviewer", "security-auditor", "test-runner")
+            for name in (
+                "code-reviewer",
+                "result-verifier",
+                "security-auditor",
+                "test-runner",
+            )
         },
         ["researcher"],
     ),
+)
+# c80-followup step 5: three "independent recompute" runs were improvised from a pasted
+# prompt; the recount is now an agent of its own and a rule.
+verifier_file = REPO / "agents" / "result-verifier.md"
+verifier = verifier_file.read_text(encoding="utf-8") if verifier_file.is_file() else ""
+check(
+    "D18 result-verifier: names no model, recounts from the raw data without the main "
+    "session's scripts, reports match / mismatch / not recountable, and is no gate evidence",
+    (
+        bool(verifier) and agent_model("result-verifier") is None,
+        "raw data" in verifier,
+        "do not reuse" in verifier.lower(),
+        all(w in verifier for w in ("일치", "불일치", "재계산 불가")),
+        "not evidence" in verifier,
+    ),
+    (True, True, True, True, True),
+)
+check(
+    "D18 ... and it carries the reviewer's lessons (D11): no Write/Edit tool, inline first, "
+    "a literal temp path without backslashes",
+    (
+        "no Write or Edit tool" in verifier,
+        "python -I -c" in verifier,
+        "full literal path, no variable" in verifier,
+        "backslashes out of the heredoc body" in verifier,
+    ),
+    (True,) * 4,
+)
+check(
+    "D18 the rules send a number that decides something to result-verifier first",
+    "`result-verifier`" in rules and "independent recount" in rules,
+    True,
 )
 
 # ---- devenv-v1-2 step 6: reviewers called the Write tool they do not have (16 times, 13
