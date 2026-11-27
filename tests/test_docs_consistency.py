@@ -206,6 +206,44 @@ check(
     ),
     (True, False, True, True, True, False),
 )
+# ---------------------------------------------------------------- /watch-job (c80-followup step 6)
+# The user asked "확인해봐" about 14 times while long measurements ran unwatched.
+watch_file = REPO / "skills" / "watch-job" / "SKILL.md"
+watch = watch_file.read_text(encoding="utf-8") if watch_file.is_file() else ""
+watch_front = re.match(r"---\n(.*?)\n---\n", watch, re.DOTALL)
+watch_meta = watch_front.group(1) if watch_front else ""
+check(
+    "D19 /watch-job is there and registered, its description ends with when not to use "
+    "it, it keeps the gate in the foreground, names a finish condition with the failure "
+    "states, and wakes by a background wait, Monitor or /loop",
+    (
+        bool(re.search(r"^name: watch-job$", watch_meta, re.MULTILINE)),
+        # the last sentence of the description is the one that says when not to use it
+        bool(
+            re.search(
+                r"^description: .*\.\s*Not for\b[^.]*gate[^\n]*\.$",
+                watch_meta,
+                re.MULTILINE,
+            )
+        )
+        and not re.search(
+            r"\bNot for\b[^\n]*\.\s+[A-Z][^\n]*$", watch_meta, re.MULTILINE
+        ),
+        bool(
+            re.search(
+                r"^\| `/watch-job` \|",
+                (REPO / "skills" / "SKILLS.md").read_text(encoding="utf-8"),
+                re.MULTILINE,
+            )
+        ),
+        "gate runs in the foreground" in watch,
+        "finish condition" in watch
+        and "Silence is not success" in watch
+        and all(w in watch for w in ("Traceback", "non-zero exit", "kill -0")),
+        all(w in watch for w in ("run_in_background", "Monitor", "/loop")),
+    ),
+    (True,) * 6,
+)
 # ---------------------------------------------------------------- /distill (2026-11-25)
 distill_file = REPO / "skills" / "distill" / "SKILL.md"
 distill = distill_file.read_text(encoding="utf-8") if distill_file.is_file() else ""
