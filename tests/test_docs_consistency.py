@@ -570,7 +570,8 @@ check(
 
 
 check(
-    "D8 the reviewing, researching and auditing agents name no model; the test runner does",
+    # c80-followup step 4: the test runner no longer pins a cheaper model (capability first)
+    "D8 no agent names a model: each inherits the session's",
     {
         name: agent_model(name)
         for name in ("code-reviewer", "researcher", "security-auditor", "test-runner")
@@ -579,7 +580,7 @@ check(
         "code-reviewer": None,
         "researcher": None,
         "security-auditor": None,
-        "test-runner": "sonnet",
+        "test-runner": None,
     },
 )
 

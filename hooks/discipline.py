@@ -1714,14 +1714,20 @@ def flush_post_notes() -> None:
 OUTPUT_OBSERVE_MIN = 2000  # smaller outputs are not worth a row
 OUTPUT_ADVICE_DEFAULT = 8000  # initial prior; re-tune from output-size-observe.jsonl
 OUTPUT_ADVICE_NOTE = (
-    "[discipline] 방금 테스트·검사 명령의 출력이 {n}자였습니다(기준 {limit}자). 먼저 출력을 "
-    "줄이세요: 조용한 옵션(-q 등)을 쓰거나, 출력을 파일로 보낸 뒤 `tail`·`grep`으로 필요한 "
-    "부분만 보세요. 실패 진단이 길어지면 `test-runner` subagent에 맡기면 요약만 돌아옵니다. "
+    "[discipline] 앞의 테스트·검사 명령(게이트 아님)이 실패했고 출력이 {n}자였습니다(기준 "
+    "{limit}자). 먼저 출력을 줄이세요: 조용한 옵션(-q 등)을 쓰거나, 출력을 파일로 보낸 뒤 "
+    "`tail`·`grep`으로 필요한 부분만 보세요. 실패 진단이 길어지면 `test-runner` subagent에 "
+    "맡기면 요약만 돌아옵니다. "
     "(알림이며 차단이 아닙니다.)"
 )
 # devenv-v1-2 step 5: the hint was taken 0 times in 15 (session 2ea67f50); an initial prior,
 # re-tuned from the monitor's acceptance counts.
 MAX_TEST_ADVICE_PER_SESSION = 3
+# c80-followup step 4: the hint went out 32 times in session c80ac8d8, each time for a
+# passing run of the declared gate, which only the main session may run. It is said for a
+# failed test run that is not the gate. A PostToolUseFailure is not known to carry
+# additionalContext, so the failure prepares the note and the next PostToolUse says it.
+TEST_ADVICE_PENDING = "test_advice_note"
 
 
 OUTPUT_EXPLORE_NOTE = (
@@ -1762,7 +1768,7 @@ def is_test_run(command: object, dialect: str, gate: object) -> bool:
     gate, or one of its commands is a real runner. A command that cannot be parsed is not."""
     if not isinstance(command, str):
         return False
-    if isinstance(gate, str) and gate.strip() and gate.strip() in command:
+    if is_gate_run(command, gate):
         return True
     from shellparse import ParseError, parse
     from verification import is_runner
@@ -1776,6 +1782,33 @@ def is_test_run(command: object, dialect: str, gate: object) -> bool:
         )
     except ParseError:
         return False
+
+
+def is_gate_run(command: object, gate: object) -> bool:
+    """Whether a shell command contains the project's declared gate (pure)."""
+    return (
+        isinstance(command, str)
+        and isinstance(gate, str)
+        and bool(gate.strip())
+        and gate.strip() in command
+    )
+
+
+def take_test_advice_note(data: dict[str, Any], state: dict[str, Any]) -> None:
+    """The test-runner hint a failed test run prepared, said with a later tool result of
+    the main conversation in the same turn (review 1: a note of an earlier turn is
+    dropped, it belongs to a request the user has moved on from). It counts against the
+    session cap when it is said, not when it is prepared (review 2)."""
+    if actor(data) != "main":
+        return
+    note = state.pop(TEST_ADVICE_PENDING, None)
+    if (
+        isinstance(note, dict)
+        and note.get("turn") == state.get("turn")
+        and isinstance(note.get("text"), str)
+    ):
+        state["test_advice_count"] = int(state.get("test_advice_count") or 0) + 1
+        add_post_note(note["text"])
 
 
 def note_output_size(
@@ -1798,24 +1831,28 @@ def note_output_size(
 
         cwd = str(data.get("cwd") or os.getcwd())
         dialect = "powershell" if data.get("tool_name") == "PowerShell" else "bash"
-        test = is_test_run(
-            (data.get("tool_input") or {}).get("command"),
-            dialect,
-            find_policy(os.path.join(cwd, "_")).get("gate"),
-        )
+        command = (data.get("tool_input") or {}).get("command")
+        gate = find_policy(os.path.join(cwd, "_")).get("gate")
+        test = is_test_run(command, dialect, gate)
         main = actor(data) == "main"
         limit = advice_threshold(os.environ.get("CLAUDE_OUTPUT_ADVICE_CHARS"))
         # one output hint per turn, whichever kind comes first
-        advise = (
-            main and not failed and state.get("output_advice_turn") != state.get("turn")
-        )
+        advise = main and state.get("output_advice_turn") != state.get("turn")
         given = int(state.get("test_advice_count") or 0)
-        if advise and test and size >= limit:
-            if given < MAX_TEST_ADVICE_PER_SESSION:
+        if test:
+            if (
+                advise
+                and failed
+                and size >= limit
+                and not is_gate_run(command, gate)
+                and given < MAX_TEST_ADVICE_PER_SESSION
+            ):
                 state["output_advice_turn"] = state.get("turn") or 0
-                state["test_advice_count"] = given + 1
-                add_post_note(OUTPUT_ADVICE_NOTE.format(n=size, limit=limit))
-        elif advise and not test and (size >= limit or persisted):
+                state[TEST_ADVICE_PENDING] = {
+                    "turn": state.get("turn"),
+                    "text": OUTPUT_ADVICE_NOTE.format(n=size, limit=limit),
+                }
+        elif advise and not failed and (size >= limit or persisted):
             # v1.1 step 3: a wide search or a long read in the main conversation
             state["output_advice_turn"] = state.get("turn") or 0
             add_post_note(
@@ -2187,6 +2224,7 @@ def on_post(data: dict[str, Any], state: dict[str, Any]) -> None:
     tool = data.get("tool_name", "")
     ti = data.get("tool_input", {}) or {}
     now = time.time()
+    take_test_advice_note(data, state)
     if tool == "Skill":
         note_skill_use(data, state, now)
     elif tool.startswith("mcp__"):

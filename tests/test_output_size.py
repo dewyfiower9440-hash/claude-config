@@ -160,23 +160,90 @@ def rows(home: Path = HOME) -> list[dict]:
 
 
 TEST = "uv run pytest -q"
+
+
+def failed_then_next(
+    s: str,
+    command: str,
+    size: int,
+    env: dict = ENV,
+    prompt_id: str = "p1",
+    agent_id: str | None = None,
+    agent_type: str | None = None,
+) -> tuple[int, str]:
+    """A failed shell command with a large output, then the next (small) shell result:
+    what the failure event printed (rc) and what the next PostToolUse said. A failure
+    event carries no additionalContext (not verified for PostToolUseFailure), so the
+    hint the failure prepared comes with the next tool result (too small to be observed)."""
+    who = {"agent_id": agent_id, "agent_type": agent_type} if agent_id else {}
+    rc, said_at_failure = shell(
+        s, command, size, mode="fail", env=env, prompt_id=prompt_id, **who
+    )
+    assert said_at_failure == "", said_at_failure
+    _, said = shell(s, "git status", 10, env=env, prompt_id=prompt_id, **who)
+    return rc, said
+
+
+# c80-followup step 4: the hint went out 32 times in session c80ac8d8, every time for a
+# passing run of the declared gate, which the main session must run itself. It now goes
+# out only for a failed test run that is not the gate.
 s = uuid.uuid4().hex
 hook("prompt", s, prompt="work")
 rc, said = shell(s, TEST, 9000)
 check(
-    "O-T4 a large test run: a hint with the size, one row observed",
-    (rc, HINT in said, "9000" in said or "9,000" in said, len(rows())),
-    (0, True, True, 1),
+    "O-T4 a large passing test run: no hint, one row observed",
+    (rc, HINT in said, len(rows())),
+    (0, False, 1),
 )
-rc, said = shell(s, TEST, 9000)
+rc, said = failed_then_next(s, TEST, 9000)
 check(
-    "O-T5 again in the same turn: no second hint, a second row",
+    "O-T4b a large failed test run (no gate): the hint with the size at the next result",
+    (rc, HINT in said, "9000" in said or "9,000" in said, len(rows())),
+    (0, True, True, 2),
+)
+rc, said = failed_then_next(s, TEST, 9000)
+check(
+    "O-T5 again in the same turn: no second hint, a third row",
     (HINT in said, len(rows())),
-    (False, 2),
+    (False, 3),
 )
 hook("prompt", s, prompt_id="p2", prompt="next")
-rc, said = shell(s, TEST, 9000, prompt_id="p2")
+rc, said = failed_then_next(s, TEST, 9000, prompt_id="p2")
 check("O-T6 in the next turn: the hint again", HINT in said, True)
+hook("prompt", s, prompt_id="p2g", prompt="next")
+rc, said = failed_then_next(s, f"cd {PROJ} && {GATE}", 9000, prompt_id="p2g")
+check("O-T6b a large failed run of the declared gate: no hint", HINT in said, False)
+rc, said = shell(s, f"cd {PROJ} && {GATE}", 9000, prompt_id="p2g")
+check("O-T6c a large passing run of the declared gate: no hint", HINT in said, False)
+hook("prompt", s, prompt_id="p2s", prompt="next")
+rc, said = failed_then_next(s, TEST, 7999, prompt_id="p2s")
+check("O-T6d a failed test run just below the threshold: no hint", HINT in said, False)
+rc, said = failed_then_next(
+    s, TEST, 9000, prompt_id="p2s", agent_id="t9", agent_type="general-purpose"
+)
+check("O-T6e a failed test run inside a subagent: no hint", HINT in said, False)
+# (review 1) a note prepared by the last call of a turn is not said in the next turn
+hook("prompt", s, prompt_id="p2t", prompt="next")
+shell(s, TEST, 9000, prompt_id="p2t", mode="fail")
+hook("prompt", s, prompt_id="p2u", prompt="next")
+rc, said = shell(s, "cat docs/plans/big.md", 9000, prompt_id="p2u")
+check(
+    "O-T6f a note prepared in one turn, the next turn's large read: only the Explore hint",
+    (HINT in said, EXPLORE in said),
+    (False, True),
+)
+# (review 3) the main conversation's note waits for the main conversation's next result
+hook("prompt", s, prompt_id="p2v", prompt="next")
+shell(s, TEST, 9000, prompt_id="p2v", mode="fail")
+_, by_sub = shell(
+    s, "git status", 10, prompt_id="p2v", agent_id="t8", agent_type="general-purpose"
+)
+_, by_main = shell(s, "git status", 10, prompt_id="p2v")
+check(
+    "O-T6g the main conversation's note: not with a subagent's result, then with the main's",
+    (HINT in by_sub, HINT in by_main),
+    (False, True),
+)
 
 s = uuid.uuid4().hex
 hook("prompt", s, prompt="work")
@@ -207,7 +274,7 @@ check(
 rc, said = shell(s, "cat docs/plans/big.md", 9000)
 check("O-T8b a second large output in the same turn: no second hint", said, "")
 hook("prompt", s, prompt_id="p3", prompt="next")
-rc, said = shell(s, TEST, 9000, prompt_id="p3")
+rc, said = failed_then_next(s, TEST, 9000, prompt_id="p3")
 rc, said = shell(s, "cat docs/plans/big.md", 9000, prompt_id="p3")
 check(
     "O-T8c one output hint per turn: after the test-runner hint, no Explore hint",
@@ -283,7 +350,7 @@ HOME2 = ROOT / "home2"
 BROKEN = dict(ENV, CLAUDE_DISCIPLINE_HOME=str(HOME2))
 s = uuid.uuid4().hex
 hook("prompt", s, BROKEN, prompt="work")
-rc, said = shell(s, TEST, 9000, env=BROKEN)
+rc, said = failed_then_next(s, TEST, 9000, env=BROKEN)
 check(
     "O-T12 an observation that cannot be written: the hint still comes, exit code 0",
     (rc, HINT in said),
@@ -292,7 +359,7 @@ check(
 LOW = dict(ENV, CLAUDE_OUTPUT_ADVICE_CHARS="2500")
 s = uuid.uuid4().hex
 hook("prompt", s, LOW, prompt="work")
-rc, said = shell(s, TEST, 3000, env=LOW)
+rc, said = failed_then_next(s, TEST, 3000, env=LOW)
 check("O-T3 a configured threshold is used by the hook", HINT in said, True)
 
 # devenv-v1-2 step 5: the test-runner hint was taken 0 times in 15; at most 3 per session,
@@ -302,7 +369,7 @@ said_per_turn: list[bool] = []
 first = ""
 for n in range(1, 5):
     hook("prompt", s, prompt_id=f"c{n}", prompt="next")
-    rc, said = shell(s, TEST, 9000, prompt_id=f"c{n}")
+    rc, said = failed_then_next(s, TEST, 9000, prompt_id=f"c{n}")
     said_per_turn.append(HINT in said)
     if n == 1:
         first = said
@@ -325,7 +392,7 @@ rc, said = shell(s, "git log --stat", 9000, prompt_id="c5")
 check("O-T13c the cap does not touch the Explore hint", EXPLORE in said, True)
 before = len(rows())
 hook("prompt", s, prompt_id="c6", prompt="next")
-rc, said = shell(s, TEST, 9000, prompt_id="c6")
+rc, said = shell(s, TEST, 9000, prompt_id="c6", mode="fail")
 check("O-T13d over the cap, the output is still observed", len(rows()) - before, 1)
 
 for p in (ROOT, PROJ):
