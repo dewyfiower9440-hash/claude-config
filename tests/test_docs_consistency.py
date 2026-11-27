@@ -206,6 +206,41 @@ check(
     ),
     (True, False, True, True, True, False),
 )
+# ---------------------------------------------------------------- the call map (c80-followup step 9)
+import session_context
+
+# (review 1) judged on what the hook injects, not on the whole line: a ". " early in the
+# mapping or a mapping over the bound would cut it without notice
+call_line = session_context.call_map(rules)
+check(
+    "D20 the injected call map is the whole first sentence (within its bound, not cut)",
+    (bool(call_line), call_line.endswith("…"), call_line.endswith("`code-reviewer`.")),
+    (True, False, True),
+)
+called_skills = sorted(set(re.findall(r"`/([a-z-]+)`", call_line)))
+called_agents = sorted(
+    set(re.findall(r"`([a-z][a-z-]*)`", call_line))
+    & {p.stem for p in (REPO / "agents").glob("*.md")}
+)
+check(
+    "D20 the rules carry one situation -> call line, and every skill and agent it names exists",
+    (
+        bool(call_line),
+        [s for s in called_skills if not (REPO / "skills" / s / "SKILL.md").is_file()],
+        sorted({"commit", "debug", "plan", "watch-job"} - set(called_skills)),
+        sorted(
+            {
+                "code-reviewer",
+                "researcher",
+                "result-verifier",
+                "security-auditor",
+                "test-runner",
+            }
+            - set(called_agents)
+        ),
+    ),
+    (True, [], [], []),
+)
 # ---------------------------------------------------------------- /watch-job (c80-followup step 6)
 # The user asked "확인해봐" about 14 times while long measurements ran unwatched.
 watch_file = REPO / "skills" / "watch-job" / "SKILL.md"

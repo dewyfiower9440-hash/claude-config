@@ -345,8 +345,45 @@ def fit_checklist(steps: tuple[str, ...], budget: int) -> list[str]:
     return out
 
 
+CALL_MAP_PREFIX = "- Situation → call:"
+CALL_MAP_CHARS = (
+    700  # the first sentence of that line; the rest of the cap is the plan's
+)
+
+
+def call_map(rules: str) -> str:
+    """The first sentence of the rules' situation -> call line (pure): what to call when,
+    said again after a compaction (c80-followup step 9). "" when the rules have no such
+    line."""
+    line = next((ln for ln in rules.splitlines() if ln.startswith(CALL_MAP_PREFIX)), "")
+    if not line:
+        return ""
+    end = line.find(". ")
+    sentence = line if end < 0 else line[: end + 1]
+    if len(sentence) > CALL_MAP_CHARS:
+        sentence = sentence[: CALL_MAP_CHARS - 1] + "…"
+    return sentence
+
+
+def call_map_note(data: dict[str, object]) -> str:
+    """After a compaction, the call map of the global rules (CLAUDE.md of the config
+    home); "" otherwise, and when the file cannot be read."""
+    if data.get("source") != "compact":
+        return ""
+    home = Path(os.environ.get("CLAUDE_CONFIG_HOME") or Path.home() / ".claude")
+    try:
+        text = (home / "CLAUDE.md").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return call_map(text)
+
+
 def build_context(
-    source: str, git: GitInfo, plan: PlanInfo | None, notes: tuple[str, ...] = ()
+    source: str,
+    git: GitInfo,
+    plan: PlanInfo | None,
+    notes: tuple[str, ...] = (),
+    calls: str = "",
 ) -> str:
     head: list[str] = [HEADER, DATA_NOTE]
     if source == "compact" and plan:
@@ -359,6 +396,8 @@ def build_context(
             "컨텍스트가 compact 되었습니다. 진행 중이던 작업은 아래 git 상태와 "
             "대화 요약을 기준으로 다시 확인한 뒤 재개하세요(파일을 다시 읽고 판단)."
         )
+    if calls:
+        head.append(f"호출 규칙(글로벌 규칙 §8, compact 뒤 다시 알림): {clean(calls)}")
 
     status = quoted(git.status[:STATUS_LINES])
     if len(git.status) > STATUS_LINES:
@@ -693,7 +732,9 @@ def main() -> None:
             *usage_notes(data),
             *recurrence_notes(data, root),
         )
-        context = build_context(str(data.get("source", "")), info, plan, notes)
+        context = build_context(
+            str(data.get("source", "")), info, plan, notes, call_map_note(data)
+        )
     elif in_work_tree(cwd):
         return  # a repository git could not read (missing, slow, refused): say nothing
     else:

@@ -131,6 +131,60 @@ check(
     True,
 )
 
+# ---- c80-followup step 9: the rules' situation -> call line again after a compaction
+CALLS = (
+    "- Situation → call: commit → `/commit`; bug → `/debug`; long job → `/watch-job`."
+)
+rules_home = ROOT / "rules-home"
+write(
+    rules_home / "CLAUDE.md",
+    f"# Rules\n\n## 8. Skills\n{CALLS} The tail sentence stays home.\n- Other: x\n",
+)
+ctx_rc = run_hook(repo, source="compact", config=rules_home)
+check(
+    "K-T1 compact: the first sentence of the situation -> call line comes along, not "
+    "the rest of that line nor the next",
+    (
+        "`/watch-job`." in ctx_rc,
+        "tail sentence" in ctx_rc,
+        "Other: x" in ctx_rc,
+        "다시 읽" in ctx_rc,
+    ),
+    (True, False, False, True),
+)
+check(
+    "K-T2 startup, resume and clear: not repeated (the rules were just loaded)",
+    [
+        "`/watch-job`" in run_hook(repo, source=src, config=rules_home)
+        for src in ("startup", "resume", "clear")
+    ],
+    [False, False, False],
+)
+bare_home = ROOT / "rules-bare"
+write(bare_home / "CLAUDE.md", "# Rules\n\n- nothing of the kind\n")
+check(
+    "K-T3 rules without the line, or no rules file: the rest is as before",
+    [
+        ("Situation" in c, "다시 읽" in c)
+        for c in (
+            run_hook(repo, source="compact", config=bare_home),
+            run_hook(repo, source="compact", config=ROOT / "rules-none"),
+        )
+    ],
+    [(False, True), (False, True)],
+)
+long_home = ROOT / "rules-long"
+write(long_home / "CLAUDE.md", "- Situation → call: " + "x → `/y`; " * 400 + "\n")
+ctx_long = run_hook(repo, source="compact", config=long_home)
+check(
+    "K-T4 an overlong line is cut to its bound; the plan checklist still fits",
+    (
+        len(max(ctx_long.splitlines(), key=len)) <= 800,
+        "- [ ] 2. second step pending" in ctx_long,
+    ),
+    (True, True),
+)
+
 # ---- newest in-progress plan wins
 newer = repo / "docs" / "plans" / "2026-11-04-newer.md"
 write(newer, PLAN.format(status="in-progress", title="Newer", goal="Newer goal."))
