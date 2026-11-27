@@ -21,6 +21,8 @@ sys.stdout.reconfigure(errors="backslashreplace")
 HERE = Path(__file__).resolve().parent
 HOOKS = HERE.parent / "hooks"
 ROOT = Path(tempfile.mkdtemp(prefix="usage-"))
+# The SessionStart hook lists the vault's knowledge notes: never this machine's real ones.
+os.environ["CLAUDE_VAULT_KNOWLEDGE"] = "0"
 os.environ["CLAUDE_USAGE_FILE"] = str(ROOT / "usage.json")
 sys.path.insert(0, str(HOOKS))
 import usage

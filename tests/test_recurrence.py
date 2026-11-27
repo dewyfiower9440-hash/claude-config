@@ -25,6 +25,8 @@ HOOKS = HERE.parent / "hooks"
 # tests/ as before); alone, tests/ itself.
 TMP_ROOT = Path(os.environ.get("GATE_TMP_ROOT") or Path(__file__).resolve().parent)
 ROOT = TMP_ROOT / "_tmp_recurrence"
+# The SessionStart hook lists the vault's knowledge notes: never this machine's real ones.
+os.environ["CLAUDE_VAULT_KNOWLEDGE"] = "0"
 # Under the gate every run has a folder of its own (run_all.GATE_WORK_ROOT); alone, as before.
 WORK_ROOT = Path(os.environ.get("GATE_WORK_ROOT", "C:/dev"))
 PROJ = WORK_ROOT / "_recur_proj"

@@ -22,6 +22,8 @@ sys.stdout.reconfigure(errors="backslashreplace")
 HERE = Path(__file__).resolve().parent
 HOOKS = HERE.parent / "hooks"
 ROOT = Path(tempfile.mkdtemp(prefix="redact-"))
+# The SessionStart hook lists the vault's knowledge notes: never this machine's real ones.
+os.environ["CLAUDE_VAULT_KNOWLEDGE"] = "0"
 os.environ["CLAUDE_HANDOFF_HOME"] = str(ROOT / "store")
 os.environ["CLAUDE_LEDGER_HOME"] = str(ROOT / "ledger")
 os.environ["CLAUDE_STATE_GC_DIR"] = str(ROOT / "gc" / "claude-discipline")
