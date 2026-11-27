@@ -459,6 +459,23 @@ check(
     ),
     (True, True),
 )
+# c80-followup step 2: /implement said "(`/commit` conventions)" and the session committed
+# directly ~15 times after the one hint; bugs found mid-step never went to /debug.
+check(
+    "D16 /implement commits through Skill(commit), sends a bug found mid-step to "
+    "Skill(debug), and runs security-auditor for network, input and scheduled-job changes",
+    (
+        "Skill(commit)" in skill["implement"],
+        "(`/commit` conventions)" not in skill["implement"],
+        "Skill(debug)" in skill["implement"],
+        all(
+            word in skill["implement"]
+            for word in ("network calls", "external input", "scheduled jobs")
+        ),
+        "before the plan is closed" in skill["implement"],
+    ),
+    (True, True, True, True, True),
+)
 check(
     "D6 /debug says what to do when the layer has no test harness",
     "no test harness" in skill["debug"] and "회귀 테스트 없음" in skill["debug"],
