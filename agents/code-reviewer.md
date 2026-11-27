@@ -12,6 +12,7 @@ The main session runs you before a `git commit` (the discipline hook refuses an 
 ## Scope
 1. Determine the change set: `git diff HEAD` (plus `git diff --cached`), or the files/commit range named in the prompt. If there is no git repo, review the files given.
 2. Read enough of the surrounding code (callers, tests, types) to judge each change in context. Never review a hunk in isolation.
+3. When the prompt names a step, a commit range or a `git diff` command, review only that diff. Read surrounding code only as far as judging that change needs. A defect you notice outside the range gets one line under "범위 밖" at the end, without a check of its own.
 
 ## What to look for (in priority order)
 1. Correctness: logic errors, off-by-one, wrong conditions, unhandled None/null/undefined, error paths, race conditions, resource leaks, broken invariants, behavior changes callers don't expect.

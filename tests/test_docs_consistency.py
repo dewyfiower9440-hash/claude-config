@@ -476,6 +476,19 @@ check(
     ),
     (True, True, True, True, True),
 )
+# c80-followup step 3: 18 reviews, four of them over 60 minutes, each over the whole tree.
+reviewer_text = (REPO / "agents" / "code-reviewer.md").read_text(encoding="utf-8")
+check(
+    "D17 the reviewer keeps to the diff the prompt names, and /implement and /commit name "
+    "that diff in the prompt",
+    (
+        "review only that diff" in reviewer_text,
+        "outside the range" in reviewer_text,
+        "name the step's diff in the prompt" in skill["implement"],
+        "name the diff in the prompt" in commit_skill,
+    ),
+    (True, True, True, True),
+)
 check(
     "D6 /debug says what to do when the layer has no test harness",
     "no test harness" in skill["debug"] and "회귀 테스트 없음" in skill["debug"],
